@@ -510,6 +510,8 @@ impl StartMenu {
         }
         self.closing = true;
         self.anim_last = None;
+        // When it started to go: a Toggle soon after is the click that closed it.
+        self.hidden_at = Instant::now();
         // The ticks end it; this is for the day they stop coming.
         Task::perform(tokio::time::sleep(Duration::from_millis(500)), |()| {
             cosmic::action::app(Message::HideNow)

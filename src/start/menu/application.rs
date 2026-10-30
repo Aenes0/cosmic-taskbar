@@ -136,21 +136,18 @@ impl cosmic::Application for StartMenu {
     fn update(&mut self, message: Message) -> app::Task<Message> {
         match message {
             Message::Toggle => {
-                if self.surface.is_some() {
-                    // Pressed again while sliding out: it comes back.
-                    if self.closing {
+                match toggle_action(self.surface.is_some(), self.closing, self.hidden_at.elapsed()) {
+                    ToggleAction::Hide => return self.hide(),
+                    ToggleAction::Show => return self.show(),
+                    ToggleAction::Reopen => {
                         self.closing = false;
                         self.anim_last = None;
-                        return Task::none();
                     }
-                    return self.hide();
+                    // The click on the Start button that took the keyboard from
+                    // the menu, and closed it, meant to close it.
+                    ToggleAction::Ignore => {}
                 }
-                // The click on the Start button that took the keyboard from
-                // the menu, and closed it, meant to close it.
-                if self.hidden_at.elapsed() < Duration::from_millis(300) {
-                    return Task::none();
-                }
-                return self.show();
+                return Task::none();
             }
             Message::Hide => return self.hide(),
             Message::Tools => {
@@ -633,5 +630,62 @@ impl cosmic::Application for StartMenu {
         root.extend(self.ghost());
         root.extend(self.resize_cover(id));
         iced::widget::stack(root).into()
+    }
+}
+
+/// How long after a close started a Toggle still counts as the click that
+/// closed it: pressing the Start button takes the keyboard from the open menu
+/// (which closes it) and then, by D-Bus, asks to toggle.
+const CLICK_THAT_CLOSED: Duration = Duration::from_millis(300);
+
+#[derive(Debug, PartialEq, Eq)]
+enum ToggleAction {
+    Show,
+    Hide,
+    /// Pressed again while sliding out, a while after it started: it comes back.
+    Reopen,
+    /// The click that closed it, arriving after the fact.
+    Ignore,
+}
+
+/// What a Toggle does, given whether the menu is open, whether it is sliding
+/// out, and how long ago it started to close.
+fn toggle_action(open: bool, closing: bool, since_close: Duration) -> ToggleAction {
+    match (open, closing) {
+        (true, false) => ToggleAction::Hide,
+        (true, true) if since_close < CLICK_THAT_CLOSED => ToggleAction::Ignore,
+        (true, true) => ToggleAction::Reopen,
+        (false, _) if since_close < CLICK_THAT_CLOSED => ToggleAction::Ignore,
+        (false, _) => ToggleAction::Show,
+    }
+}
+
+#[cfg(test)]
+mod toggle_tests {
+    use super::*;
+
+    const SOON: Duration = Duration::from_millis(50);
+    const LATER: Duration = Duration::from_millis(900);
+
+    #[test]
+    fn an_open_menu_is_hidden_by_a_toggle() {
+        assert_eq!(toggle_action(true, false, LATER), ToggleAction::Hide);
+    }
+
+    #[test]
+    fn the_start_button_click_that_closed_the_menu_does_not_reopen_it() {
+        // Unfocused started the close; the button's Toggle arrives while it slides out.
+        assert_eq!(toggle_action(true, true, SOON), ToggleAction::Ignore);
+    }
+
+    #[test]
+    fn pressing_again_a_while_into_the_slide_out_brings_it_back() {
+        assert_eq!(toggle_action(true, true, LATER), ToggleAction::Reopen);
+    }
+
+    #[test]
+    fn a_closed_menu_shows_unless_the_click_just_closed_it() {
+        assert_eq!(toggle_action(false, false, LATER), ToggleAction::Show);
+        assert_eq!(toggle_action(false, false, SOON), ToggleAction::Ignore);
     }
 }
