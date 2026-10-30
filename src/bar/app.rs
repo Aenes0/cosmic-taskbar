@@ -599,15 +599,12 @@ const PREVIEW_MAX_H: f32 = 150.0;
 const PREVIEW_LIFT: f32 = 0.03;
 const PREVIEW_RADIUS: f32 = 10.0;
 const PREVIEW_BADGE: f32 = 30.0;
-const PREVIEW_LABEL_H: f32 = 48.0;
-const PREVIEW_LABEL_MAX_W: f32 = 420.0;
 static PREVIEW_AUTOSIZE_ID: std::sync::LazyLock<iced::id::Id> =
     std::sync::LazyLock::new(|| iced::id::Id::new("taskbar-preview-autosize"));
 
-/// A narrow (portrait) window's card is at least this wide, so its title has
-/// room and the card is not a sliver under the pointer.
-const PREVIEW_MIN_CARD_W: f32 = 150.0;
-const PREVIEW_PANEL_PAD: f32 = 5.0;
+/// The pictures sit close: every pixel of the popup that draws nothing is a
+/// place the software renderer showed noise in, so there is none to spare.
+const PREVIEW_PANEL_PAD: f32 = 2.0;
 const PREVIEW_PANEL_GAP: f32 = 6.0;
 
 /// The picture's size, fitted by the window's own shape.
@@ -648,9 +645,9 @@ fn label_layout(title: &str, width: f32) -> (f32, u16) {
     }
 }
 
-/// The width a window's card takes in the row.
+/// The width a window's card takes in the row: its picture's.
 fn preview_card_width(img: Option<&WaylandImage>) -> f32 {
-    preview_picture_size(img).0.max(PREVIEW_MIN_CARD_W)
+    preview_picture_size(img).0
 }
 
 /// `t` (0 to 1) is how far the preview has faded in, `lift` how far this card has grown.
@@ -658,6 +655,7 @@ fn toplevel_button<'a>(
     img: Option<&WaylandImage>,
     app_icon: icon::Handle,
     handle: ExtForeignToplevelHandleV1,
+    title: String,
     is_hovered: bool,
     t: f32,
     lift: f32,
@@ -701,18 +699,13 @@ fn toplevel_button<'a>(
                     radius: PREVIEW_RADIUS.into(),
                     ..Default::default()
                 },
-                shadow: iced::Shadow {
-                    color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.30 * t),
-                    offset: iced::Vector::new(0.0, 3.0),
-                    blur_radius: 10.0,
-                },
                 ..Default::default()
             }
         }));
 
     // The app's icon on the picture's lower right corner, as on macOS; it has
     // no alpha, so it shows once the card is mostly in.
-    let badge: Element<_> = if t > 0.6 {
+    let badge: Element<_> = if t > 0.6 && !is_hovered {
         container(icon::icon(app_icon).size(PREVIEW_BADGE as u16))
             .width(Length::Fill)
             .height(Length::Fill)
@@ -739,21 +732,52 @@ fn toplevel_button<'a>(
     } else {
         horizontal_space().width(Length::Shrink).into()
     };
+    // The window's title, over the picture's foot, only while the pointer is
+    // on it (it takes the app icon's place there): nothing is reserved for it.
+    let caption: Element<_> = if is_hovered && !title.trim().is_empty() {
+        let (size, lines) = label_layout(&title, pw - 2.0 * 6.0 - 2.0 * 8.0);
+        let ink = theme::active().cosmic().on_bg_color();
+        container(
+            container(
+                text(title)
+                    .size(size)
+                    .line_height(1.2)
+                    .class(theme::Text::Color(ink.into()))
+                    .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(lines as usize))),
+            )
+            .padding([4, 8])
+            .class(Container::custom(|theme: &cosmic::Theme| {
+                let mut base: iced::Color = theme.cosmic().background(theme.transparent).base.into();
+                base.a = 1.0;
+                container::Style {
+                    background: Some(Background::Color(base)),
+                    border: Border {
+                        radius: 8.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            })),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(6)
+        .align_x(Alignment::Start)
+        .align_y(Alignment::End)
+        .into()
+    } else {
+        horizontal_space().width(Length::Shrink).into()
+    };
     let centered = container(frame)
         .width(Length::Fixed(box_w))
         .height(Length::Fixed(box_h))
         .center_x(Length::Fixed(box_w))
         .center_y(Length::Fixed(box_h));
-    let card = container(iced::widget::stack![centered, close, badge])
+    let card = container(iced::widget::stack![centered, close, badge, caption])
         .width(Length::Fixed(box_w))
         .height(Length::Fixed(box_h));
 
-    // A narrow picture sits in the middle of a card of the minimum width.
-    let outer = container(card)
-        .width(Length::Fixed(preview_card_width(img)))
-        .center_x(Length::Fixed(preview_card_width(img)));
-    outer
-        .apply(button::custom)
+    card.apply(button::custom)
         .on_press(Message::Toggle(handle.clone()))
         .class(preview_card_style())
         .padding(0)
@@ -1876,6 +1900,7 @@ impl cosmic::Application for Taskbar {
                             img.as_ref(),
                             app_icon.clone(),
                             info.foreign_toplevel.clone(),
+                            info.title.clone(),
                             self.is_hovered(&info.foreign_toplevel),
                             fade,
                             self.lift_of(&info.foreign_toplevel),
@@ -1900,94 +1925,10 @@ impl cosmic::Application for Taskbar {
                         PanelAnchor::Top => (iced::alignment::Vertical::Top, iced::alignment::Horizontal::Center),
                         PanelAnchor::Bottom => (iced::alignment::Vertical::Bottom, iced::alignment::Horizontal::Center),
                     };
-                    let glass_style = move |radius: f32, shadow: f32, strength: f32| {
-                        Container::custom(move |theme: &cosmic::Theme| {
-                            let cosmic = theme.cosmic();
-                            let mut base: iced::Color = cosmic.background(theme.transparent).base.into();
-                            base.a = 0.78 * fade * strength;
-                            container::Style {
-                                background: Some(Background::Color(base)),
-                                border: Border {
-                                    radius: radius.into(),
-                                    ..Default::default()
-                                },
-                                shadow: iced::Shadow {
-                                    color: iced::Color::from_rgba(0.0, 0.0, 0.0, shadow * fade * strength),
-                                    offset: iced::Vector::new(0.0, 8.0),
-                                    blur_radius: 28.0,
-                                },
-                                ..Default::default()
-                            }
-                        })
-                    };
-                    // A pill over the panel's upper left: the app's name, and the name of
-                    // the window under the pointer while there is one. Its room is always
-                    // kept, so the popup does not resize when it comes and goes.
-                    let hovered_title = self
-                        .hovered_toplevel
-                        .as_ref()
-                        .and_then(|h| toplevels.iter().find(|(i, _)| &i.foreign_toplevel == h))
-                        .map(|(i, _)| i.title.trim().to_owned())
-                        .filter(|t| !t.is_empty());
-                    let many = toplevels.len() > 1;
-                    // The label never goes past the cards: a wider one would widen the
-                    // popup and leave an empty strip the pointer could rest on.
-                    let content_w = toplevels
-                        .iter()
-                        .map(|(_, img)| preview_card_width(img.as_ref()))
-                        .sum::<f32>()
-                        + PREVIEW_PANEL_GAP * toplevels.len().saturating_sub(1) as f32
-                        + 2.0 * PREVIEW_PANEL_PAD;
-                    let label_alpha = if many {
-                        1.0
-                    } else {
-                        toplevels
-                            .iter()
-                            .map(|(i, _)| self.lift_of(&i.foreign_toplevel))
-                            .fold(0.0f32, f32::max)
-                            .clamp(0.0, 1.0)
-                    };
-                    let label = hovered_title
-                        .unwrap_or_else(|| desktop_info.full_name(&self.locales).unwrap_or_default().into_owned());
-                    let name_color = {
-                        let mut c: iced::Color = theme::active().cosmic().on_bg_color().into();
-                        c.a *= fade * label_alpha;
-                        c
-                    };
-                    let pill_w = content_w.min(PREVIEW_LABEL_MAX_W);
-                    // Room for the text: the pill less its padding and the little icon.
-                    let (label_size, label_lines) = label_layout(&label, pill_w - 24.0 - 28.0);
-                    let pill = container(
-                        row![
-                            if fade * label_alpha > 0.6 {
-                                Element::from(icon::icon(app_icon.clone()).size(20))
-                            } else {
-                                horizontal_space().width(Length::Fixed(20.0)).into()
-                            },
-                            text(label)
-                                .size(label_size)
-                                .line_height(1.25)
-                                .class(theme::Text::Color(name_color))
-                                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(label_lines as usize))),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    )
-                    .max_width(pill_w)
-                    .padding([6, 12])
-                    .class(glass_style(16.0, 0.25, label_alpha));
-                    let label_row = container(pill)
-                        .height(Length::Fixed(PREVIEW_LABEL_H))
-                        .align_x(Alignment::Start)
-                        .align_y(Alignment::Start);
-                    // One window: its picture alone, the label only under the pointer;
-                    // two or more: the glass panel, the label always.
-                    let panel: Element<_> = if many {
-                        container(content).class(glass_style(15.0, 0.35, 1.0)).into()
-                    } else {
-                        content
-                    };
-                    let stack: Element<_> = column![label_row, panel].spacing(2).into();
+                    // Only the pictures: nothing reserved for a title, no panel behind
+                    // them, nothing translucent. Every pixel of the popup that draws
+                    // nothing is a place the software renderer showed noise in.
+                    let stack: Element<_> = content;
                     mouse_area(
                         cosmic::widget::autosize::autosize(
                             container(stack)
@@ -3216,12 +3157,12 @@ mod preview_size_tests {
     }
 
     #[test]
-    fn a_portrait_window_gets_a_card_of_the_minimum_width() {
+    fn a_portrait_card_is_as_wide_as_its_picture_with_nothing_empty_at_the_sides() {
         let tall = picture(1080, 1876);
         let (pw, ph) = preview_picture_size(Some(&tall));
-        assert!(pw < PREVIEW_MIN_CARD_W, "pw={pw}");
+        assert!(pw < 100.0, "pw={pw}");
         assert_eq!(ph, PREVIEW_MAX_H);
-        assert_eq!(preview_card_width(Some(&tall)), PREVIEW_MIN_CARD_W);
+        assert_eq!(preview_card_width(Some(&tall)), pw);
     }
 
     #[test]
@@ -3235,8 +3176,8 @@ mod preview_size_tests {
     }
 
     #[test]
-    fn no_picture_still_has_a_card_at_least_the_minimum() {
-        assert!(preview_card_width(None) >= PREVIEW_MIN_CARD_W);
+    fn no_picture_still_has_a_card() {
+        assert_eq!(preview_card_width(None), preview_picture_size(None).0);
     }
 
     #[test]
