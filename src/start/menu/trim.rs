@@ -4,17 +4,35 @@
 //! pages and the heap are handed back to the kernel with `MADV_PAGEOUT`.
 //! The content is preserved: pages come back through a page fault.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
-/// Extra wait after the 500 ms `Message::Trim` delay (about 10 s in total).
-const PAGEOUT_DELAY: Duration = Duration::from_millis(9500);
+/// Extra wait after the 500 ms `Message::Trim` delay (about 5 minutes in total):
+/// paging the menu out as soon as it hides made the next opening fault its
+/// memory back in, piece by piece, in front of the user.
+const PAGEOUT_DELAY: Duration = Duration::from_secs(300);
 
 /// Smallest range worth a syscall.
 const MIN_RANGE_LEN: usize = 64 * 1024;
 
 /// Bumped on every schedule so older threads notice and abort.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// When the menu last hid, in ms since the first call (see `now_ms`).
+static LAST_HIDE_MS: AtomicU64 = AtomicU64::new(0);
+/// A thread is already waiting out the delay: it reads `LAST_HIDE_MS` itself,
+/// so opening and closing the menu does not stack up sleeping threads.
+static PENDING: AtomicBool = AtomicBool::new(false);
+
+fn now_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// How much longer to wait for `delay_ms` to pass since the last hide.
+fn wait_left(last_hide_ms: u64, now_ms: u64, delay_ms: u64) -> u64 {
+    (last_hide_ms + delay_ms).saturating_sub(now_ms)
+}
 
 /// Parses one `/proc/self/maps` line into `(start, end)` when it is a
 /// private anonymous or heap read-write mapping.
@@ -76,22 +94,40 @@ fn run(generation: u64) {
     }
 }
 
-/// Schedules a pageout off the UI thread (CPU renderer only).
+/// Schedules a pageout off the UI thread (CPU renderer only), once the menu
+/// has stayed hidden for `PAGEOUT_DELAY`.
 pub(super) fn schedule() {
     if !crate::start::backend::is_cpu() {
         return;
     }
-    let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    LAST_HIDE_MS.store(now_ms(), Ordering::Relaxed);
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+    if PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
     let spawned = std::thread::Builder::new()
         .name("start-menu-pageout".into())
         .spawn(move || {
-            std::thread::sleep(PAGEOUT_DELAY);
+            loop {
+                let left = wait_left(
+                    LAST_HIDE_MS.load(Ordering::Relaxed),
+                    now_ms(),
+                    PAGEOUT_DELAY.as_millis() as u64,
+                );
+                if left == 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(left));
+            }
+            PENDING.store(false, Ordering::Release);
+            let generation = GENERATION.load(Ordering::Relaxed);
             let shown = super::WINDOWS_SHOWN.load(Ordering::Relaxed);
             if keep_going(generation, GENERATION.load(Ordering::Relaxed), shown) {
                 run(generation);
             }
         });
     if let Err(err) = spawned {
+        PENDING.store(false, Ordering::Release);
         tracing::warn!("could not spawn pageout thread: {err}");
     }
 }
@@ -101,6 +137,17 @@ mod tests {
     use super::*;
 
     const MIN: usize = 0x10000;
+
+    #[test]
+    fn the_wait_runs_from_the_last_hide_not_from_the_first() {
+        let delay = 300_000;
+        assert_eq!(wait_left(1_000, 1_000, delay), 300_000);
+        assert_eq!(wait_left(1_000, 100_000, delay), 201_000);
+        // Hid again later: the wait starts over.
+        assert_eq!(wait_left(250_000, 301_000, delay), 249_000);
+        assert_eq!(wait_left(1_000, 301_000, delay), 0);
+        assert_eq!(wait_left(1_000, 999_999, delay), 0);
+    }
 
     fn one(line: &str) -> Vec<(usize, usize)> {
         pageout_ranges(line, MIN)

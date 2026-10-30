@@ -40,6 +40,8 @@ impl cosmic::Application for StartMenu {
             anim: crate::start::anim::Spring::new(0.0),
             anim_last: None,
             closing: false,
+            ready: false,
+            recents_seen: false,
             apps_signature: None,
             apps: Arc::default(),
             recents: Vec::new(),
@@ -239,7 +241,8 @@ impl cosmic::Application for StartMenu {
                 self.anim_last = Some(now);
                 if self.closing {
                     self.anim.step(0.0, dt, crate::start::anim::CLOSE.0, crate::start::anim::CLOSE.1);
-                    if self.anim.pos < 0.03 {
+                    // Out of the screen but for a sliver of a few pixels.
+                    if self.anim.pos < 0.01 {
                         return self.finish_hide();
                     }
                 } else {
@@ -248,6 +251,9 @@ impl cosmic::Application for StartMenu {
                         self.anim = crate::start::anim::Spring::new(1.0);
                     }
                 }
+            }
+            Message::Ready => {
+                self.try_ready();
             }
             Message::HideNow => {
                 if self.closing {
@@ -268,6 +274,7 @@ impl cosmic::Application for StartMenu {
                     self.cancel_drag();
                 }
                 self.apps = apps;
+                self.try_ready();
                 // The theme or the apps changed: resolve anew.
                 self.window_icons.clear();
                 self.file_icons.clear();
@@ -285,7 +292,9 @@ impl cosmic::Application for StartMenu {
             }
             Message::Recents(recents) => {
                 self.recents = recents;
+                self.recents_seen = true;
                 self.refill_file_icons();
+                self.try_ready();
                 return self.remeasure();
             }
             Message::Windows(windows) => {
@@ -498,8 +507,8 @@ impl cosmic::Application for StartMenu {
             } else {
                 Subscription::none()
             },
-            if self.surface.is_some() && (self.closing || !self.anim.settled(1.0)) {
-                cosmic::iced::time::every(Duration::from_millis(8)).map(|_| Message::AnimTick)
+            if self.surface.is_some() && (self.closing || (self.ready && !self.anim.settled(1.0))) {
+                cosmic::iced::time::every(Duration::from_millis(16)).map(|_| Message::AnimTick)
             } else {
                 Subscription::none()
             },
@@ -540,6 +549,18 @@ impl cosmic::Application for StartMenu {
             .on_right_press(Message::Hide);
             return iced::widget::stack(vec![backdrop.into(), placed.into()]).into();
         }
+        // Not before its content is here: a menu that fills in as it slides
+        // looks built in front of you. Until then, only what closes it.
+        if !self.ready {
+            return widget::mouse_area(
+                widget::container(widget::space::horizontal())
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .on_press(Message::Hide)
+            .on_right_press(Message::Hide)
+            .into();
+        }
         let m = &self.metrics;
         let height = m.height;
 
@@ -563,13 +584,12 @@ impl cosmic::Application for StartMenu {
         if let Some(target) = &self.menu {
             layers.push(self.popup_menu(target, p, self.anchored().is_some()));
         }
-        let glass = crate::start::anim::glass_alpha(self.anim.pos);
         let menu = widget::container(iced::widget::stack(layers))
             .id(widget::Id::new(MENU_BODY))
             .width(Length::Fixed(m.width))
             .height(Length::Fixed(height))
             .class(theme::Container::custom(move |_| widget::container::Style {
-                background: Some(Background::Color(Color { a: p.bg.a * glass, ..p.bg })),
+                background: Some(Background::Color(p.bg)),
                 text_color: Some(p.text),
                 icon_color: Some(p.text),
                 border: iced::Border {
@@ -578,7 +598,7 @@ impl cosmic::Application for StartMenu {
                     color: p.border,
                 },
                 shadow: iced::Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.45 * glass),
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
                     offset: iced::Vector::new(0.0, 6.0),
                     blur_radius: MARGIN,
                 },
@@ -598,7 +618,9 @@ impl cosmic::Application for StartMenu {
         // the slide; until then, where the layout puts it.
         let placed: Element<'_, Message> = if self.room_width > 0.0 && self.room > 0.0 {
             let at = self.menu_rect();
-            let slide = crate::start::anim::slide_offset(self.anim.pos) * if self.on_top { -1.0 } else { 1.0 };
+            // All the way out of the surface: its height and the gap to its edge.
+            let travel = at.height + MARGIN;
+            let slide = crate::start::anim::slide_offset(self.anim.pos, travel) * if self.on_top { -1.0 } else { 1.0 };
             iced::widget::pin(menu).x(at.x).y(at.y + slide).into()
         } else {
             widget::container(menu)
@@ -687,5 +709,33 @@ mod toggle_tests {
     fn a_closed_menu_shows_unless_the_click_just_closed_it() {
         assert_eq!(toggle_action(false, false, LATER), ToggleAction::Show);
         assert_eq!(toggle_action(false, false, SOON), ToggleAction::Ignore);
+    }
+}
+
+/// How long the menu waits for its content before it shows anyway.
+const CONTENT_WAIT: Duration = Duration::from_millis(300);
+
+/// Whether the menu may start to show: the recent files have come and the
+/// apps are there (their icons come with them), or it has waited long enough.
+pub(super) fn content_ready(recents_seen: bool, apps_loaded: bool, waited: Duration) -> bool {
+    (recents_seen && apps_loaded) || waited >= CONTENT_WAIT
+}
+
+#[cfg(test)]
+mod ready_tests {
+    use super::*;
+
+    #[test]
+    fn it_waits_for_both_the_recents_and_the_apps() {
+        assert!(!content_ready(false, false, Duration::ZERO));
+        assert!(!content_ready(true, false, Duration::from_millis(50)));
+        assert!(!content_ready(false, true, Duration::from_millis(50)));
+        assert!(content_ready(true, true, Duration::from_millis(5)));
+    }
+
+    #[test]
+    fn it_does_not_wait_for_ever() {
+        assert!(content_ready(false, false, CONTENT_WAIT));
+        assert!(content_ready(false, true, Duration::from_secs(2)));
     }
 }

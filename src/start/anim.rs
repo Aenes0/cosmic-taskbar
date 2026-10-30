@@ -63,21 +63,17 @@ fn motion_scale_from(reduce: Option<&str>, duration_ms: Option<u32>) -> f32 {
     }
 }
 
-/// How far below its place the menu starts, in px.
-pub const SLIDE_PX: f32 = 36.0;
-
 /// Spring constants: the opening gives a little overshoot, the closing none.
 pub const OPEN: (f32, f32) = (380.0, 26.0);
 pub const CLOSE: (f32, f32) = (520.0, 46.0);
 
-/// The menu's offset below its place at spring position `pos` (0 = hidden, 1 = open).
-pub fn slide_offset(pos: f32) -> f32 {
-    (1.0 - pos) * SLIDE_PX
-}
-
-/// Opacity of the menu's glass at spring position `pos`.
-pub fn glass_alpha(pos: f32) -> f32 {
-    0.55 + 0.45 * pos.clamp(0.0, 1.0)
+/// The menu's offset from its place at spring position `pos` (0 = away,
+/// 1 = in place), when `travel` px is the way out of the screen: it slides as
+/// one piece, like a drawer, out past the edge of its surface (which ends at
+/// the panel), since a menu cannot fade as a whole and fading only its
+/// background left the icons and text behind.
+pub fn slide_offset(pos: f32, travel: f32) -> f32 {
+    (1.0 - pos) * travel
 }
 
 #[cfg(test)]
@@ -121,11 +117,11 @@ mod tests {
 
     #[test]
     fn slide_and_glass_follow_the_position() {
-        assert_eq!(slide_offset(1.0), 0.0);
-        assert_eq!(slide_offset(0.0), SLIDE_PX);
-        assert!(glass_alpha(0.0) < glass_alpha(1.0));
-        assert_eq!(glass_alpha(1.0), 1.0);
-        assert_eq!(glass_alpha(1.4), 1.0);
+        assert_eq!(slide_offset(1.0, 900.0), 0.0);
+        assert_eq!(slide_offset(0.0, 900.0), 900.0);
+        assert_eq!(slide_offset(0.5, 900.0), 450.0);
+        // A little past its place on the way in: a little the other way.
+        assert!(slide_offset(1.05, 900.0) < 0.0);
     }
 
     #[test]

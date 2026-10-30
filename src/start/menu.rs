@@ -277,6 +277,8 @@ pub enum Message {
     AnimTick,
     /// The closing animation's backstop: the surface goes now.
     HideNow,
+    /// The wait for the content is over: show what there is.
+    Ready,
     Recents(Vec<RecentFile>),
     Windows(Vec<Window>),
     WindowsReady(calloop::channel::Sender<Command>),
@@ -376,6 +378,10 @@ pub struct StartMenu {
     anim_last: Option<Instant>,
     /// The menu is sliding out; its surface goes when it is away.
     closing: bool,
+    /// The content is here and the menu may start to show.
+    ready: bool,
+    /// The recent files of this opening have come.
+    recents_seen: bool,
     /// The application folders as they were when the apps were read.
     apps_signature: Option<u64>,
     apps: Arc<Vec<AppEntry>>,
@@ -448,6 +454,8 @@ impl StartMenu {
         self.surface = Some(id);
         self.shown_at = Instant::now();
         self.closing = false;
+        self.ready = false;
+        self.recents_seen = false;
         self.anim_last = None;
         self.anim = crate::start::anim::Spring::new(if crate::start::anim::motion_scale() > 0.0 { 0.0 } else { 1.0 });
         self.query.clear();
@@ -497,7 +505,22 @@ impl StartMenu {
         });
         // The size does not wait for an event: ask it.
         let size = window::size(id).map(move |size| cosmic::Action::App(Message::Resized(id, size)));
-        Task::batch([surface, size, apps, recents, focus])
+        // However late the content is, the menu shows after this.
+        let ready = Task::perform(tokio::time::sleep(Duration::from_millis(300)), |()| {
+            cosmic::action::app(Message::Ready)
+        });
+        Task::batch([surface, size, apps, recents, focus, ready])
+    }
+
+    /// Starts the menu's showing once its content is here (or it waited enough).
+    fn try_ready(&mut self) {
+        if self.surface.is_some()
+            && !self.ready
+            && application::content_ready(self.recents_seen, !self.apps.is_empty(), self.shown_at.elapsed())
+        {
+            self.ready = true;
+            self.anim_last = None;
+        }
     }
 
     /// Closes the menu: it slides out first, then `finish_hide` takes the surface.
