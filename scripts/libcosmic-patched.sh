@@ -1,12 +1,12 @@
 #!/bin/bash
-# Builds the patched libcosmic that the start menu is compiled against.
+# Builds the patched libcosmic that cosmic-taskbar is compiled against.
 #
 # Usage:
 #   scripts/libcosmic-patched.sh [--force]
 #
-# The Cargo.toml of this repository points a [patch] at ../libcosmic-patched.
+# The Cargo.toml of this repository points a [patch] at .build/libcosmic-patched.
 # That directory is generated here, from:
-#   * a pristine libcosmic checkout at commit d4d71fd (the one Cargo.lock pins),
+#   * a pristine libcosmic checkout at commit 5a8bd94 (the one Cargo.lock pins),
 #     found in the cargo git checkouts (cloned from GitHub if cargo's garbage
 #     collector removed it), and
 #   * the patches in third_party/libcosmic-patches/*.patch (the source of truth).
@@ -15,8 +15,8 @@
 # repository), so they are applied with `git -C <dest>/iced apply`.
 #
 # Environment:
-#   LIBCOSMIC_PATCHED_DIR  destination (default: libcosmic-patched next to this
-#                          repository, i.e. ~/Projetos/libcosmic-patched)
+#   LIBCOSMIC_PATCHED_DIR  destination (default: .build/libcosmic-patched in this
+#                          repository, which git ignores)
 #   CARGO_HOME             where cargo keeps its checkouts (default: ~/.cargo)
 #
 # Behaviour (idempotent; the origin checkout is never modified):
@@ -29,13 +29,13 @@
 set -eu
 
 LIBCOSMIC_URL="https://github.com/pop-os/libcosmic"
-LIBCOSMIC_REV="d4d71fd53e5ed6bd3a430089114dffa2da3cd498"
-ICED_REV="511180679b3792387f9b5eabd6d11f4c1bc4ade6"
+LIBCOSMIC_REV="5a8bd9482a35ae94c1e54edf77b331c6b970f170"
+ICED_REV="a31e6c6f837e4c4d0cdb790df50883bee01ea558"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(dirname "$script_dir")"
 patches_dir="$repo_dir/third_party/libcosmic-patches"
-dest="${LIBCOSMIC_PATCHED_DIR:-$(dirname "$repo_dir")/libcosmic-patched}"
+dest="${LIBCOSMIC_PATCHED_DIR:-$repo_dir/.build/libcosmic-patched}"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 force=0
 work=""
@@ -66,7 +66,7 @@ is_pristine_source() {
 
 find_cargo_checkout() {
     local candidate
-    for candidate in "$cargo_home"/git/checkouts/libcosmic-*/d4d71fd*; do
+    for candidate in "$cargo_home"/git/checkouts/libcosmic-*/5a8bd94*; do
         if [ -d "$candidate" ] && is_pristine_source "$candidate"; then
             echo "$candidate"
             return 0
@@ -136,7 +136,7 @@ looks_like_libcosmic() {
 
 safe_to_remove() {
     case "$dest" in
-        "" | / | "$HOME" | "$repo_dir" | "$HOME/Projetos") return 1 ;;
+        "" | / | "$HOME" | "$repo_dir" | "$HOME/Projetos" | "$repo_dir/.build") return 1 ;;
     esac
     case "$repo_dir/" in
         "$dest"/*) return 1 ;;

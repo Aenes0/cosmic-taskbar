@@ -1,67 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Spring and motion switch for the menu's open/close animation. The same
-//! math as the taskbar's `anim.rs` (copied: the two are separate crates).
+//! The menu's open/close animation: its spring constants and the slide. The
+//! spring itself is shared with the taskbar (`shared::anim`).
 
-use std::sync::OnceLock;
-
-/// Longest slice a spring integrates in one go; longer frames are split.
-const SPRING_SUBSTEP_S: f32 = 1.0 / 120.0;
-/// A frame longer than this (a stalled menu) is treated as this long.
-const SPRING_MAX_FRAME_S: f32 = 0.1;
-
-#[derive(Debug, Clone, Copy)]
-pub struct Spring {
-    pub pos: f32,
-    pub vel: f32,
-}
-
-impl Spring {
-    pub fn new(pos: f32) -> Self {
-        Self { pos, vel: 0.0 }
-    }
-
-    /// Semi-implicit Euler, split into fixed substeps so a long frame stays stable.
-    pub fn step(&mut self, target: f32, dt_s: f32, stiffness: f32, damping: f32) {
-        let mut left = dt_s.clamp(0.0, SPRING_MAX_FRAME_S);
-        while left > 0.0 {
-            let dt = left.min(SPRING_SUBSTEP_S);
-            let accel = stiffness * (target - self.pos) - damping * self.vel;
-            self.vel += accel * dt;
-            self.pos += self.vel * dt;
-            left -= dt;
-        }
-    }
-
-    pub fn settled(&self, target: f32) -> bool {
-        (self.pos - target).abs() < 0.002 && self.vel.abs() < 0.01
-    }
-}
-
-/// 0.0 when motion is off (reduced motion or `animation_duration_ms` = 0), else 1.0.
-/// Read once: `COSMETICS_REDUCE_MOTION` and the compositor's `animation_duration_ms`.
-pub fn motion_scale() -> f32 {
-    static SCALE: OnceLock<f32> = OnceLock::new();
-    *SCALE.get_or_init(|| {
-        let reduce = std::env::var("COSMETICS_REDUCE_MOTION").ok();
-        let duration = std::env::var_os("HOME")
-            .map(|home| {
-                std::path::Path::new(&home)
-                    .join(".config/cosmic/com.system76.CosmicComp/v1/animation_duration_ms")
-            })
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|text| text.trim().trim_start_matches("Some(").trim_end_matches(')').parse().ok());
-        motion_scale_from(reduce.as_deref(), duration)
-    })
-}
-
-fn motion_scale_from(reduce: Option<&str>, duration_ms: Option<u32>) -> f32 {
-    if reduce == Some("1") || duration_ms == Some(0) {
-        0.0
-    } else {
-        1.0
-    }
-}
+pub use crate::shared::anim::{Spring, motion_scale};
 
 /// Spring constants: the opening gives a little overshoot, the closing none.
 pub const OPEN: (f32, f32) = (380.0, 26.0);
@@ -108,12 +50,6 @@ mod tests {
         assert!(low > -0.05, "low={low}");
     }
 
-    #[test]
-    fn a_long_frame_is_stable() {
-        let mut s = Spring::new(0.0);
-        s.step(1.0, 5.0, OPEN.0, OPEN.1);
-        assert!(s.pos.is_finite() && s.pos.abs() < 3.0);
-    }
 
     #[test]
     fn slide_and_glass_follow_the_position() {
@@ -124,11 +60,4 @@ mod tests {
         assert!(slide_offset(1.05, 900.0) < 0.0);
     }
 
-    #[test]
-    fn motion_is_off_for_reduced_motion_or_zero_duration() {
-        assert_eq!(motion_scale_from(Some("1"), Some(200)), 0.0);
-        assert_eq!(motion_scale_from(None, Some(0)), 0.0);
-        assert_eq!(motion_scale_from(None, Some(200)), 1.0);
-        assert_eq!(motion_scale_from(None, None), 1.0);
-    }
 }

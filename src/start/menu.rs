@@ -55,7 +55,7 @@ const MENU_BODY: &str = "menu-body";
 
 mod anchor;
 mod application;
-mod capture;
+use crate::shared::capture;
 mod desktop_entry;
 mod drag;
 mod drag_glue;

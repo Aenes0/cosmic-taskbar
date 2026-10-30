@@ -1,45 +1,29 @@
 // Copyright 2023 System76 <info@system76.com>, 2026 Aenes0
 // SPDX-License-Identifier: GPL-3.0-only
 
-mod capture_wait;
-
 use crate::bar::wayland_subscription::{
     OutputUpdate, ToplevelRequest, ToplevelUpdate, WaylandImage, WaylandRequest, WaylandUpdate,
 };
-use std::{
-    os::{
-        fd::{AsFd, FromRawFd, RawFd},
-        unix::net::UnixStream,
-    },
-    sync::Arc,
+use crate::shared::capture::{self, CaptureState, CaptureWorker, start_worker};
+use std::os::{
+    fd::{FromRawFd, RawFd},
+    unix::net::UnixStream,
 };
 
 use cctk::{
-    screencopy::{
-        CaptureFrame, CaptureOptions, CaptureSession, CaptureSource, Capturer, FailureReason,
-        Formats, Frame, ScreencopyFrameData, ScreencopyFrameDataExt, ScreencopyHandler,
-        ScreencopySessionData, ScreencopySessionDataExt, ScreencopyState,
-    },
     sctk::{
         self,
         activation::{RequestData, RequestDataExt},
         output::{OutputHandler, OutputState},
         reexports::{calloop, calloop_wayland_source::WaylandSource},
         seat::{SeatHandler, SeatState},
-        shm::{Shm, ShmHandler},
     },
     toplevel_info::{ToplevelInfoHandler, ToplevelInfoState},
     toplevel_management::{ToplevelManagerHandler, ToplevelManagerState},
     wayland_client::{
-        Connection, Dispatch, QueueHandle, WEnum,
+        Connection, QueueHandle, WEnum,
         globals::registry_queue_init,
-        protocol::{
-            wl_buffer, wl_output,
-            wl_seat::WlSeat,
-            wl_shm::{self, WlShm},
-            wl_shm_pool,
-            wl_surface::WlSurface,
-        },
+        protocol::{wl_output, wl_seat::WlSeat, wl_surface::WlSurface},
     },
     wayland_protocols::ext::{
         foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
@@ -59,16 +43,17 @@ use sctk::{
 struct AppData {
     exit: bool,
     tx: UnboundedSender<WaylandUpdate>,
-    conn: Connection,
     queue_handle: QueueHandle<Self>,
     output_state: OutputState,
     workspace_state: WorkspaceState,
     toplevel_info_state: ToplevelInfoState,
     toplevel_manager_state: ToplevelManagerState,
-    screencopy_state: ScreencopyState,
+    /// Read by the capture handlers of `delegate_capture!`.
+    capture: CaptureState,
+    /// `None` when the compositor cannot capture windows.
+    worker: Option<CaptureWorker<ExtForeignToplevelHandleV1>>,
     registry_state: RegistryState,
     seat_state: SeatState,
-    shm_state: Shm,
     activation_state: Option<ActivationState>,
 }
 
@@ -273,205 +258,26 @@ impl ToplevelInfoHandler for AppData {
     }
 }
 
-// Screencopy handling
+// Screencopy handling: the shared capture worker, as in the Start menu.
 
-// TODO: dmabuf? need to handle modifier negotation
-type Session = capture_wait::Shared<Formats>;
+/// Largest side, in pixels, of a window thumbnail: small enough, sharp on a
+/// scaled screen.
+const THUMB_MAX: u32 = 400;
 
-#[derive(Default)]
-struct SessionData {
-    session: Arc<Session>,
-    session_data: ScreencopySessionData,
-}
-
-struct FrameData {
-    frame_data: ScreencopyFrameData,
-    // Not the CaptureSession: that would keep it alive until the frame ends.
-    session: Arc<Session>,
-}
-
-fn session_of(session: &CaptureSession) -> Option<&Session> {
-    Some(&session.data::<SessionData>()?.session)
-}
-
-impl ScreencopySessionDataExt for SessionData {
-    fn screencopy_session_data(&self) -> &ScreencopySessionData {
-        &self.session_data
+/// The app's message for a finished capture: always one, image or failure.
+fn image_update(
+    handle: ExtForeignToplevelHandleV1,
+    img: Option<image::RgbaImage>,
+) -> WaylandUpdate {
+    match img {
+        Some(img) => WaylandUpdate::Image(handle, WaylandImage::new(img)),
+        None => WaylandUpdate::ImageFailed(handle),
     }
 }
 
-impl ScreencopyFrameDataExt for FrameData {
-    fn screencopy_frame_data(&self) -> &ScreencopyFrameData {
-        &self.frame_data
-    }
-}
-
-impl Dispatch<wl_shm_pool::WlShmPool, ()> for AppData {
-    fn event(
-        _app_data: &mut Self,
-        _buffer: &wl_shm_pool::WlShmPool,
-        _event: wl_shm_pool::Event,
-        (): &(),
-        _: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<wl_buffer::WlBuffer, ()> for AppData {
-    fn event(
-        _app_data: &mut Self,
-        _buffer: &wl_buffer::WlBuffer,
-        _event: wl_buffer::Event,
-        (): &(),
-        _: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-struct CaptureData {
-    qh: QueueHandle<AppData>,
-    conn: Connection,
-    wl_shm: WlShm,
-    capturer: Capturer,
-}
-
-impl CaptureData {
-    pub fn capture_source_shm_fd<Fd: AsFd>(
-        &self,
-        source: &ExtForeignToplevelHandleV1,
-        fd: Fd,
-    ) -> Result<ShmImage<Fd>, String> {
-        // TODO: way to get cursor metadata?
-        let session = Arc::new(Session::default());
-        let capture_session = self
-            .capturer
-            .create_session(
-                &CaptureSource::Toplevel(source.clone()),
-                CaptureOptions::empty(),
-                &self.qh,
-                SessionData {
-                    session: session.clone(),
-                    session_data: ScreencopySessionData::default(),
-                },
-            )
-            .map_err(|_| "cannot capture this window".to_string())?;
-        self.conn.flush().map_err(|e| format!("flush: {e}"))?;
-
-        let formats = session.wait_formats(capture_wait::TIMEOUT)?;
-        let (width, height) = formats.buffer_size;
-        if width == 0 || height == 0 {
-            return Err("window has no size".to_string());
-        }
-        // XXX
-        if !formats.shm_formats.contains(&wl_shm::Format::Abgr8888) {
-            tracing::warn!("Available formats: {:#?}", formats);
-            return Err("no suitable buffer format found".to_string());
-        }
-        let buf_len = u64::from(width) * u64::from(height) * 4;
-        let pool_len = i32::try_from(buf_len).map_err(|_| "window too big".to_string())?;
-        // A failed resize shows up as a failed capture.
-        let _ = rustix::fs::ftruncate(&fd, buf_len);
-        let shot = self.shoot(&capture_session, &session, fd.as_fd(), (width, height), pool_len);
-        match shot {
-            Ok(()) => Ok(ShmImage { fd, width, height }),
-            Err(why) => {
-                if !capture_wait::should_release(&Err(why.clone())) {
-                    // The compositor may still write into it: never close it.
-                    std::mem::forget(fd);
-                }
-                Err(why)
-            }
-        }
-    }
-
-    /// Asks for one frame and waits for it; the pool and buffer are always destroyed.
-    fn shoot(
-        &self,
-        capture_session: &CaptureSession,
-        session: &Arc<Session>,
-        fd: std::os::fd::BorrowedFd<'_>,
-        (width, height): (u32, u32),
-        pool_len: i32,
-    ) -> Result<(), String> {
-        // Sizes are checked: both fit in an i32 and `width * 4` cannot overflow it.
-        let (w, h) = (width as i32, height as i32);
-        let pool = self.wl_shm.create_pool(fd, pool_len, &self.qh, ());
-        let buffer = pool.create_buffer(0, w, h, w * 4, wl_shm::Format::Abgr8888, &self.qh, ());
-        capture_session.capture(
-            &buffer,
-            &[],
-            &self.qh,
-            FrameData {
-                frame_data: ScreencopyFrameData::default(),
-                session: session.clone(),
-            },
-        );
-        // TODO: wait for server to release buffer?
-        let res = self
-            .conn
-            .flush()
-            .map_err(|e| format!("flush: {e}"))
-            .and_then(|()| session.wait_result(capture_wait::TIMEOUT));
-        // After a timeout the frame is still pending: destroying its buffer
-        // could make the compositor crash, so the pool and buffer leak.
-        if capture_wait::should_release(&res) {
-            pool.destroy();
-            buffer.destroy();
-        }
-        res
-    }
-}
-
-pub struct ShmImage<T: AsFd> {
-    fd: T,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl<T: AsFd> ShmImage<T> {
-    /// The picture, at most `max` pixels on its longer side: shrunk straight
-    /// from the shared memory, with no copy of the whole window first.
-    pub fn thumbnail(&self, max: u32) -> anyhow::Result<image::RgbaImage> {
-        let mmap = unsafe { memmap2::Mmap::map(&self.fd.as_fd())? };
-        let len = (self.width * self.height * 4) as usize;
-        let full = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
-            self.width,
-            self.height,
-            mmap.get(..len).ok_or_else(|| anyhow::anyhow!("ShmImage had incorrect size"))?,
-        )
-        .ok_or_else(|| anyhow::anyhow!("ShmImage had incorrect size"))?;
-        let longer = self.width.max(self.height);
-        if longer <= max {
-            return Ok(image::RgbaImage::from_raw(self.width, self.height, full.to_vec())
-                .ok_or_else(|| anyhow::anyhow!("ShmImage had incorrect size"))?);
-        }
-        // Most of the window's pixels never read: a 2×2 average every k
-        // pixels takes it to about twice the thumbnail, the box filter does
-        // the rest. Ten times faster than resizing it all, the same at
-        // this size.
-        let k = (longer / (max * 2)).max(1);
-        let (dw, dh) = (self.width / k, self.height / k);
-        let next = if k > 1 { 1 } else { 0 };
-        let mut small = image::RgbaImage::new(dw, dh);
-        for (x, y, px) in small.enumerate_pixels_mut() {
-            let (x0, y0) = (x * k, y * k);
-            let corners = [
-                full.get_pixel(x0, y0),
-                full.get_pixel(x0 + next, y0),
-                full.get_pixel(x0, y0 + next),
-                full.get_pixel(x0 + next, y0 + next),
-            ];
-            for ch in 0..4 {
-                let sum: u16 = corners.iter().map(|p| u16::from(p.0[ch])).sum();
-                px.0[ch] = (sum / 4) as u8;
-            }
-        }
-        let scale = max as f32 / dw.max(dh) as f32;
-        let width = ((dw as f32 * scale).round() as u32).clamp(1, dw);
-        let height = ((dh as f32 * scale).round() as u32).clamp(1, dh);
-        Ok(image::imageops::thumbnail(&small, width, height))
+fn send_update(tx: &UnboundedSender<WaylandUpdate>, update: WaylandUpdate) {
+    if let Err(err) = tx.unbounded_send(update) {
+        tracing::error!("Failed to send image event to subscription {err:?}");
     }
 }
 
@@ -486,113 +292,11 @@ impl AppData {
             .clone()
     }
 
+    /// Queues a thumbnail; the answer comes as `Image` or `ImageFailed`.
     fn send_image(&self, handle: ExtForeignToplevelHandleV1) {
-        let tx = self.tx.clone();
-        let capture_data = CaptureData {
-            qh: self.queue_handle.clone(),
-            conn: self.conn.clone(),
-            wl_shm: self.shm_state.wl_shm().clone(),
-            capturer: self.screencopy_state.capturer().clone(),
-        };
-        let job_handle = handle.clone();
-        // `done` answers exactly once: image or failure, also if the thread never runs.
-        capture_wait::run_once(
-            move || capture_thumbnail(&capture_data, &job_handle),
-            move |img| {
-                let update = match img {
-                    Some(img) => WaylandUpdate::Image(handle, WaylandImage::new(img)),
-                    None => WaylandUpdate::ImageFailed(handle),
-                };
-                if let Err(err) = tx.unbounded_send(update) {
-                    tracing::error!("Failed to send image event to subscription {err:?}");
-                }
-            },
-            |task| {
-                let spawned = std::thread::Builder::new()
-                    .name("taskbar-capture".into())
-                    .spawn(task);
-                if let Err(err) = spawned {
-                    // The task is dropped unrun, which reports the failure.
-                    tracing::warn!("cannot start the capture thread: {err}");
-                }
-            },
-        );
-    }
-}
-
-/// One thumbnail of a window, `None` (and a log line) when it cannot be taken.
-fn capture_thumbnail(
-    capture_data: &CaptureData,
-    handle: &ExtForeignToplevelHandleV1,
-) -> Option<image::RgbaImage> {
-    let name = c"taskbar-screencopy";
-    let result = rustix::fs::memfd_create(name, rustix::fs::MemfdFlags::CLOEXEC)
-        .map_err(|e| format!("no memfd: {e}"))
-        .and_then(|fd| capture_data.capture_source_shm_fd(handle, fd))
-        // Small enough for a thumbnail, sharp on a scaled screen.
-        .and_then(|img| img.thumbnail(400).map_err(|e| e.to_string()));
-    match result {
-        Ok(img) => Some(img),
-        Err(why) => {
-            tracing::debug!("no picture of a window: {why}");
-            None
-        }
-    }
-}
-
-impl ShmHandler for AppData {
-    fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm_state
-    }
-}
-
-impl ScreencopyHandler for AppData {
-    fn screencopy_state(&mut self) -> &mut ScreencopyState {
-        &mut self.screencopy_state
-    }
-
-    fn init_done(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        session: &CaptureSession,
-        formats: &Formats,
-    ) {
-        if let Some(shared) = session_of(session) {
-            shared.update(|data| data.formats = Some(formats.clone()));
-        }
-    }
-
-    fn ready(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        screencopy_frame: &CaptureFrame,
-        _frame: Frame,
-    ) {
-        if let Some(frame) = screencopy_frame.data::<FrameData>() {
-            frame.session.update(|data| data.res = Some(Ok(())));
-        }
-    }
-
-    fn failed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        screencopy_frame: &CaptureFrame,
-        reason: WEnum<FailureReason>,
-    ) {
-        if let Some(frame) = screencopy_frame.data::<FrameData>() {
-            frame
-                .session
-                .update(|data| data.res = Some(Err(format!("capture failed: {reason:?}"))));
-        }
-    }
-
-    fn stopped(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, session: &CaptureSession) {
-        // A stopped session will never answer: release the waiting thread.
-        if let Some(shared) = session_of(session) {
-            shared.update(|data| data.stopped = true);
+        match &self.worker {
+            Some(worker) => worker.request(handle.clone(), Some(handle)),
+            None => send_update(&self.tx, image_update(handle, None)),
         }
     }
 }
@@ -696,19 +400,24 @@ pub(crate) fn wayland_handler(
         return;
     }
     let registry_state = RegistryState::new(&globals);
+    let capture = CaptureState::new(&globals, &qh);
+    let worker = capture.data(&conn, &qh).map(|data| {
+        let tx = tx.clone();
+        let done = move |handle, img| send_update(&tx, image_update(handle, img));
+        start_worker(data, THUMB_MAX, || true, done)
+    });
 
     let mut app_data = AppData {
         exit: false,
         tx,
-        conn,
         output_state: OutputState::new(&globals, &qh),
         workspace_state: WorkspaceState::new(&registry_state, &qh),
         toplevel_info_state: ToplevelInfoState::new(&registry_state, &qh),
         toplevel_manager_state: ToplevelManagerState::new(&registry_state, &qh),
-        screencopy_state: ScreencopyState::new(&globals, &qh),
+        capture,
+        worker,
         registry_state,
         seat_state: SeatState::new(&globals, &qh),
-        shm_state: Shm::bind(&globals, &qh).unwrap(),
         activation_state: ActivationState::bind::<AppData>(&globals, &qh).ok(),
         queue_handle: qh,
     };
@@ -723,12 +432,61 @@ pub(crate) fn wayland_handler(
 
 sctk::delegate_seat!(AppData);
 sctk::delegate_registry!(AppData);
-sctk::delegate_shm!(AppData);
 cctk::delegate_toplevel_info!(AppData);
 cctk::delegate_workspace!(AppData);
 cctk::delegate_toplevel_manager!(AppData);
-cctk::delegate_screencopy!(AppData);
+capture::delegate_capture!(AppData);
 
 sctk::delegate_activation!(AppData, ExecRequestData);
 
 sctk::delegate_output!(AppData);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cctk::wayland_client::Proxy;
+
+    /// A handle bound to no compositor: enough to be compared and sent.
+    fn inert_handle() -> ExtForeignToplevelHandleV1 {
+        let (sock, _peer) = UnixStream::pair().expect("socket pair");
+        let conn = Connection::from_socket(sock).expect("connection");
+        ExtForeignToplevelHandleV1::inert(conn.backend().downgrade())
+    }
+
+    #[test]
+    fn a_thumbnail_becomes_an_image_of_its_window() {
+        let handle = inert_handle();
+        let img = image::RgbaImage::new(400, 225);
+        match image_update(handle.clone(), Some(img)) {
+            WaylandUpdate::Image(h, pic) => {
+                assert_eq!(h, handle);
+                assert_eq!((pic.width, pic.height), (400, 225));
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_thumbnail_still_answers_image_failed() {
+        let handle = inert_handle();
+        match image_update(handle.clone(), None) {
+            WaylandUpdate::ImageFailed(h) => assert_eq!(h, handle),
+            other => panic!("expected ImageFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_closed_channel_does_not_panic() {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        drop(rx);
+        send_update(&tx, image_update(inert_handle(), None));
+    }
+
+    #[test]
+    fn thumbnails_are_at_most_400_px() {
+        assert_eq!(THUMB_MAX, 400);
+        let big = vec![0u8; 3840 * 2160 * 4];
+        let img = capture::shrink(&big, 3840, 2160, 3840 * 4, THUMB_MAX, true).expect("shrink");
+        assert_eq!(img.width().max(img.height()), 400);
+    }
+}

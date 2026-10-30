@@ -13,6 +13,7 @@
 //! as the old shortcuts and panel entries still do, it is that part.
 
 mod bar;
+mod shared;
 mod start;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

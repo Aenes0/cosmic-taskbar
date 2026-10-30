@@ -15,7 +15,7 @@ use cosmic::cctk::wayland_client::protocol::wl_shm;
 use cosmic::cctk::wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
 
 use super::shrink::{pick_format, shrink};
-use super::{CaptureData, CaptureHost, FrameData, Session, SessionData, TIMEOUT};
+use super::{CaptureData, CaptureHost, FrameData, Session, SessionData, TIMEOUT, should_release};
 
 /// Largest capture buffer accepted, in bytes.
 pub const MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -33,32 +33,32 @@ pub fn buffer_len(w: u32, h: u32) -> Option<(u64, i32)> {
 }
 
 /// One capture request; `handle` is `None` for a window without handle.
-pub struct Job<H> {
-    pub id: String,
+pub struct Job<H, I = String> {
+    pub id: I,
     pub handle: Option<H>,
 }
 
 /// Receives the id and the thumbnail (or `None`) of each request.
-pub type Done = Arc<dyn Fn(String, Option<image::RgbaImage>) + Send + Sync>;
+pub type Done<I> = Arc<dyn Fn(I, Option<image::RgbaImage>) + Send + Sync>;
 
-/// Handle to the capture thread.
-pub struct CaptureWorker {
-    tx: Option<Sender<Job<ExtForeignToplevelHandleV1>>>,
-    done: Done,
+/// Handle to the capture thread; `I` names a request in its answer.
+pub struct CaptureWorker<I = String> {
+    tx: Option<Sender<Job<ExtForeignToplevelHandleV1, I>>>,
+    done: Done<I>,
 }
 
-impl CaptureWorker {
+impl<I> CaptureWorker<I> {
     /// Queues a capture; `done` runs exactly once for this `id`.
-    pub fn request(&self, id: String, handle: Option<ExtForeignToplevelHandleV1>) {
+    pub fn request(&self, id: I, handle: Option<ExtForeignToplevelHandleV1>) {
         submit(self.tx.as_ref(), &*self.done, id, handle);
     }
 }
 
 /// Sends the job; when nobody can take it, answers `None` at once.
-pub fn submit<H, R>(
-    tx: Option<&Sender<Job<H>>>,
-    done: &dyn Fn(String, Option<R>),
-    id: String,
+pub fn submit<H, I, R>(
+    tx: Option<&Sender<Job<H, I>>>,
+    done: &dyn Fn(I, Option<R>),
+    id: I,
     handle: Option<H>,
 ) {
     match tx {
@@ -72,11 +72,11 @@ pub fn submit<H, R>(
 }
 
 /// Serves jobs in order until the channel closes; each gets one answer.
-pub fn worker_loop<H, R>(
-    rx: Receiver<Job<H>>,
+pub fn worker_loop<H, I, R>(
+    rx: Receiver<Job<H, I>>,
     gate: impl Fn() -> bool,
     mut work: impl FnMut(&H) -> Option<R>,
-    done: impl Fn(String, Option<R>),
+    done: impl Fn(I, Option<R>),
 ) {
     for Job { id, handle } in rx {
         let res = match handle {
@@ -87,24 +87,28 @@ pub fn worker_loop<H, R>(
     }
 }
 
+/// The memfd every capture of one worker writes into.
+fn new_memfd() -> Option<OwnedFd> {
+    rustix::fs::memfd_create(c"window-capture", rustix::fs::MemfdFlags::CLOEXEC)
+        .map_err(|e| tracing::warn!("no memfd for window thumbnails: {e}"))
+        .ok()
+}
+
 /// Starts the capture thread; the memfd is made once, on that thread.
-pub fn start_worker<D: CaptureHost>(
+pub fn start_worker<D: CaptureHost, I: Send + 'static>(
     data: CaptureData<D>,
     max: u32,
     gate: impl Fn() -> bool + Send + 'static,
-    done: impl Fn(String, Option<image::RgbaImage>) + Send + Sync + 'static,
-) -> CaptureWorker {
-    let done: Done = Arc::new(done);
+    done: impl Fn(I, Option<image::RgbaImage>) + Send + Sync + 'static,
+) -> CaptureWorker<I> {
+    let done: Done<I> = Arc::new(done);
     let (tx, rx) = channel();
     let thread_done = done.clone();
     let spawned = std::thread::Builder::new()
-        .name("start-menu-capture".into())
+        .name("window-capture".into())
         .spawn(move || {
-            let fd =
-                rustix::fs::memfd_create(c"start-menu-screencopy", rustix::fs::MemfdFlags::CLOEXEC)
-                    .map_err(|e| tracing::warn!("no memfd for window thumbnails: {e}"))
-                    .ok();
-            let work = |h: &ExtForeignToplevelHandleV1| capture(&data, fd.as_ref(), h, max);
+            let mut fd = new_memfd();
+            let work = |h: &ExtForeignToplevelHandleV1| capture(&data, &mut fd, h, max);
             worker_loop(rx, gate, work, |id, res| thread_done(id, res));
         });
     let tx = match spawned {
@@ -120,20 +124,20 @@ pub fn start_worker<D: CaptureHost>(
 /// Captures one window as a thumbnail of at most `max` pixels.
 fn capture<D: CaptureHost>(
     data: &CaptureData<D>,
-    fd: Option<&OwnedFd>,
+    fd: &mut Option<OwnedFd>,
     handle: &ExtForeignToplevelHandleV1,
     max: u32,
 ) -> Option<image::RgbaImage> {
-    let res = match fd {
+    let res = match fd.as_ref() {
         Some(fd) => capture_with(data, fd, handle, max, TIMEOUT),
         None => Err("no memfd".to_string()),
     };
-    if let Some(fd) = fd {
+    recycle_fd(fd, should_release(&res), new_memfd, |fd| {
         // Gives the memory back until the next window.
         if let Err(e) = rustix::fs::ftruncate(fd, 0) {
             tracing::debug!("cannot shrink the capture memfd: {e}");
         }
-    }
+    });
     match res {
         Ok(img) => Some(img),
         Err(why) => {
@@ -216,7 +220,32 @@ fn shoot<D: CaptureHost>(
     capture_session.capture(&buffer, &[], &data.qh, frame_data);
     let res = data.conn.flush().map_err(|e| format!("flush: {e}"));
     let res = res.and_then(|()| session.wait_result(timeout));
-    buffer.destroy();
-    pool.destroy();
+    // After a timeout the frame is still pending: destroying its buffer
+    // could make the compositor crash, so the pool and buffer leak.
+    if should_release(&res) {
+        buffer.destroy();
+        pool.destroy();
+    }
     res
+}
+
+/// After a capture: empties the memfd for the next one, or, when the
+/// compositor may still write into it (`release` false), leaks it unclosed
+/// and takes a `fresh` one.
+pub fn recycle_fd<T>(
+    slot: &mut Option<T>,
+    release: bool,
+    fresh: impl FnOnce() -> Option<T>,
+    empty: impl FnOnce(&T),
+) {
+    if release {
+        if let Some(fd) = slot.as_ref() {
+            empty(fd);
+        }
+        return;
+    }
+    if let Some(old) = slot.take() {
+        std::mem::forget(old);
+    }
+    *slot = fresh();
 }

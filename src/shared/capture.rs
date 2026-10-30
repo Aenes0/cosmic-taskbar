@@ -29,10 +29,20 @@ mod worker;
 pub use shrink::{ShrinkError, pick_format, shrink};
 pub use worker::{CaptureWorker, start_worker};
 #[cfg(test)]
-pub use worker::{Job, buffer_len, submit, worker_loop};
+pub use worker::{Job, buffer_len, recycle_fd, submit, worker_loop};
 
 /// How long one wait on the compositor may last before the capture is dropped.
 pub const TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Error text of a wait that ran out of time.
+pub const TIMED_OUT: &str = "timed out";
+
+/// Whether the buffer and memfd of a finished capture may be freed or reused.
+/// Not after a timeout: the frame is still pending, and a compositor that
+/// finds its buffer gone may crash. Leaking them (bounded) is the safe choice.
+pub fn should_release<T>(res: &Result<T, String>) -> bool {
+    !matches!(res, Err(why) if why == TIMED_OUT)
+}
 
 const COPY_MANAGER: &str = "ext_image_copy_capture_manager_v1";
 const TOPLEVEL_SOURCE_MANAGER: &str = "ext_foreign_toplevel_image_capture_source_manager_v1";
@@ -88,7 +98,7 @@ impl Session {
             let why = if stopped {
                 "capture session stopped"
             } else {
-                "timed out"
+                TIMED_OUT
             };
             why.to_string()
         })
@@ -257,7 +267,7 @@ macro_rules! delegate_capture {
             };
             use cosmic::cctk::wayland_client::protocol::{wl_buffer, wl_shm, wl_shm_pool};
             use cosmic::cctk::wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
-            use $crate::start::menu::capture as cap;
+            use $crate::shared::capture as cap;
 
             type Qh = QueueHandle<$ty>;
 

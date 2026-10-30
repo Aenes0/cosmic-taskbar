@@ -33,9 +33,5 @@ const EN: Texts = Texts {
 };
 
 pub fn texts() -> &'static Texts {
-    let lang = ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .iter()
-        .find_map(|v| std::env::var(v).ok().filter(|l| !l.is_empty()))
-        .unwrap_or_default();
-    if lang.starts_with("pt") { &PT } else { &EN }
+    if crate::shared::locale::portuguese() { &PT } else { &EN }
 }

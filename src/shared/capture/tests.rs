@@ -365,6 +365,86 @@ fn worker_runs_one_job_at_a_time() {
     assert_eq!(answers.load(Ordering::SeqCst), 20);
 }
 
+#[test]
+fn a_timeout_says_timed_out_and_a_stop_does_not() {
+    let silent = Session::default();
+    assert_eq!(
+        silent.wait_result(Duration::from_millis(20)),
+        Err(TIMED_OUT.to_string())
+    );
+    let stopped = Session::default();
+    stopped.update(|i| i.stopped = true);
+    assert_ne!(
+        stopped.wait_result(Duration::from_millis(20)),
+        Err(TIMED_OUT.to_string())
+    );
+}
+
+#[test]
+fn only_a_timeout_keeps_the_buffers() {
+    assert!(should_release(&Ok(())));
+    assert!(should_release::<()>(&Err("capture failed".to_string())));
+    assert!(should_release::<()>(&Err("capture session stopped".to_string())));
+    assert!(!should_release::<()>(&Err(TIMED_OUT.to_string())));
+}
+
+/// Counts its drops: a leaked fd is never dropped (never closed).
+struct Fd(u32, Arc<AtomicUsize>);
+
+impl Drop for Fd {
+    fn drop(&mut self) {
+        self.1.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn recycle_after_a_finished_capture_empties_and_keeps_the_fd() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut slot = Some(Fd(1, drops.clone()));
+    let emptied = AtomicUsize::new(0);
+    recycle_fd(&mut slot, true, || panic!("no new fd"), |fd| {
+        assert_eq!(fd.0, 1);
+        emptied.fetch_add(1, Ordering::SeqCst);
+    });
+    assert_eq!(slot.as_ref().map(|fd| fd.0), Some(1));
+    assert_eq!(emptied.load(Ordering::SeqCst), 1);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn recycle_after_a_timeout_leaks_the_fd_and_takes_a_new_one() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut slot = Some(Fd(1, drops.clone()));
+    let fresh = drops.clone();
+    recycle_fd(&mut slot, false, || Some(Fd(2, fresh)), |_| panic!("not emptied"));
+    assert_eq!(slot.as_ref().map(|fd| fd.0), Some(2));
+    // The old fd was neither closed nor truncated.
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn recycle_without_a_new_fd_leaves_none_and_without_fd_does_nothing() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut slot = Some(Fd(1, drops.clone()));
+    recycle_fd(&mut slot, false, || None, |_| panic!("not emptied"));
+    assert!(slot.is_none());
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    let mut empty: Option<Fd> = None;
+    recycle_fd(&mut empty, true, || panic!("no new fd"), |_| panic!("nothing to empty"));
+    assert!(empty.is_none());
+}
+
+#[test]
+fn worker_answers_with_any_kind_of_id() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = tx.send(Job { id: 7u8, handle: Some(1u32) });
+    let _ = tx.send(Job { id: 8u8, handle: None });
+    drop(tx);
+    let out = std::cell::RefCell::new(Vec::new());
+    worker_loop(rx, || true, |h| Some(*h), |id, res| out.borrow_mut().push((id, res)));
+    assert_eq!(out.into_inner(), vec![(7u8, Some(1u32)), (8u8, None)]);
+}
+
 #[allow(dead_code)]
 struct Fake {
     capture: CaptureState,

@@ -7,6 +7,8 @@ cd "$(dirname "$0")"
 prefix="${1:-$HOME/.local}"
 bin=cosmic-taskbar
 
+# The CPU renderer is patched (see third_party/libcosmic-patches).
+bash scripts/libcosmic-patched.sh
 cargo build --release
 install -Dm0755 "target/release/$bin" "$prefix/bin/$bin"
 
