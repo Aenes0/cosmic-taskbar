@@ -233,7 +233,7 @@ fn title_class() -> theme::Button {
 const VITAL: &[&str] = &[
     "systemd", "cosmic-comp", "cosmic-session", "cosmic-panel", "cosmic-launcher", "cosmic-greeter",
     "cosmic-osd", "cosmic-settings-daemon", "cosmic-idle", "cosmic-notifications", "cosmic-bg",
-    "cosmic-ext-applet-central", "Xwayland", "pipewire", "pipewire-pulse", "wireplumber",
+    "cosmic-ext-applet-central", "cosmic-taskbar", "Xwayland", "pipewire", "pipewire-pulse", "wireplumber",
     "dbus-daemon", "dbus-broker", "dbus-broker-launch", "gnome-keyring-daemon", "xdg-desktop-portal",
     "xdg-desktop-portal-cosmic", "xdg-document-portal", "xdg-permission-store", "at-spi-bus-launcher",
 ];

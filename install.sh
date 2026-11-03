@@ -50,8 +50,14 @@ for name in Clipboard Notifications Panels; do
     sed "s|@bindir@|$bindir|" "data/central/$central.$name.service.in" > "$dbus/$central.$name.service"
 done
 
-# The Logitech devices' service, where it always had its unit.
-logi_unit="$HOME/.config/systemd/user/logi-osd.service"
+# The Logitech devices' service: for the user, where it always had its unit
+# (in ~/.config, which wins over ~/.local/share); under a system prefix, with
+# the Central's units (root's ~/.config would leave the user without it).
+if [ "$prefix" = "$HOME/.local" ]; then
+    logi_unit="$HOME/.config/systemd/user/logi-osd.service"
+else
+    logi_unit="$units/logi-osd.service"
+fi
 mkdir -p "$(dirname "$logi_unit")"
 sed "s|@bindir@|$bindir|" data/logi/logi-osd.service > "$logi_unit"
 install -Dm0644 data/logi/config.exemplo "$prefix/share/logi-osd/config.exemplo"
@@ -64,7 +70,12 @@ fi
 # leave that to the packager. Restarting the panels' host closes an open
 # panel, nothing else: the bar is not touched.
 if [ "$prefix" = "$HOME/.local" ]; then
-    systemctl --user daemon-reload
+    # Everything is in place by now: without the user's systemd (no session
+    # bus, over ssh) the services just start at the next login.
+    if ! systemctl --user daemon-reload; then
+        echo "Installed, but the user's systemd did not answer: the services start at the next login."
+        exit 0
+    fi
     for unit in central-clipboard central-notifications central-panels logi-osd; do
         systemctl --user enable "$unit.service" >/dev/null 2>&1 || true
         systemctl --user restart "$unit.service" || echo "could not restart $unit now; it starts at the next login"

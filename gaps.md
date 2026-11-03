@@ -43,3 +43,10 @@
   Obsidian fora do ar nas sessões de 30/10 e 03/11).
 - **Arquivos antigos em ~/.local/bin**: `cosmic-ext-applet-tray`, `logi-osd.antes-notificacoes` e
   `print-recorte.antes-notificacoes` não são usados por nada.
+- **libcosmic sem `rev` no Cargo.toml** (o pin `5a8bd94` só existe no `Cargo.lock`): um `cargo update`
+  sem cuidado pode saltar de versão, como aconteceu ao tirar o `[patch]` (foi para `95236a9` e não
+  compilou). Não dá para pôr `rev` só no nosso: os crates de acessibilidade do cosmic-settings
+  pedem o libcosmic pelo git sem `rev`, e duas fontes viram duas cópias, com tipos que não se
+  encaixam. Para atualizar: `cargo update -p libcosmic --precise <commit>`.
+- **Arquivos grandes**: `src/bar/app.rs` tem ~3 000 linhas; `src/central/tray/components/app.rs` e
+  `src/central/panels/mod.rs` vieram assim do Central. Dividir só quando houver mudança neles.

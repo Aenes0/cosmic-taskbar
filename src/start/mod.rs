@@ -57,34 +57,9 @@ pub fn run() -> cosmic::iced::Result {
     cosmic::applet::run::<menu::StartButton>(())
 }
 
-/// The menu outlives what started it (the panel's button, a shortcut, a
-/// terminal), and so the pipe its output went to: once that closed, the
-/// next warning written aborted it, and the next Super started it over,
-/// slowly. Its own line to the journal instead, as systemd-cat; or nowhere.
+/// The service's own line to the journal (see `shared::journal`).
 fn own_output() {
-    use std::{
-        io::Write,
-        os::{fd::AsRawFd, unix::net::UnixStream},
-    };
-    let journal = UnixStream::connect("/run/systemd/journal/stdout").and_then(|mut stream| {
-        stream.shutdown(std::net::Shutdown::Read)?;
-        // Identifier, unit, priority (info), level prefix, and no copies
-        // to syslog, the kernel log or the console.
-        stream.write_all(b"cosmic-ext-applet-start\n\n6\n0\n0\n0\n0\n")?;
-        Ok(std::os::fd::OwnedFd::from(stream))
-    });
-    let target = match journal {
-        Ok(fd) => fd,
-        Err(_) => match std::fs::OpenOptions::new().write(true).open("/dev/null") {
-            Ok(file) => file.into(),
-            Err(_) => return,
-        },
-    };
-    // SAFETY: duplicates an open descriptor over stdout and stderr.
-    unsafe {
-        libc::dup2(target.as_raw_fd(), 1);
-        libc::dup2(target.as_raw_fd(), 2);
-    }
+    crate::shared::journal::own_output("cosmic-taskbar-menu");
 }
 
 #[cfg(test)]

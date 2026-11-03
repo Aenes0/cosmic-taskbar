@@ -40,6 +40,11 @@ fn mode(program: &str, first_arg: Option<&str>) -> Option<Mode> {
         Some("taskbar") => return Some(Mode::Taskbar),
         Some("start" | "--menu" | "--tools") => return Some(Mode::Start),
         Some("central") => return Some(Mode::Central),
+        // Only the Central has these: it runs its own executable with them
+        // (the panels' host, when there is no unit), which is this program.
+        Some("--panels" | "--tray" | "--monitor" | "--clipboard" | "--notifications") => {
+            return Some(Mode::Central);
+        }
         Some("logi") => return Some(Mode::Logi(2)),
         _ => {}
     }
@@ -98,6 +103,15 @@ mod tests {
         assert_eq!(mode("cosmic-taskbar", Some("--tools")), Some(Mode::Start));
         assert_eq!(mode("cosmic-taskbar", Some("central")), Some(Mode::Central));
         assert_eq!(mode("cosmic-taskbar", Some("logi")), Some(Mode::Logi(2)));
+    }
+
+    #[test]
+    fn the_central_flags_reach_the_central_by_the_new_name_too() {
+        // The Central starts its panels' host by its own executable with
+        // `--panels` when there is no unit: that is `cosmic-taskbar --panels`.
+        for flag in ["--panels", "--tray", "--monitor", "--clipboard", "--notifications"] {
+            assert_eq!(mode("/home/a/.local/bin/cosmic-taskbar", Some(flag)), Some(Mode::Central), "{flag}");
+        }
     }
 
     #[test]
