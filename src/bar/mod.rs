@@ -3,12 +3,12 @@
 mod anim;
 mod app;
 mod config;
-mod fx;
+pub(crate) mod fx;
 mod launcher_entry;
 mod texts;
 mod wayland_handler;
 mod wayland_subscription;
-mod zoomed;
+pub(crate) mod zoomed;
 
 pub const APP_ID: &str = "io.github.Aenes0.CosmicTaskbar";
 

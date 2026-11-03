@@ -6,6 +6,8 @@ pub struct StartButton {
     core: app::Core,
     popup: Option<window::Id>,
     power_open: bool,
+    /// The taskbar's zoom under the pointer and hop on a click.
+    zoom: crate::shared::button_zoom::ButtonZoom,
 }
 
 #[derive(Clone, Debug)]
@@ -14,6 +16,8 @@ pub enum ButtonMessage {
     RightClick,
     Tool(crate::start::tools::Tool),
     Closed(window::Id),
+    Hover(bool),
+    ZoomTick,
 }
 
 impl cosmic::Application for StartButton {
@@ -24,7 +28,7 @@ impl cosmic::Application for StartButton {
 
     fn init(mut core: app::Core, _flags: ()) -> (Self, app::Task<ButtonMessage>) {
         core.set_auto_blur(Default::default());
-        (Self { core, popup: None, power_open: false }, Task::none())
+        (Self { core, popup: None, power_open: false, zoom: Default::default() }, Task::none())
     }
 
     fn core(&self) -> &app::Core {
@@ -42,6 +46,7 @@ impl cosmic::Application for StartButton {
     fn update(&mut self, message: ButtonMessage) -> app::Task<ButtonMessage> {
         match message {
             ButtonMessage::Click => {
+                self.zoom.press();
                 // The menu running answers over D-Bus; else it starts.
                 std::thread::spawn(|| {
                     if !toggle_running() {
@@ -84,8 +89,14 @@ impl cosmic::Application for StartButton {
                     self.popup = None;
                 }
             }
+            ButtonMessage::Hover(entering) => self.zoom.hover(entering),
+            ButtonMessage::ZoomTick => self.zoom.tick(),
         }
         Task::none()
+    }
+
+    fn subscription(&self) -> Subscription<ButtonMessage> {
+        self.zoom.frames().map(|_| ButtonMessage::ZoomTick)
     }
 
     fn view(&self) -> Element<'_, ButtonMessage> {
@@ -112,12 +123,20 @@ impl cosmic::Application for StartButton {
         ])
         .spacing(2);
         let horizontal = applet.is_horizontal();
+        // The button's smaller side: the icon must fit it whichever way the panel runs.
+        let cell = size + 2.0 * f32::from(minor.min(major));
+        let logo = self.zoom.view(logo, size, cell);
         let button = button::custom(logo)
             .padding(if horizontal { [minor, major] } else { [major, minor] })
             .class(theme::Button::AppletIcon)
             .on_press(ButtonMessage::Click);
         applet
-            .autosize_window(widget::mouse_area(button).on_right_press(ButtonMessage::RightClick))
+            .autosize_window(
+                widget::mouse_area(button)
+                    .on_right_press(ButtonMessage::RightClick)
+                    .on_enter(ButtonMessage::Hover(true))
+                    .on_exit(ButtonMessage::Hover(false)),
+            )
             .into()
     }
 

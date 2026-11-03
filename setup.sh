@@ -4,7 +4,8 @@
 #    pinned apps are the same in both);
 #  - the Start menu in place of COSMIC's launcher and app library: Super
 #    (and Super+A, Super+/) opens it, Super+X its tools (Win+X), and its
-#    button takes the place of the launcher's and the library's in the panel.
+#    button takes the place of the launcher's and the library's in the panel;
+#  - the workspaces' button with the taskbar's zoom, where COSMIC's is.
 #   ./setup.sh          -> use them
 #   ./setup.sh --undo   -> back to COSMIC's own
 set -e
@@ -17,6 +18,8 @@ center="$panel/plugins_center"
 start=io.github.Aenes0.CosmicStart
 ours=io.github.Aenes0.CosmicTaskbar
 theirs=com.system76.CosmicAppList
+workspaces=io.github.Aenes0.CosmicWorkspacesButton
+their_workspaces=com.system76.CosmicPanelWorkspacesButton
 menu_service="(cosmic-taskbar|cosmic-ext-applet-start) --menu$"
 
 if [ "$1" = "--undo" ]; then
@@ -27,10 +30,10 @@ if [ "$1" = "--undo" ]; then
     fi
     [ -f "$custom" ] && sed -i "/cosmic-taskbar --tools/d; /cosmic-ext-applet-start --tools/d" "$custom"
     for f in "$panel/plugins_center" "$panel/plugins_wings"; do
-        [ -f "$f" ] && sed -i "s|\"$ours\"|\"$theirs\"|" "$f"
+        [ -f "$f" ] && sed -i -e "s|\"$ours\"|\"$theirs\"|" -e "s|\"$workspaces\"|\"$their_workspaces\"|" "$f"
     done
     pkill -f "$menu_service" || true
-    echo "COSMIC's app tray, launcher and app library are back."
+    echo "COSMIC's app tray, launcher, app library and workspaces' button are back."
     exit 0
 fi
 
@@ -64,9 +67,10 @@ if [ -f "$center" ] && ! grep -q "\"$start\"" "$center"; then
     grep -q "\"$start\"" "$center" || sed -i "s|^Some(\[|Some([\n    \"$start\",|" "$center"
 fi
 
-# The taskbar where COSMIC's app tray is.
+# The taskbar where COSMIC's app tray is, and the workspaces' button, with
+# the taskbar's zoom, where COSMIC's was.
 for f in "$panel/plugins_center" "$panel/plugins_wings"; do
-    [ -f "$f" ] && sed -i "s|\"$theirs\"|\"$ours\"|" "$f"
+    [ -f "$f" ] && sed -i -e "s|\"$theirs\"|\"$ours\"|" -e "s|\"$their_workspaces\"|\"$workspaces\"|" "$f"
 done
 if grep -qs "\"$ours\"" "$panel/plugins_center" "$panel/plugins_wings"; then
     echo "Taskbar and Start menu set: press Super."

@@ -25,8 +25,8 @@ done
 
 apps="$prefix/share/applications"
 mkdir -p "$apps"
-# Taskbar and Start menu.
-for id in io.github.Aenes0.CosmicTaskbar io.github.Aenes0.CosmicStart; do
+# Taskbar, Start menu and the workspaces' button.
+for id in io.github.Aenes0.CosmicTaskbar io.github.Aenes0.CosmicStart io.github.Aenes0.CosmicWorkspacesButton; do
     sed "s|@bindir@|$bindir|" "data/$id.desktop.in" > "$apps/$id.desktop"
 done
 # The Central's applets: quick settings, show desktop, system monitor, tray

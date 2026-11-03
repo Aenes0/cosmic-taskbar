@@ -7,6 +7,7 @@
 //!
 //! - `taskbar`: the panel's applet with the taskbar;
 //! - `start`: the panel's applet with the Start button;
+//! - `workspaces`: the panel's applet with the workspaces' button;
 //! - `--menu`, `--tools`, `--show-desktop`: the Start menu's service and its
 //!   shortcuts (Super, Win+X);
 //! - `central [flags]`: the Central (quick settings, the left and right panels,
@@ -29,6 +30,8 @@ use std::process::ExitCode;
 enum Mode {
     Taskbar,
     Start,
+    /// The workspaces' button.
+    Workspaces,
     Central,
     /// The Logitech service; its own arguments start at this index.
     Logi(usize),
@@ -39,6 +42,7 @@ fn mode(program: &str, first_arg: Option<&str>) -> Option<Mode> {
     match first_arg {
         Some("taskbar") => return Some(Mode::Taskbar),
         Some("start" | "--menu" | "--tools") => return Some(Mode::Start),
+        Some("workspaces") => return Some(Mode::Workspaces),
         Some("central") => return Some(Mode::Central),
         // Only the Central has these: it runs its own executable with them
         // (the panels' host, when there is no unit), which is this program.
@@ -74,16 +78,22 @@ fn exit_code(result: cosmic::iced::Result) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    // A part that panics prints where, with file and line, to the journal.
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        // SAFETY: first statement of main, no other thread exists yet.
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+    }
     let args: Vec<String> = std::env::args().collect();
     let program = args.first().map(String::as_str).unwrap_or_default();
     match mode(program, args.get(1).map(String::as_str)) {
         Some(Mode::Taskbar) => exit_code(bar::run()),
         Some(Mode::Start) => exit_code(start::run()),
+        Some(Mode::Workspaces) => exit_code(start::run_workspaces()),
         Some(Mode::Central) => exit_code(central::run()),
         Some(Mode::Logi(from)) => logi::run_service(args.get(from..).unwrap_or_default()),
         None => {
             eprintln!(
-                "cosmic-taskbar: unknown mode {:?}; use taskbar, start, --menu, --tools, --show-desktop, central or logi",
+                "cosmic-taskbar: unknown mode {:?}; use taskbar, start, workspaces, --menu, --tools, --show-desktop, central or logi",
                 args.get(1)
             );
             ExitCode::from(2)
@@ -101,6 +111,7 @@ mod tests {
         assert_eq!(mode("cosmic-taskbar", Some("start")), Some(Mode::Start));
         assert_eq!(mode("cosmic-taskbar", Some("--menu")), Some(Mode::Start));
         assert_eq!(mode("cosmic-taskbar", Some("--tools")), Some(Mode::Start));
+        assert_eq!(mode("cosmic-taskbar", Some("workspaces")), Some(Mode::Workspaces));
         assert_eq!(mode("cosmic-taskbar", Some("central")), Some(Mode::Central));
         assert_eq!(mode("cosmic-taskbar", Some("logi")), Some(Mode::Logi(2)));
     }

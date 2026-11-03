@@ -12,6 +12,8 @@ systemd: se uma travar ou cair, não leva as outras junto.
 - **Menu Iniciar**: pesquisa, fixados, janelas abertas, recomendados e todos os apps (por
   categoria, grade ou lista), grupos, desinstalar apps, e o botão de energia. Abre com a tecla
   Super; Win+X abre as ferramentas.
+- **Zoom e salto**: o ícone sob o mouse cresce como no Dock do macOS e salta no clique, na barra,
+  no botão Iniciar e no botão de áreas de trabalho (que o `setup.sh` põe no lugar do do COSMIC).
 
 Este repositório junta e substitui `cosmic-ext-applet-taskbar`, `cosmic-ext-applet-start`,
 `cosmic-ext-applet-central` (com a bandeja, antes `cosmic-ext-applet-tray`) e `logi-osd`, todos
@@ -82,6 +84,7 @@ Um binário só (`cosmic-taskbar`) com os modos:
 |---|---|
 | `cosmic-taskbar taskbar` | o applet da barra de tarefas (o painel o inicia) |
 | `cosmic-taskbar start` | o applet com o botão Iniciar (o painel o inicia) |
+| `cosmic-taskbar workspaces` | o applet do botão de áreas de trabalho, no lugar do do COSMIC (o painel o inicia) |
 | `cosmic-taskbar --menu` | o serviço do menu (Super); chamado de novo, só mostra ou esconde |
 | `cosmic-taskbar --tools` | o menu de ferramentas (Win+X) |
 | `cosmic-taskbar --show-desktop` | mostrar a área de trabalho (atalho do Win+X) |

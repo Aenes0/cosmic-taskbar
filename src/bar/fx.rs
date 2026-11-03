@@ -11,7 +11,7 @@ use std::time::Instant;
 const STIFFNESS: f32 = 320.0;
 const DAMPING: f32 = 22.0;
 /// The icon under the pointer grows by half; the next ones, by a quarter.
-const PEAK_MAGNIFICATION: f32 = 1.5;
+pub(crate) const PEAK_MAGNIFICATION: f32 = 1.5;
 
 /// How much of its box an icon is drawn at when at rest, so that the one under
 /// the pointer, half again as big, still fits the button's height `cell_px`:

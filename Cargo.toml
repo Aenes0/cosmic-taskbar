@@ -53,6 +53,9 @@ iced_tiny_skia = { git = "https://github.com/pop-os/libcosmic" }
 opt-level = 3
 panic = "abort"
 lto = "thin"
+# File and line in a panic's backtrace (the journal shows where a part crashed); the
+# tables stay on disk, not in the memory the program uses.
+debug = "line-tables-only"
 
 # Same pins as cosmic-applets epoch-1.10.0, to match the installed panel.
 [patch."https://github.com/smithay/client-toolkit.git"]

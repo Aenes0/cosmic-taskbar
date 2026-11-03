@@ -3,6 +3,7 @@
 //! What the taskbar and the Start menu have in common.
 
 pub mod anim;
+pub mod button_zoom;
 pub mod capture;
 pub mod journal;
 pub mod locale;

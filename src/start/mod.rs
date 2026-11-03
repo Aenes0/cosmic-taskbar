@@ -8,6 +8,8 @@ mod uninstall;
 mod tools;
 
 pub const APP_ID: &str = "io.github.Aenes0.CosmicStart";
+/// The workspaces' button, in place of COSMIC's.
+pub const WORKSPACES_APP_ID: &str = "io.github.Aenes0.CosmicWorkspacesButton";
 
 /// TOKIO_WORKER_THREADS as it came, for the programs started from here.
 pub static WORKERS: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
@@ -55,6 +57,17 @@ pub fn run() -> cosmic::iced::Result {
     // menu, which scrolls long lists, draws on the GPU.
     backend::init_button();
     cosmic::applet::run::<menu::StartButton>(())
+}
+
+/// The workspaces' button, as the panel runs it: one thread, on the CPU, as
+/// the Start button.
+pub fn run_workspaces() -> cosmic::iced::Result {
+    WORKERS.get_or_init(|| std::env::var_os("TOKIO_WORKER_THREADS"));
+    // SAFETY: nothing else runs yet.
+    unsafe { std::env::set_var("TOKIO_WORKER_THREADS", "1") };
+    crate::shared::logging::init(DEFAULT_LOG, &[]);
+    backend::init_button();
+    cosmic::applet::run::<menu::WorkspacesButton>(())
 }
 
 /// The service's own line to the journal (see `shared::journal`).

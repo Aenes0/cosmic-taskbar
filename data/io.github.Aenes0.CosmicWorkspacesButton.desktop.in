@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Workspaces
+Name[pt_BR]=Áreas de trabalho
+Comment=Open the workspaces overview, with the taskbar's zoom
+Comment[pt_BR]=Abre a visão geral das áreas de trabalho, com o zoom da barra de tarefas
+Type=Application
+Exec=@bindir@/cosmic-taskbar workspaces
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Workspace;Overview;
+Icon=com.system76.CosmicWorkspaces
+NoDisplay=true
+X-CosmicApplet=true
+X-HostWaylandDisplay=true

@@ -1369,6 +1369,11 @@ impl cosmic::Application for Taskbar {
                 .applet
                 .icon_button(icon)
                 .on_press(Message::OpenFavorites);
+            // The same shape as an app's button (drag source, pointer area,
+            // button): a slot of the row that turns from an app into this button
+            // must not meet a state of another kind (the DP-1 crash, "Downcast
+            // widget state", when the bar overflows).
+            let btn: DndSource<'_, Message, DndPathBuf> = dnd_source(mouse_area(btn));
             let btn: Element<_> = if let Some(rectangle_tracker) = self.rectangle_tracker.as_ref() {
                 rectangle_tracker
                     .container(DockItemId::FavoritesOverflow, btn)
@@ -1443,6 +1448,11 @@ impl cosmic::Application for Taskbar {
                 .applet
                 .icon_button(icon)
                 .on_press(Message::OpenActive);
+            // The same shape as an app's button (drag source, pointer area,
+            // button): a slot of the row that turns from an app into this button
+            // must not meet a state of another kind (the DP-1 crash, "Downcast
+            // widget state", when the bar overflows).
+            let btn: DndSource<'_, Message, DndPathBuf> = dnd_source(mouse_area(btn));
             let btn: Element<_> = if let Some(rectangle_tracker) = self.rectangle_tracker.as_ref() {
                 rectangle_tracker
                     .container(DockItemId::ActiveOverflow, btn)
