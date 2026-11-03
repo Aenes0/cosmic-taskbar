@@ -222,7 +222,7 @@ impl App {
     }
 
     pub(super) fn close_box(&mut self) -> app::Task<Msg> {
-        tracing::info!("DIAG close_box overflow_popup={:?} popup={:?}", self.overflow_popup, self.popup);
+        tracing::trace!("DIAG close_box overflow_popup={:?} popup={:?}", self.overflow_popup, self.popup);
         match self.overflow_popup.take() {
             Some(popup_id) => destroy_popup(popup_id),
             None => Task::none(),
@@ -230,7 +230,7 @@ impl App {
     }
 
     fn close_menu(&mut self) -> app::Task<Msg> {
-        tracing::info!("DIAG close_menu open_menu={:?} popup={:?}", self.open_menu, self.popup);
+        tracing::trace!("DIAG close_menu open_menu={:?} popup={:?}", self.open_menu, self.popup);
         if let Some(old) = self.open_menu.take()
             && let Some(menu) = self.menus.get(&old)
         {
@@ -252,7 +252,7 @@ impl App {
         if !self.menus.contains_key(&id) {
             return Task::none();
         }
-        tracing::info!(
+        tracing::trace!(
             "DIAG open_menu_popup id={id} popup={:?} overflow_popup={:?} open_menu={:?}",
             self.popup, self.overflow_popup, self.open_menu
         );
@@ -266,7 +266,7 @@ impl App {
                 |_| Default::default(),
                 move |app: &mut Self| {
                     let popup_id = window::Id::unique();
-                    tracing::info!("DIAG menu popup created id={id} popup_id={popup_id:?}");
+                    tracing::trace!("DIAG menu popup created id={id} popup_id={popup_id:?}");
                     app.popup = Some(popup_id);
                     let slot = app.slot_of(id);
                     app.popup_settings(parent, popup_id, slot)
@@ -285,7 +285,7 @@ impl App {
         if self.split().boxed.is_empty() {
             return Task::none();
         }
-        tracing::info!(
+        tracing::trace!(
             "DIAG open_box popup={:?} overflow_popup={:?} open_menu={:?}",
             self.popup, self.overflow_popup, self.open_menu
         );
@@ -297,7 +297,7 @@ impl App {
                 let slot = app.split().bar.len();
                 let mut settings = app.popup_settings(parent, popup_id, slot);
                 settings.close_with_children = false;
-                tracing::info!("DIAG box popup created popup_id={popup_id:?}");
+                tracing::trace!("DIAG box popup created popup_id={popup_id:?}");
                 app.overflow_popup = Some(popup_id);
                 settings
             },
@@ -380,7 +380,7 @@ impl cosmic::Application for App {
                 Task::batch([close, self.open_menu_popup(id)])
             }
             Msg::Closed(surface) => {
-                tracing::info!(
+                tracing::trace!(
                     "DIAG Closed surface={surface:?} popup={:?} overflow_popup={:?} open_menu={:?}",
                     self.popup, self.overflow_popup, self.open_menu
                 );
@@ -447,7 +447,7 @@ impl cosmic::Application for App {
                         if self.open_menu == Some(id) {
                             self.open_menu = None;
                             if let Some(popup_id) = self.popup.take() {
-                                tracing::info!("DIAG item removed, destroying popup_id={popup_id:?} id={id}");
+                                tracing::trace!("DIAG item removed, destroying popup_id={popup_id:?} id={id}");
                                 cmds.push(destroy_popup(popup_id));
                             }
                         }
@@ -475,7 +475,7 @@ impl cosmic::Application for App {
                 self.relayout()
             }
             Msg::TogglePopup(id) => {
-                tracing::info!(
+                tracing::trace!(
                     "DIAG TogglePopup id={id} open_menu={:?} popup={:?} overflow_popup={:?}",
                     self.open_menu, self.popup, self.overflow_popup
                 );
@@ -544,7 +544,7 @@ impl cosmic::Application for App {
             }
             Msg::Surface(a) => cosmic::surface::surface_task(a),
             Msg::ToggleOverflow => {
-                tracing::info!(
+                tracing::trace!(
                     "DIAG ToggleOverflow popup={:?} overflow_popup={:?} open_menu={:?}",
                     self.popup, self.overflow_popup, self.open_menu
                 );

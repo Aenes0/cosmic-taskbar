@@ -1,7 +1,21 @@
 # Lacunas conhecidas
 
-- **Compartilhado até aqui** (`src/shared/`): molas e interruptor de movimento, idioma dos textos e
-  a captura de miniaturas (a do menu, que a barra passou a usar).
+- **Compartilhado até aqui** (`src/shared/`): molas e interruptor de movimento, idioma dos textos
+  (português, francês, inglês; antes 6 cópias da regra), a inicialização do log (antes 3), a
+  captura de miniaturas (a do menu, que a barra passou a usar) e o cartão de prévia.
+- **Central e logi-osd (03/11)**: importados com histórico em `src/central/` e `src/logi/`; o
+  Central foi portado do libcosmic d4d71fd para o 5a8bd94 (2 mudanças: ação de superfície com o
+  tipo da mensagem). Memória total 263 -> 232 MB (PSS+SwapPss), threads 145 -> 135.
+- **logi-osd usa libdbus** (crate `dbus`) além do zbus que o resto usa: dá para trocar por zbus e
+  tirar a dependência de sistema `libdbus-1`; ficou como estava para não mudar comportamento.
+- **Avisos do logi-osd sem o estilo próprio**: ele manda dicas `x-estilo`, `x-tom`, `x-pontos` que
+  só o daemon `notificacoes` (depreciado, nunca em uso) desenhava; o daemon do COSMIC as ignora e
+  mostra uma notificação comum.
+- **Registros DIAG da bandeja** (`src/central/tray/components/app.rs`): vieram junto, a pedido, em
+  `trace` (mudos por padrão; `RUST_LOG=cosmic_taskbar::central::tray=trace` os liga). Remover
+  quando a investigação do travamento for encerrada.
+- **Painel de medições lê a GPU pela libnvidia-ml** (temperatura e uso): é leitura de sensor, não
+  renderização.
 - **Lista de janelas (toplevels): decidido NÃO compartilhar (30/10).** O que as duas têm de igual é
   só a boilerplate dos `impl` do `cctk` (~60-80 linhas de métodos quase vazios); o resto tem
   formato diferente (a barra recebe eventos um a um num objeto grande com saídas, workspaces e
@@ -26,4 +40,6 @@
 - **Menu: fade de conteúdo**: o menu desliza inteiro, mas não esmaece (um menu não esmaece como
   um todo sem apoio do compositor).
 - **Vault Brain**: nota de feature e ADR da unificação ainda não escritas (servidor MCP do
-  Obsidian fora do ar na sessão de 30/10).
+  Obsidian fora do ar nas sessões de 30/10 e 03/11).
+- **Arquivos antigos em ~/.local/bin**: `cosmic-ext-applet-tray`, `logi-osd.antes-notificacoes` e
+  `print-recorte.antes-notificacoes` não são usados por nada.
