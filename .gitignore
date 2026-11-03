@@ -1,3 +1,6 @@
 /target
 /.dev
 /.build
+__pycache__/
+# estado de sessão do visual companion (porta e token): nunca no git
+.superpowers/brainstorm/
