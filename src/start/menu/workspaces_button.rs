@@ -15,7 +15,8 @@ const ICON: &str = "com.system76.CosmicWorkspaces";
 #[derive(Clone, Debug)]
 pub enum WorkspacesMessage {
     Click,
-    Hover(bool),
+    /// The pointer entered or left one of its surfaces.
+    Pointer(window::Id, bool),
     ZoomTick,
 }
 
@@ -48,14 +49,22 @@ impl cosmic::Application for WorkspacesButton {
                 // The overview toggles itself when run again, as with COSMIC's button.
                 std::thread::spawn(|| spawn_clean(OVERVIEW, &[]));
             }
-            WorkspacesMessage::Hover(entering) => self.zoom.hover(entering),
+            WorkspacesMessage::Pointer(id, entering) => {
+                // Only the button's own surface, not a popup of it.
+                if self.core.main_window_id() == Some(id) {
+                    self.zoom.hover(entering);
+                }
+            }
             WorkspacesMessage::ZoomTick => self.zoom.tick(),
         }
         Task::none()
     }
 
     fn subscription(&self) -> Subscription<WorkspacesMessage> {
-        self.zoom.frames().map(|_| WorkspacesMessage::ZoomTick)
+        Subscription::batch([
+            self.zoom.frames().map(|_| WorkspacesMessage::ZoomTick),
+            crate::shared::button_zoom::ButtonZoom::pointer().map(|(id, entered)| WorkspacesMessage::Pointer(id, entered)),
+        ])
     }
 
     fn view(&self) -> Element<'_, WorkspacesMessage> {
@@ -76,12 +85,6 @@ impl cosmic::Application for WorkspacesButton {
             .padding(if horizontal { [minor, major] } else { [major, minor] })
             .class(theme::Button::AppletIcon)
             .on_press(WorkspacesMessage::Click);
-        applet
-            .autosize_window(
-                widget::mouse_area(button)
-                    .on_enter(WorkspacesMessage::Hover(true))
-                    .on_exit(WorkspacesMessage::Hover(false)),
-            )
-            .into()
+        applet.autosize_window(button).into()
     }
 }

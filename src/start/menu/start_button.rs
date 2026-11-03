@@ -16,7 +16,8 @@ pub enum ButtonMessage {
     RightClick,
     Tool(crate::start::tools::Tool),
     Closed(window::Id),
-    Hover(bool),
+    /// The pointer entered or left one of its surfaces.
+    Pointer(window::Id, bool),
     ZoomTick,
 }
 
@@ -89,14 +90,22 @@ impl cosmic::Application for StartButton {
                     self.popup = None;
                 }
             }
-            ButtonMessage::Hover(entering) => self.zoom.hover(entering),
+            ButtonMessage::Pointer(id, entering) => {
+                // Only the button's own surface, not a popup of it.
+                if self.core.main_window_id() == Some(id) {
+                    self.zoom.hover(entering);
+                }
+            }
             ButtonMessage::ZoomTick => self.zoom.tick(),
         }
         Task::none()
     }
 
     fn subscription(&self) -> Subscription<ButtonMessage> {
-        self.zoom.frames().map(|_| ButtonMessage::ZoomTick)
+        Subscription::batch([
+            self.zoom.frames().map(|_| ButtonMessage::ZoomTick),
+            crate::shared::button_zoom::ButtonZoom::pointer().map(|(id, entered)| ButtonMessage::Pointer(id, entered)),
+        ])
     }
 
     fn view(&self) -> Element<'_, ButtonMessage> {
@@ -131,12 +140,7 @@ impl cosmic::Application for StartButton {
             .class(theme::Button::AppletIcon)
             .on_press(ButtonMessage::Click);
         applet
-            .autosize_window(
-                widget::mouse_area(button)
-                    .on_right_press(ButtonMessage::RightClick)
-                    .on_enter(ButtonMessage::Hover(true))
-                    .on_exit(ButtonMessage::Hover(false)),
-            )
+            .autosize_window(widget::mouse_area(button).on_right_press(ButtonMessage::RightClick))
             .into()
     }
 

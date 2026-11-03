@@ -26,6 +26,17 @@ impl ButtonZoom {
         self.fx.set_hover(ID, entering);
     }
 
+    /// The pointer entering (`true`) and leaving (`false`) a surface, for
+    /// `hover`; the caller maps it to its message (iced takes no
+    /// capturing closure here). The surface is the button, so this is the
+    /// button's hover. Not the button's own `mouse_area` enter and exit: out
+    /// of the surface the toolkit no longer knows where the pointer is, the
+    /// area never sees it leave, and then never sees it come back.
+    /// With the surface's id: a button's own popups are surfaces of their own.
+    pub fn pointer() -> Subscription<(cosmic::iced::window::Id, bool)> {
+        cosmic::iced::event::listen_with(|event, _, id| pointer_hover(&event).map(|entered| (id, entered)))
+    }
+
     /// A click: one hop.
     pub fn press(&mut self) {
         self.fx.launch(ID);
@@ -60,6 +71,16 @@ impl ButtonZoom {
         let scale = drawn_scale(self.fx.scale_of(ID), icon_px, cell_px);
         let rise = self.fx.rise_of(ID, icon_px, cell_px, true);
         Zoomed::new(icon, scale, rise).into()
+    }
+}
+
+/// Whether a surface event is the pointer entering or leaving it.
+fn pointer_hover(event: &cosmic::iced::core::Event) -> Option<bool> {
+    use cosmic::iced::core::{Event, mouse};
+    match event {
+        Event::Mouse(mouse::Event::CursorEntered) => Some(true),
+        Event::Mouse(mouse::Event::CursorLeft) => Some(false),
+        _ => None,
     }
 }
 
@@ -114,6 +135,28 @@ mod tests {
     fn an_icon_as_tall_as_its_button_does_not_grow() {
         assert_eq!(drawn_scale(PEAK_MAGNIFICATION, 40.0, 40.0), 1.0);
         assert_eq!(drawn_scale(PEAK_MAGNIFICATION, 0.0, 40.0), 1.0);
+    }
+
+    #[test]
+    fn the_surface_s_pointer_events_say_hover_and_nothing_else_does() {
+        use cosmic::iced::core::{Event, Point, mouse};
+        assert_eq!(pointer_hover(&Event::Mouse(mouse::Event::CursorEntered)), Some(true));
+        assert_eq!(pointer_hover(&Event::Mouse(mouse::Event::CursorLeft)), Some(false));
+        let moved = Event::Mouse(mouse::Event::CursorMoved { position: Point::new(3.0, 4.0) });
+        assert_eq!(pointer_hover(&moved), None);
+    }
+
+    #[test]
+    fn it_grows_again_on_every_new_entry_not_only_the_first() {
+        let mut zoom = ButtonZoom::default();
+        for round in 0..3 {
+            zoom.hover(true);
+            run(&mut zoom, 700);
+            assert!(zoom.fx.scale_of(ID) > 1.4, "round {round}: {}", zoom.fx.scale_of(ID));
+            zoom.hover(false);
+            run(&mut zoom, 1500);
+            assert_eq!(zoom.fx.scale_of(ID), 1.0, "round {round}");
+        }
     }
 
     #[test]
