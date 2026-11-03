@@ -1,0 +1,22 @@
+[package]
+name = "logi-osd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+repository = "https://github.com/Aenes0/logi-osd"
+license = "GPL-3.0-only"
+description = "Avisos na tela (OSD) para teclados e mouses Logitech no COSMIC"
+
+[dependencies]
+udev = "0.9.3"
+rustix = { version = "1", features = ["event", "fs"] }
+libc = "0.2"
+calloop = "0.14"
+dbus = { version = "0.9.12", default-features = false }
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+lto = "thin"
+strip = true
+codegen-units = 1
