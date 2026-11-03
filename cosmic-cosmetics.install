@@ -1,0 +1,13 @@
+# Nada é ativado pelo pacote: a ativação é por usuário, pelo instalador.
+
+post_install() {
+  echo "cosmic-cosmetics: rode: cosmic-cosmetics-install install --dry-run e depois cosmic-cosmetics-install install"
+}
+
+post_upgrade() {
+  echo "cosmic-cosmetics: rode: cosmic-cosmetics-install install --dry-run e depois cosmic-cosmetics-install install"
+}
+
+pre_remove() {
+  echo "cosmic-cosmetics: rode antes: cosmic-cosmetics-install uninstall"
+}

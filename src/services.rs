@@ -819,8 +819,25 @@ async fn super_saver() -> Option<bool> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim() == "on")
 }
 
-/// As root, through the polkit rule that lets this user run it.
+/// The systemd unit that runs the helper as root, `on` or `off`.
+fn super_saver_unit(on: bool) -> &'static str {
+    if on { "super-economia-ligar.service" } else { "super-economia-desligar.service" }
+}
+
+/// As root: by starting its unit, which the polkit rule lets this user do
+/// over D-Bus, so it works from applets the panel starts with NoNewPrivs,
+/// where the setuid `pkexec` cannot. An install from before the units falls
+/// back to `pkexec`.
 async fn run_super_saver(on: bool) -> zbus::Result<()> {
+    let started = crate::host::command("systemctl", &[])
+        .args(["start", super_saver_unit(on)])
+        .status()
+        .await
+        .map_err(|err| zbus::Error::Failure(err.to_string()))?;
+    if started.success() {
+        return Ok(());
+    }
+    tracing::warn!("super-economia: {started} starting its unit, trying pkexec");
     let status = crate::host::command("pkexec", &[])
         .args([SUPER_SAVER_HELPER, if on { "on" } else { "off" }])
         .status()
@@ -2064,6 +2081,12 @@ impl Setting {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn super_saver_units_match_the_installer() {
+        assert_eq!(super::super_saver_unit(true), "super-economia-ligar.service");
+        assert_eq!(super::super_saver_unit(false), "super-economia-desligar.service");
+    }
+
     #[test]
     fn brightness_is_read_back_and_nonsense_is_left_out() {
         assert_eq!(super::parse_brightness("40 100\n"), Some((40, 100)));
