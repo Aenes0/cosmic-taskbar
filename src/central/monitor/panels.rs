@@ -28,6 +28,8 @@ const GPU_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
 const MEMORY_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="#000" fill-rule="evenodd" d="M1 4.5A1.5 1.5 0 0 1 2.5 3h11A1.5 1.5 0 0 1 15 4.5V11h-1v2h-1v-2h-2v2h-1v-2H6v2H5v-2H3v2H2v-2H1zM2.5 4a.5.5 0 0 0-.5.5V10h12V4.5a.5.5 0 0 0-.5-.5zM3.5 5.5h2v3h-2zm3.5 0h2v3H7zm3.5 0h2v3h-2z"/></svg>"##;
 const THERMOMETER_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="#000" fill-rule="evenodd" d="M8 1a2 2 0 0 0-2 2v6.27a3.5 3.5 0 1 0 4 0V3a2 2 0 0 0-2-2zm0 1a1 1 0 0 1 1 1v6.8l.25.15a2.5 2.5 0 1 1-2.5 0L7 9.8V3a1 1 0 0 1 1-1zM7.5 5h1v5.55a1.5 1.5 0 1 1-1 0z"/></svg>"##;
 const BOLT_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="#000" d="M9.5 1 3 9h4.5l-1 6L13 7H8.5z"/></svg>"##;
+const DOWN_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="#000" d="M7 2h2v8.2l2.8-2.8 1.4 1.4L8 14 2.8 8.8l1.4-1.4L7 10.2z"/></svg>"##;
+const UP_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="#000" d="M7 14h2V5.8l2.8 2.8 1.4-1.4L8 2 2.8 7.2l1.4 1.4L7 5.8z"/></svg>"##;
 const INFO_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="#000" fill-rule="evenodd" d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1a6 6 0 1 1 0 12A6 6 0 0 1 8 2zM7.25 7h1.5v4.5h-1.5zM8 4a.9.9 0 1 1 0 1.8A.9.9 0 0 1 8 4z"/></svg>"##;
 const LIST_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="#000" d="M2 3h2v2H2zm4 .25h8v1.5H6zM2 7h2v2H2zm4 .25h8v1.5H6zM2 11h2v2H2zm4 .25h8v1.5H6z"/></svg>"##;
 
@@ -46,6 +48,12 @@ pub fn icon_memory() -> widget::icon::Handle {
 }
 pub fn icon_bolt() -> widget::icon::Handle {
     svg(BOLT_SVG)
+}
+pub fn icon_down() -> widget::icon::Handle {
+    svg(DOWN_SVG)
+}
+pub fn icon_up() -> widget::icon::Handle {
+    svg(UP_SVG)
 }
 
 fn panel_icon(panel: Panel) -> widget::icon::Handle {

@@ -13,6 +13,24 @@ fn config() -> Option<Config> {
     Config::new(super::APP_ID, 1).ok()
 }
 
+/// When the settings were last saved, by whichever process: the panels' host
+/// saves what is chosen in the panel, the bar's applets show it. A few file
+/// dates, at each reading: no watcher thread for something that changes by hand.
+pub fn modified() -> Option<std::time::SystemTime> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config")))?;
+    newest_in(&base.join("cosmic").join(super::APP_ID).join("v1"))
+}
+
+/// The newest date of the files in `dir`.
+fn newest_in(dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok()?.metadata().ok()?.modified().ok())
+        .max()
+}
+
 fn get<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
     config()?.get::<T>(key).ok()
 }
@@ -347,4 +365,27 @@ pub fn weather_place() -> super::weather::Place {
 
 pub fn set_weather_place(place: &super::weather::Place) {
     set("weather_place", place);
+}
+
+#[cfg(test)]
+mod modified_tests {
+    use super::newest_in;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn the_newest_file_s_date_is_the_settings_date() {
+        let dir = std::env::temp_dir().join(format!("monitor-settings-{}", std::process::id()));
+        _ = std::fs::remove_dir_all(&dir);
+        assert!(newest_in(&dir).is_none(), "no settings yet");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = std::fs::File::create(dir.join("order")).unwrap();
+        old.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)).unwrap();
+        let new = std::fs::File::create(dir.join("bar_modes")).unwrap();
+        new.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2_000)).unwrap();
+        assert_eq!(newest_in(&dir), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(2_000)));
+        // A key saved again: a newer date.
+        new.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(3_000)).unwrap();
+        assert_eq!(newest_in(&dir), Some(SystemTime::UNIX_EPOCH + Duration::from_secs(3_000)));
+        _ = std::fs::remove_dir_all(&dir);
+    }
 }

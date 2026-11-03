@@ -32,6 +32,7 @@ if [ "$1" = "--undo" ]; then
     for f in "$panel/plugins_center" "$panel/plugins_wings"; do
         [ -f "$f" ] && sed -i -e "s|\"$ours\"|\"$theirs\"|" -e "s|\"$workspaces\"|\"$their_workspaces\"|" "$f"
     done
+    [ -f "$panel/keyboard_interactivity" ] && echo OnDemand > "$panel/keyboard_interactivity"
     pkill -f "$menu_service" || true
     echo "COSMIC's app tray, launcher, app library and workspaces' button are back."
     exit 0
@@ -72,6 +73,14 @@ fi
 for f in "$panel/plugins_center" "$panel/plugins_wings"; do
     [ -f "$f" ] && sed -i -e "s|\"$theirs\"|\"$ours\"|" -e "s|\"$their_workspaces\"|\"$workspaces\"|" "$f"
 done
+# The bar never takes the keys, as on Windows: the compositor gives them to
+# every top layer that asks when it maps, so each restart of the panel took
+# them from the window in use. Its popups still get them (by their grab),
+# and the Start menu and the Central's panels are surfaces of their own.
+if [ -d "$panel" ] && [ "$(cat "$panel/keyboard_interactivity" 2>/dev/null)" != None ]; then
+    echo None > "$panel/keyboard_interactivity"
+fi
+
 if grep -qs "\"$ours\"" "$panel/plugins_center" "$panel/plugins_wings"; then
     echo "Taskbar and Start menu set: press Super."
 else

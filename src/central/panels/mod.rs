@@ -74,6 +74,8 @@ pub enum Message {
     DetectDdc,
     /// A click on a panel, kept from the backdrop under it.
     Nothing,
+    /// Time to read the GPU for the bar's applets (see `monitor::share_gpu`).
+    ShareGpu,
 }
 
 /// The panel showing: which, on which screen, its surface and since when.
@@ -111,6 +113,8 @@ pub struct Panels {
     /// times the CPU, here and in the compositor (the cursor stuttered).
     /// COSMIC_PANELS_SURFACE=screen brings it back, for comparing.
     whole_screen: bool,
+    /// When the GPU's energy counter was last read for the applets.
+    gpu_energy_at: Option<Instant>,
 }
 
 /// Starts the host, showing `request` once up.
@@ -306,6 +310,7 @@ impl cosmic::Application for Panels {
             opened_at: None,
             bar: bar_anchor(),
             whole_screen: std::env::var("COSMIC_PANELS_SURFACE").as_deref() == Ok("screen"),
+            gpu_energy_at: None,
         };
         // Which monitors have DDC, for the brightness sliders: found once,
         // well after starting, if not known from before (see DetectDdc).
@@ -385,6 +390,22 @@ impl cosmic::Application for Panels {
                 );
             }
             Message::Nothing => {}
+            Message::ShareGpu => {
+                // While the measures' panel shows, its own readings share it, each second.
+                if self.shown.as_ref().is_some_and(|shown| shown.which == Which::Monitor) {
+                    return Task::none();
+                }
+                let energy = self.gpu_energy_at.is_none_or(|at| at.elapsed() >= monitor::GPU_ENERGY_EVERY);
+                if energy {
+                    self.gpu_energy_at = Some(Instant::now());
+                }
+                return Task::future(async move {
+                    // Off this loop, at idle priority, given up if the driver hangs.
+                    use crate::central::slow::{Slow, blocking};
+                    _ = blocking(Slow::Sample, move || monitor::share_gpu(energy)).await;
+                    cosmic::action::app(Message::Nothing)
+                });
+            }
         }
         Task::none()
     }
@@ -411,6 +432,8 @@ impl cosmic::Application for Panels {
                 }
             }),
         ];
+        // The GPU, read once here for every bar's applet, as often as they read.
+        subscriptions.push(iced::time::every(monitor::SHARE_GPU_EVERY).map(|_| Message::ShareGpu));
         // Under systemd's watchdog only: the beat, from this loop.
         if let Some(period) = watchdog::period() {
             subscriptions.push(iced::time::every(period).map(|_| Message::Beat));

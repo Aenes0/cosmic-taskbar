@@ -6,8 +6,10 @@
 //! processes and the system. On the bar, what the user picks.
 
 mod chart;
+mod dots;
 mod config;
 mod energy;
+mod gpu_share;
 mod panels;
 mod sample;
 mod texts;
@@ -62,7 +64,15 @@ enum Look {
 
 /// With the popup closed, how often the counting applet asks for the GPU's
 /// energy counter; it counts all since, so nothing is lost between.
-const GPU_ENERGY_EVERY: Duration = Duration::from_secs(60);
+pub(crate) const GPU_ENERGY_EVERY: Duration = Duration::from_secs(60);
+/// How often the panels' host reads the GPU for the bar's applets: as often
+/// as they read, with the popup closed.
+pub(crate) const SHARE_GPU_EVERY: Duration = Duration::from_secs(5);
+
+/// The GPU alone, read and left for the bar's applets (the host's part).
+pub(crate) fn share_gpu(energy: bool) {
+    sample::share_gpu(energy);
+}
 /// How often the weather is looked at: a file's date, mostly.
 const WEATHER_TICK: Duration = Duration::from_secs(60);
 /// After a failed reading, how long until the next try.
@@ -81,6 +91,8 @@ pub enum Message {
     Reading(Box<Reading>),
     /// The reading took too long, or failed: the next tick tries again.
     ReadGivenUp,
+    /// The hover's label on the bar: its popup made and taken away.
+    Surface(cosmic::surface::Action<Message>),
     TogglePopup,
     PanelPress(window::Id),
     Closed(window::Id),
@@ -175,6 +187,8 @@ pub struct Monitor {
     popup: Option<window::Id>,
     editing: bool,
     pub(crate) settings: Settings,
+    /// The settings' date as last read (see `config::modified`).
+    settings_seen: Option<std::time::SystemTime>,
     pub(crate) info: Info,
     pub(crate) now: Option<Reading>,
     pub(crate) rates: Rates,
@@ -244,6 +258,20 @@ impl Monitor {
             && !self.settings.is_folded(Panel::Processes)
     }
 
+    /// On the bar: what was chosen in the panel, which the host saves.
+    /// Hosted, the panel is where it is chosen: nothing to read again.
+    fn settings_tick(&mut self) {
+        if self.hosted {
+            return;
+        }
+        let seen = config::modified();
+        if seen.is_some() && seen != self.settings_seen {
+            self.settings_seen = seen;
+            self.settings = Settings::load();
+            self.bar_models = bar_models(&self.settings);
+        }
+    }
+
     fn read(&mut self) -> app::Task<Message> {
         if self.reading {
             return Task::none();
@@ -257,6 +285,7 @@ impl Monitor {
             // every reading, for the panel's numbers.
             gpu_energy: self.meter.counts()
                 && (full || self.gpu_energy.is_none_or(|(_, at)| at.elapsed() >= GPU_ENERGY_EVERY)),
+            gpu: if self.hosted { sample::GpuSource::Publish } else { sample::GpuSource::Shared },
         };
         Task::future(async move {
             // Off the UI's thread at idle priority, and given up if it hangs
@@ -326,12 +355,6 @@ impl Monitor {
     /// Whether this part of an item was past its limit lately.
     fn lingers(&self, item: BarItem, part: Part) -> bool {
         self.over_at.get(&(item, part)).is_some_and(|at| at.elapsed() < OVER_LINGER)
-    }
-
-    /// Whether this part of an item shows, the item on the bar: past its
-    /// limit, only what went past.
-    fn shows_part(&self, item: BarItem, part: Part) -> bool {
-        self.settings.bar_mode(item) != BarMode::Over || self.lingers(item, part)
     }
 
     /// Of an item with modes: whether its use, and its temperature, are past
@@ -598,9 +621,11 @@ impl cosmic::Application for Monitor {
         // See-through, but no blur behind: the theme stays transparent while any
         // kind is set, and only layer surfaces, which there are none of here, blur.
         core.set_auto_blur(cosmic::core::Auto::System.into());
+        let settings_seen = config::modified();
         let settings = Settings::load();
         let mut monitor = Self {
             core,
+            settings_seen,
             tariff_input: settings.tariff.map(|t| decimal(t, 2)).unwrap_or_default(),
             rest_input: if settings.rest_watts > 0.0 { decimal(settings.rest_watts, 0) } else { String::new() },
             bar_models: bar_models(&settings),
@@ -656,12 +681,16 @@ impl cosmic::Application for Monitor {
 
     fn update(&mut self, message: Message) -> app::Task<Message> {
         match message {
-            Message::Tick => return self.read(),
+            Message::Tick => {
+                self.settings_tick();
+                return self.read();
+            }
             Message::Reading(reading) => {
                 self.reading = false;
                 self.take(*reading);
             }
             Message::ReadGivenUp => self.reading = false,
+            Message::Surface(action) => return cosmic::task::message(cosmic::Action::Surface(action)),
             Message::TogglePopup => {
                 // On the bar, the host shows it; hosted, the host opens it.
                 if !self.hosted {
@@ -909,25 +938,51 @@ impl cosmic::Application for Monitor {
                 .into()
             }
         };
-        let degrees = |t: Option<f32>| t.map(|t| format!("{t:.0}°"));
+        let tinted = |icon: widget::icon::Handle, px: u16, hue: chart::Hue| {
+            widget::icon::icon(icon).size(px).class(theme::Svg::Custom(std::rc::Rc::new(move |theme| {
+                iced::widget::svg::Style { color: Some(hue.color(theme.cosmic().is_dark)) }
+            })))
+        };
+        // An icon the height of a line of small text, for the power and the network.
+        let small = ((f32::from(size) * 0.6).round() as u16).max(10);
+        // A small icon and its number, as wide as the widest number can be.
+        let inline = |icon: widget::icon::Handle, hue: chart::Hue, number: String, widest: &'static str| -> Element<'_, Message> {
+            let one_line = iced::widget::text::Wrapping::None;
+            widget::row::with_children(vec![
+                tinted(icon, small, hue).into(),
+                iced::widget::stack(vec![
+                    widget::text::caption(widest)
+                        .wrapping(one_line)
+                        .class(theme::Text::Color(iced::Color::TRANSPARENT))
+                        .into(),
+                    widget::text::caption(number).wrapping(one_line).into(),
+                ])
+                .into(),
+            ])
+            .spacing(2)
+            .align_y(Alignment::Center)
+            .into()
+        };
+        // A use as five dots under its icon, the numbers on hover; the icon
+        // amber past its limit.
+        let dotted = |icon: widget::icon::Handle, hue: chart::Hue, percent: f32, past: bool, tip: String| -> Element<'_, Message> {
+            let hue = if past { chart::Hue::Warm } else { hue };
+            let content = widget::column::with_children(vec![
+                tinted(icon, size, hue).into(),
+                dots::view(percent, size, dark),
+            ])
+            .spacing(3)
+            .align_x(Alignment::Center);
+            applet
+                .applet_tooltip::<Message>(content, tip, self.popup.is_some(), Message::Surface, None)
+                .into()
+        };
         let mut items: Vec<Element<'_, Message>> = Vec::new();
         for bar_item in BarItem::ALL {
             if !self.on_bar(bar_item) {
                 continue;
             }
             let (usage_past, temp_past) = self.past_limits(bar_item);
-            let (show_usage, show_temp) =
-                (self.shows_part(bar_item, Part::Usage), self.shows_part(bar_item, Part::Temp));
-            let usage_and_temp = |usage: f32, temp: Option<f32>| {
-                let mut parts = Vec::new();
-                if show_usage {
-                    parts.push((format!("{usage:.0}%"), "100%", usage_past));
-                }
-                if let Some(temp) = degrees(temp).filter(|_| show_temp) {
-                    parts.push((temp, "100°", temp_past));
-                }
-                parts
-            };
             match bar_item {
                 BarItem::Weather => {
                     if let Some(weather) = &self.weather {
@@ -970,55 +1025,68 @@ impl cosmic::Application for Monitor {
                         });
                     }
                 }
-                BarItem::Cpu => items.push(item(
-                    panels::icon_cpu(),
-                    chart::Hue::Cpu,
-                    usage_and_temp(self.rates.cpu, now.and_then(|n| panels::cpu_temp(&n.chips))),
-                    Look::Normal,
-                )),
+                BarItem::Cpu => {
+                    let temp = now.and_then(|n| panels::cpu_temp(&n.chips));
+                    items.push(dotted(
+                        panels::icon_cpu(),
+                        chart::Hue::Cpu,
+                        self.rates.cpu,
+                        usage_past || temp_past,
+                        dots::usage_tip("CPU", self.rates.cpu, temp),
+                    ));
+                }
                 BarItem::Gpu => {
                     if let Some(gpu) = now.and_then(|n| n.gpu.as_ref()) {
-                        items.push(item(
+                        items.push(dotted(
                             panels::icon_gpu(),
                             chart::Hue::Gpu,
-                            usage_and_temp(gpu.usage, gpu.temp),
-                            Look::Normal,
+                            gpu.usage,
+                            usage_past || temp_past,
+                            dots::usage_tip("GPU", gpu.usage, gpu.temp),
                         ));
                     }
                 }
                 BarItem::Memory => {
                     if let Some(memory) = now.map(|n| &n.memory) {
-                        items.push(item(
+                        let percent = memory.used as f32 / memory.total.max(1) as f32 * 100.0;
+                        let used = format!("{} GB", decimal(memory.used as f64 / 1024f64.powi(3), 1));
+                        items.push(dotted(
                             panels::icon_memory(),
                             chart::Hue::Memory,
-                            vec![(
-                                format!("{} GB", decimal(memory.used as f64 / 1024f64.powi(3), 1)),
-                                "00,0 GB",
-                                usage_past,
-                            )],
-                            Look::Normal,
+                            percent,
+                            usage_past,
+                            dots::memory_tip(texts::texts().memory, percent, &used),
                         ));
                     }
                 }
                 BarItem::Power => {
                     if let Some(watts) = self.total_watts() {
-                        items.push(item(
-                            panels::icon_bolt(),
-                            chart::Hue::Energy,
-                            vec![(format!("{watts:.0} W"), "0000 W", false)],
-                            Look::Small,
-                        ));
+                        items.push(if horizontal {
+                            inline(panels::icon_bolt(), chart::Hue::Energy, format!("{watts:.0} W"), "0000 W")
+                        } else {
+                            item(panels::icon_bolt(), chart::Hue::Energy, vec![(format!("{watts:.0} W"), "0000 W", false)], Look::Small)
+                        });
                     }
                 }
-                BarItem::Network => items.push(item(
-                    crate::central::tiles::icon("network-transmit-receive-symbolic"),
-                    chart::Hue::Download,
-                    vec![
-                        (format!("↓{}", rate_short(self.rates.down)), "↓999K", false),
-                        (format!("↑{}", rate_short(self.rates.up)), "↑999K", false),
-                    ],
-                    Look::Stacked,
-                )),
+                BarItem::Network => items.push(if horizontal {
+                    // An arrow on each line instead of the big icon: narrower.
+                    widget::column::with_children(vec![
+                        inline(panels::icon_down(), chart::Hue::Download, rate_short(self.rates.down), "999K"),
+                        inline(panels::icon_up(), chart::Hue::Upload, rate_short(self.rates.up), "999K"),
+                    ])
+                    .spacing(-2)
+                    .into()
+                } else {
+                    item(
+                        crate::central::tiles::icon("network-transmit-receive-symbolic"),
+                        chart::Hue::Download,
+                        vec![
+                            (format!("↓{}", rate_short(self.rates.down)), "↓999K", false),
+                            (format!("↑{}", rate_short(self.rates.up)), "↑999K", false),
+                        ],
+                        Look::Stacked,
+                    )
+                }),
             }
         }
         if items.is_empty() {
@@ -1074,13 +1142,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn past_its_limit_only_the_part_that_went_past_shows() {
+    fn past_its_limit_the_item_shows_and_the_others_not() {
         let mut monitor = Monitor::default();
         monitor.over_at.insert((BarItem::Cpu, Part::Temp), Instant::now());
 
         assert!(monitor.on_bar(BarItem::Cpu));
-        assert!(monitor.shows_part(BarItem::Cpu, Part::Temp));
-        assert!(!monitor.shows_part(BarItem::Cpu, Part::Usage));
         assert!(!monitor.on_bar(BarItem::Gpu));
     }
 
@@ -1091,16 +1157,13 @@ mod tests {
         monitor.over_at.insert((BarItem::Cpu, Part::Usage), long_ago);
 
         assert!(!monitor.on_bar(BarItem::Cpu));
-        assert!(!monitor.shows_part(BarItem::Cpu, Part::Usage));
     }
 
     #[test]
-    fn always_shows_both_parts() {
+    fn always_shows_whatever_the_use() {
         let mut monitor = Monitor::default();
         monitor.settings.bar_modes.insert(BarItem::Cpu, BarMode::Always);
 
         assert!(monitor.on_bar(BarItem::Cpu));
-        assert!(monitor.shows_part(BarItem::Cpu, Part::Usage));
-        assert!(monitor.shows_part(BarItem::Cpu, Part::Temp));
     }
 }

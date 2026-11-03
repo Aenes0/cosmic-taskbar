@@ -55,7 +55,7 @@ pub struct Chip {
     pub fans: Vec<(String, u32)>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Gpu {
     pub name: String,
     /// Percent.
@@ -191,11 +191,52 @@ pub struct Depth {
     pub procs: bool,
     /// The GPU's energy counter, ~10 ms to ask NVIDIA's driver.
     pub gpu_energy: bool,
+    /// Where the GPU's reading comes from.
+    pub gpu: GpuSource,
+}
+
+/// Who asks the GPU's driver (see `gpu_share`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuSource {
+    /// The panels' host: reads it and shares it.
+    Publish,
+    /// An applet on the bar: the host's reading, while there is a recent one.
+    Shared,
+}
+
+/// The GPU's reading: the host's shared one, for an applet and for what
+/// the bar shows, else its own (and shared, by the host).
+fn pick_gpu(
+    source: GpuSource,
+    full: bool,
+    shared: impl FnOnce() -> Option<Gpu>,
+    own: impl FnOnce() -> Option<Gpu>,
+    publish: impl FnOnce(&Gpu),
+) -> Option<Gpu> {
+    if source == GpuSource::Shared && !full {
+        if let Some(gpu) = shared() {
+            return Some(gpu);
+        }
+    }
+    let gpu = own();
+    if source == GpuSource::Publish {
+        if let Some(gpu) = &gpu {
+            publish(gpu);
+        }
+    }
+    gpu
+}
+
+/// The GPU alone, for the host to share between the panel's readings.
+pub fn share_gpu(energy: bool) {
+    if let Some(gpu) = nvidia(false, energy).or_else(amd_gpu) {
+        super::gpu_share::publish(&gpu);
+    }
 }
 
 /// Everything now, or less, by `depth`.
 pub fn reading(depth: Depth) -> Reading {
-    let Depth { full, procs, gpu_energy } = depth;
+    let Depth { full, procs, gpu_energy, gpu: source } = depth;
     let loadavg = read("/proc/loadavg").unwrap_or_default();
     let mut parts = loadavg.split_whitespace();
     let mut load = [0.0; 3];
@@ -213,7 +254,13 @@ pub fn reading(depth: Depth) -> Reading {
         frequency: full.then(frequency).flatten(),
         memory: memory(),
         chips: chips(full),
-        gpu: nvidia(full, gpu_energy).or_else(amd_gpu),
+        gpu: pick_gpu(
+            source,
+            full,
+            super::gpu_share::latest,
+            || nvidia(full, gpu_energy).or_else(amd_gpu),
+            super::gpu_share::publish,
+        ),
         disks: if full { disks() } else { Vec::new() },
         mounts: if full { mounts() } else { Vec::new() },
         net: net(),
@@ -697,4 +744,44 @@ fn amd_gpu() -> Option<Gpu> {
         });
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn some_gpu(usage: f32) -> Option<Gpu> {
+        Some(Gpu { usage, ..Gpu::default() })
+    }
+
+    #[test]
+    fn an_applet_with_a_recent_shared_reading_never_asks_the_driver() {
+        let asked = Cell::new(false);
+        let gpu = pick_gpu(GpuSource::Shared, false, || some_gpu(10.0), || { asked.set(true); some_gpu(99.0) }, |_| panic!("an applet does not share"));
+        assert_eq!(gpu.unwrap().usage, 10.0);
+        assert!(!asked.get());
+    }
+
+    #[test]
+    fn an_applet_without_one_asks_the_driver_itself_and_shares_nothing() {
+        let gpu = pick_gpu(GpuSource::Shared, false, || None, || some_gpu(99.0), |_| panic!("an applet does not share"));
+        assert_eq!(gpu.unwrap().usage, 99.0);
+    }
+
+    #[test]
+    fn the_full_reading_is_always_its_own() {
+        let gpu = pick_gpu(GpuSource::Shared, true, || some_gpu(10.0), || some_gpu(99.0), |_| {});
+        assert_eq!(gpu.unwrap().usage, 99.0);
+    }
+
+    #[test]
+    fn the_host_reads_and_shares_without_looking_at_the_file() {
+        let shared = Cell::new(None);
+        let gpu = pick_gpu(GpuSource::Publish, true, || panic!("the host does not read the file"), || some_gpu(55.0), |g| shared.set(Some(g.usage)));
+        assert_eq!(gpu.unwrap().usage, 55.0);
+        assert_eq!(shared.get(), Some(55.0));
+        // No GPU: nothing to share.
+        assert!(pick_gpu(GpuSource::Publish, false, || None, || None, |_| panic!("nothing")).is_none());
+    }
 }
