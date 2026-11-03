@@ -56,6 +56,7 @@ const MENU_BODY: &str = "menu-body";
 mod anchor;
 mod application;
 use crate::shared::capture;
+use crate::shared::preview_card as shared_card;
 mod desktop_entry;
 mod drag;
 mod drag_glue;
@@ -283,7 +284,7 @@ pub enum Message {
     Windows(Vec<Window>),
     WindowsReady(calloop::channel::Sender<Command>),
     /// The thumbnail of a window, or `None` when it could not be taken.
-    Thumb(String, Option<cosmic::widget::image::Handle>),
+    Thumb(String, Option<shared_card::Picture>),
     Query(String),
     TypeAhead(String),
     Move(i32),
@@ -399,7 +400,7 @@ pub struct StartMenu {
     windows: Vec<Window>,
     windows_tx: Option<calloop::channel::Sender<Command>>,
     /// The thumbnails of the windows, by id; gone when the menu hides.
-    thumbs: HashMap<String, cosmic::widget::image::Handle>,
+    thumbs: HashMap<String, shared_card::Picture>,
     /// The id of the window card the pointer is on in the preview.
     preview_hot: Option<String>,
     /// The window preview's hover state.

@@ -28,6 +28,15 @@ fn thumb_message_image_is_thumb_some() {
 }
 
 #[test]
+fn thumb_message_keeps_the_picture_size() {
+    let img = image::RgbaImage::from_pixel(4, 3, image::Rgba([1, 2, 3, 255]));
+    match thumb_message("c".to_string(), Some(img)) {
+        Message::Thumb(_, Some((_, w, h))) => assert_eq!((w, h), (4, 3)),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
 fn window_from_minimized() {
     let states = HashSet::from([zcosmic_toplevel_handle_v1::State::Minimized]);
     let w = window_from("i", "t", "app", &states);
@@ -80,8 +89,8 @@ fn refresh_always_sends() {
     assert!(should_send(Some(&a), &a.clone(), true));
 }
 
-fn handle() -> Handle {
-    Handle::from_rgba(1, 1, vec![0, 0, 0, 255])
+fn handle() -> (Handle, u32, u32) {
+    (Handle::from_rgba(1, 1, vec![0, 0, 0, 255]), 1, 1)
 }
 
 #[test]
@@ -89,17 +98,17 @@ fn store_thumb_inserts_replaces_and_removes() {
     let mut thumbs = HashMap::new();
     store_thumb(&mut thumbs, "a".to_string(), Some(handle()));
     assert_eq!(thumbs.len(), 1);
-    let first = thumbs["a"].id();
+    let first = thumbs["a"].0.id();
     store_thumb(&mut thumbs, "a".to_string(), Some(handle()));
     assert_eq!(thumbs.len(), 1);
-    assert_ne!(thumbs["a"].id(), first);
+    assert_ne!(thumbs["a"].0.id(), first);
     store_thumb(&mut thumbs, "a".to_string(), None);
     assert!(thumbs.is_empty());
 }
 
 #[test]
 fn store_thumb_none_of_absent_id_is_harmless() {
-    let mut thumbs: HashMap<String, Handle> = HashMap::new();
+    let mut thumbs: HashMap<String, (Handle, u32, u32)> = HashMap::new();
     store_thumb(&mut thumbs, "nope".to_string(), None);
     assert!(thumbs.is_empty());
 }

@@ -10,6 +10,7 @@ use crate::bar::{
     },
 };
 use crate::bar::launcher_entry::{self, Badge, BadgeUpdate, Badges};
+use crate::shared::preview_card;
 use cctk::{
     sctk::{output::OutputInfo, reexports::calloop::channel::Sender},
     toplevel_info::ToplevelInfo,
@@ -22,7 +23,7 @@ use cctk::{
     },
 };
 use cosmic::{
-    Apply, Element, Task, app,
+    Element, Task, app,
     applet::{
         Context, Size,
         cosmic_panel_config::{PanelAnchor, PanelSize},
@@ -43,9 +44,9 @@ use cosmic::{
         window,
     },
     surface::{self, action::LiveSettings},
-    theme::{self, Button, Container},
+    theme::{self, Button},
     widget::{
-        DndDestination, Image, button, container, divider, dnd_source,
+        DndDestination, button, container, divider, dnd_source,
         icon::{self, from_name},
         menu,
         rectangle_tracker::{RectangleTracker, RectangleUpdate, rectangle_tracker_subscription},
@@ -603,16 +604,10 @@ const HOVER_CLOSE: Duration = Duration::from_millis(300);
 /// How often the previews' pictures are taken again while they show.
 const PREVIEW_REFRESH: Duration = Duration::from_millis(1000);
 
-/// A window, as Windows 11 previews it: the app's icon, the title and the
-/// close button on top, the window's picture under them.
-/// Every picture fits this box by its own shape, so side by side they share
-/// a height and differ in width, as on macOS. At rest it is a little
-/// smaller, and grows into the box under the pointer.
+/// A window's picture fits this box by its own shape, so side by side the
+/// previews share a height and differ in width, as on macOS.
 const PREVIEW_MAX_W: f32 = 300.0;
 const PREVIEW_MAX_H: f32 = 150.0;
-const PREVIEW_LIFT: f32 = 0.03;
-const PREVIEW_RADIUS: f32 = 10.0;
-const PREVIEW_BADGE: f32 = 30.0;
 static PREVIEW_AUTOSIZE_ID: std::sync::LazyLock<iced::id::Id> =
     std::sync::LazyLock::new(|| iced::id::Id::new("taskbar-preview-autosize"));
 
@@ -620,49 +615,6 @@ static PREVIEW_AUTOSIZE_ID: std::sync::LazyLock<iced::id::Id> =
 /// place the software renderer showed noise in, so there is none to spare.
 const PREVIEW_PANEL_PAD: f32 = 2.0;
 const PREVIEW_PANEL_GAP: f32 = 6.0;
-
-/// The picture's size, fitted by the window's own shape.
-fn preview_picture_size(img: Option<&WaylandImage>) -> (f32, f32) {
-    match img {
-        Some(i) if i.width > 0 && i.height > 0 => {
-            let scale = (PREVIEW_MAX_W / i.width as f32).min(PREVIEW_MAX_H / i.height as f32);
-            (
-                (i.width as f32 * scale).round().max(1.0),
-                (i.height as f32 * scale).round().max(1.0),
-            )
-        }
-        _ => (PREVIEW_MAX_W * 0.66, PREVIEW_MAX_H * 0.83),
-    }
-}
-
-/// The label's normal size, and the two smaller ones it falls back to.
-const LABEL_SIZES: [f32; 3] = [14.0, 12.0, 11.0];
-/// How much of its size an average character takes of width.
-const LABEL_CHAR_EM: f32 = 0.56;
-
-/// The label's font size and number of lines for `title` in `width` px: one
-/// line at the normal size if it fits, else two lines, and two lines two and
-/// then three points smaller before it is cut.
-fn label_layout(title: &str, width: f32) -> (f32, u16) {
-    let chars = title.chars().count() as f32;
-    let per_line = |size: f32| (width / (LABEL_CHAR_EM * size)).floor();
-    let [normal, smaller, smallest] = LABEL_SIZES;
-    if chars <= per_line(normal) {
-        (normal, 1)
-    } else if chars <= 2.0 * per_line(normal) - 2.0 {
-        // Two lines lose a little to where the words break.
-        (normal, 2)
-    } else if chars <= 2.0 * per_line(smaller) - 2.0 {
-        (smaller, 2)
-    } else {
-        (smallest, 2)
-    }
-}
-
-/// The width a window's card takes in the row: its picture's.
-fn preview_card_width(img: Option<&WaylandImage>) -> f32 {
-    preview_picture_size(img).0
-}
 
 /// `t` (0 to 1) is how far the preview has faded in, `lift` how far this card has grown.
 fn toplevel_button<'a>(
@@ -674,157 +626,21 @@ fn toplevel_button<'a>(
     t: f32,
     lift: f32,
 ) -> Element<'a, Message> {
-    let fade = move |mut c: iced::Color| {
-        c.a *= t;
-        c
-    };
-    let has_picture = img.is_some();
-    let grow = 1.0 + PREVIEW_LIFT * lift.clamp(0.0, 1.2);
-    let rest = 1.0 / (1.0 + PREVIEW_LIFT);
-
-    let (pw, ph) = preview_picture_size(img);
-    let (box_w, box_h) = (pw, ph);
-    let (dw, dh) = ((pw * rest * grow).round(), (ph * rest * grow).round());
-
-    let picture: Element<_> = match img {
-        Some(img) => Image::new(img.handle.clone())
-            .width(Length::Fixed(dw))
-            .height(Length::Fixed(dh))
-            .content_fit(iced::ContentFit::Fill)
-            .border_radius(PREVIEW_RADIUS)
-            .opacity(t)
-            .into(),
-        // A minimized window has no picture: its app's icon, big, instead.
-        None => icon::icon(app_icon.clone()).size(48).into(),
-    };
-    let frame = container(picture)
-        .center(Length::Fixed(dw))
-        .height(Length::Fixed(dh))
-        .class(Container::custom(move |theme| {
-            let cosmic = theme.cosmic();
-            container::Style {
-                background: (!has_picture).then(|| {
-                    Background::Color(fade(iced::Color {
-                        a: 0.10,
-                        ..cosmic.on_bg_color().into()
-                    }))
-                }),
-                border: Border {
-                    radius: PREVIEW_RADIUS.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        }));
-
-    // The app's icon on the picture's lower right corner, as on macOS; it has
-    // no alpha, so it shows once the card is mostly in.
-    let badge: Element<_> = if t > 0.6 && !is_hovered {
-        container(icon::icon(app_icon).size(PREVIEW_BADGE as u16))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::End)
-            .align_y(Alignment::End)
-            .into()
-    } else {
-        horizontal_space().width(Length::Shrink).into()
-    };
-    // A round close button at the upper right, only while the pointer is on the card.
-    let close: Element<_> = if is_hovered {
-        container(
-            button::custom(icon::from_name("window-close-symbolic").size(12))
-                .class(Button::Destructive)
-                .on_press(Message::CloseToplevel(handle.clone()))
-                .padding(4),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(6)
-        .align_x(Alignment::End)
-        .align_y(Alignment::Start)
-        .into()
-    } else {
-        horizontal_space().width(Length::Shrink).into()
-    };
-    // The window's title, over the picture's foot, only while the pointer is
-    // on it (it takes the app icon's place there): nothing is reserved for it.
-    let caption: Element<_> = if is_hovered && !title.trim().is_empty() {
-        let (size, lines) = label_layout(&title, pw - 2.0 * 6.0 - 2.0 * 8.0);
-        let ink = theme::active().cosmic().on_bg_color();
-        container(
-            container(
-                text(title)
-                    .size(size)
-                    .line_height(1.2)
-                    .class(theme::Text::Color(ink.into()))
-                    .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(lines as usize))),
-            )
-            .padding([4, 8])
-            .class(Container::custom(|theme: &cosmic::Theme| {
-                let mut base: iced::Color = theme.cosmic().background(theme.transparent).base.into();
-                base.a = 1.0;
-                container::Style {
-                    background: Some(Background::Color(base)),
-                    border: Border {
-                        radius: 8.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            })),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(6)
-        .align_x(Alignment::Start)
-        .align_y(Alignment::End)
-        .into()
-    } else {
-        horizontal_space().width(Length::Shrink).into()
-    };
-    let centered = container(frame)
-        .width(Length::Fixed(box_w))
-        .height(Length::Fixed(box_h))
-        .center_x(Length::Fixed(box_w))
-        .center_y(Length::Fixed(box_h));
-    let card = container(iced::widget::stack![centered, close, badge, caption])
-        .width(Length::Fixed(box_w))
-        .height(Length::Fixed(box_h));
-
-    card.apply(button::custom)
-        .on_press(Message::Toggle(handle.clone()))
-        .class(preview_card_style())
-        .padding(0)
-        .apply(mouse_area)
-        .on_enter(Message::ToplevelHoverChanged(handle.clone(), true))
-        .on_middle_press(Message::CloseToplevel(handle.clone()))
-        .on_exit(Message::ToplevelHoverChanged(handle, false))
-        .apply(Element::from)
-}
-
-/// A preview card has no button face: the picture's ring says which
-/// window is in front or under the pointer, as on macOS.
-fn preview_card_style() -> cosmic::theme::Button {
-    let flat = |theme: &cosmic::Theme, base: button::Style| button::Style {
-        background: None,
-        border_radius: theme.cosmic().radius_m().into(),
-        outline_width: 0.0,
-        ..base
-    };
-    Button::Custom {
-        active: Box::new(move |focused, theme| {
-            flat(theme, button::Catalog::active(theme, focused, false, &Button::AppletMenu))
-        }),
-        hovered: Box::new(move |focused, theme| {
-            flat(theme, button::Catalog::hovered(theme, focused, false, &Button::AppletMenu))
-        }),
-        disabled: Box::new(move |theme| {
-            flat(theme, button::Catalog::disabled(theme, &Button::AppletMenu))
-        }),
-        pressed: Box::new(move |focused, theme| {
-            flat(theme, button::Catalog::pressed(theme, focused, false, &Button::AppletMenu))
-        }),
-    }
+    preview_card::card(preview_card::CardParams {
+        picture: img.map(|i| (i.handle.clone(), i.width, i.height)),
+        app_icon,
+        title,
+        hovered: is_hovered,
+        fade: t,
+        lift,
+        max_w: PREVIEW_MAX_W,
+        max_h: PREVIEW_MAX_H,
+        on_press: Message::Toggle(handle.clone()),
+        on_close: Message::CloseToplevel(handle.clone()),
+        on_middle: Message::CloseToplevel(handle.clone()),
+        on_enter: Message::ToplevelHoverChanged(handle.clone(), true),
+        on_exit: Message::ToplevelHoverChanged(handle, false),
+    })
 }
 
 fn window_menu_style(selected: bool) -> cosmic::theme::Button {
@@ -3207,70 +3023,5 @@ impl AsMimeTypes for DndPathBuf {
 
     fn as_bytes(&self, _mime_type: &str) -> Option<std::borrow::Cow<'static, [u8]>> {
         Some(Cow::Owned(self.0.to_str()?.as_bytes().to_vec()))
-    }
-}
-
-#[cfg(test)]
-mod preview_size_tests {
-    use super::*;
-
-    fn picture(width: u32, height: u32) -> WaylandImage {
-        WaylandImage::new(image::RgbaImage::new(width, height))
-    }
-
-    #[test]
-    fn a_portrait_card_is_as_wide_as_its_picture_with_nothing_empty_at_the_sides() {
-        let tall = picture(1080, 1876);
-        let (pw, ph) = preview_picture_size(Some(&tall));
-        assert!(pw < 100.0, "pw={pw}");
-        assert_eq!(ph, PREVIEW_MAX_H);
-        assert_eq!(preview_card_width(Some(&tall)), pw);
-    }
-
-    #[test]
-    fn a_wide_window_keeps_its_own_width_up_to_the_maximum() {
-        let ultrawide = picture(3440, 1396);
-        assert_eq!(preview_picture_size(Some(&ultrawide)).0, PREVIEW_MAX_W);
-        assert_eq!(preview_card_width(Some(&ultrawide)), PREVIEW_MAX_W);
-        let hd = picture(1920, 1080);
-        let (pw, ph) = preview_picture_size(Some(&hd));
-        assert!((pw / ph - 16.0 / 9.0).abs() < 0.02, "{pw}x{ph}");
-    }
-
-    #[test]
-    fn no_picture_still_has_a_card() {
-        assert_eq!(preview_card_width(None), preview_picture_size(None).0);
-    }
-
-    #[test]
-    fn a_short_title_is_one_line_at_the_normal_size() {
-        assert_eq!(label_layout("Terminal", 300.0), (14.0, 1));
-    }
-
-    #[test]
-    fn a_longer_title_wraps_to_two_lines_before_it_shrinks() {
-        let title = "Visualização em gráfico - Planilha de custos";
-        assert_eq!(label_layout(title, 190.0), (14.0, 2));
-    }
-
-    #[test]
-    fn a_long_title_shrinks_two_points_then_three_then_is_cut() {
-        let long = "Visualização em gráfico das vendas por região 2026";
-        assert_eq!(label_layout(long, 190.0), (12.0, 2));
-        let very_long = "Visualização em gráfico das vendas por região e por mês - Planilha".repeat(2);
-        assert_eq!(label_layout(&very_long, 190.0), (11.0, 2));
-    }
-
-    #[test]
-    fn the_label_layout_survives_an_empty_title_and_no_room() {
-        assert_eq!(label_layout("", 190.0), (14.0, 1));
-        assert_eq!(label_layout("abc", 0.0).1, 2);
-    }
-
-    #[test]
-    fn a_degenerate_picture_does_not_divide_by_zero() {
-        let empty = picture(0, 0);
-        let (pw, ph) = preview_picture_size(Some(&empty));
-        assert!(pw > 0.0 && ph > 0.0);
     }
 }

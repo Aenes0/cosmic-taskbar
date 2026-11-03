@@ -3,8 +3,13 @@
 use super::*;
 use super::preview::{self, CARD_H, CARD_W, GAP, PAD};
 
-/// Characters of a title that fit the card's header.
-const TITLE_CHARS: usize = 22;
+/// Room left around a window's picture inside its cell of the grid.
+const CELL_INSET: f32 = 4.0;
+
+/// The box a window's picture fits in, inside a `cell_w` x `cell_h` cell.
+fn picture_box(cell_w: f32, cell_h: f32) -> (f32, f32) {
+    ((cell_w - 2.0 * CELL_INSET).max(1.0), (cell_h - 2.0 * CELL_INSET).max(1.0))
+}
 
 /// The title to show: an empty or blank one reads "untitled".
 fn card_title(title: &str) -> &str {
@@ -43,7 +48,7 @@ impl StartMenu {
         for line in rows_of(&windows, cols) {
             let mut row = widget::row::with_capacity(line.len()).spacing(GAP);
             for window in line {
-                row = row.push(self.window_card(window, p));
+                row = row.push(self.window_card(window));
             }
             grid = grid.push(row);
         }
@@ -77,55 +82,32 @@ impl StartMenu {
         Some(iced::widget::pin(card).x(rect.x).y(rect.y).width(Length::Fill).height(Length::Fill).into())
     }
 
-    /// One window: its app's icon, title and (under the pointer) close
-    /// button on top, its picture under them.
-    fn window_card(&self, window: &Window, p: Palette) -> Element<'_, Message> {
+    /// One window, as the taskbar previews it, centred in its cell of the grid.
+    fn window_card(&self, window: &Window) -> Element<'_, Message> {
         let id = window.id.clone();
         let hot = self.preview_hot.as_deref() == Some(id.as_str());
-        let app_icon = self.window_icon(window);
-        let close: Element<Message> = if hot {
-            button::custom(icon::from_name("window-close-symbolic").size(16))
-                .class(theme::Button::Destructive)
-                .on_press(Message::CloseWindow(id.clone()))
-                .padding(4)
-                .into()
-        } else {
-            // The same room, so the title doesn't move.
-            widget::space::horizontal().width(Length::Fixed(24.0)).into()
-        };
-        let header = widget::row::with_capacity(3)
-            .push(widget::icon::icon(app_icon.clone()).size(16))
-            .push(
-                widget::text::body(ellipsize(card_title(&window.title), TITLE_CHARS))
-                    .wrapping(Wrapping::None)
-                    .width(Length::Fill),
-            )
-            .push(close)
-            .spacing(8)
-            .height(Length::Fixed(24.0))
-            .align_y(Alignment::Center);
-        // No picture (minimized, or not taken yet): the app's icon, big.
-        let picture: Element<Message> = match self.thumbs.get(&id) {
-            Some(handle) => iced::widget::image(handle.clone()).content_fit(iced::ContentFit::Contain).into(),
-            None => widget::icon::icon(app_icon).size(48).into(),
-        };
-        let picture = widget::container(picture).center(Length::Fill).class(theme::Container::custom(|t| {
-            widget::container::Style {
-                border: iced::Border { radius: t.cosmic().radius_s().into(), ..Default::default() },
-                ..Default::default()
-            }
-        }));
-        let content = widget::column::with_capacity(2).push(header).push(picture).spacing(6);
-        let card = button::custom(content)
-            .on_press(Message::Activate(id.clone()))
-            .class(flat_class(p, window.active))
+        let (max_w, max_h) = picture_box(CARD_W, CARD_H);
+        let card = shared_card::card(shared_card::CardParams {
+            // No picture (minimized, or not taken yet): the app's icon, big.
+            picture: self.thumbs.get(&id).cloned(),
+            app_icon: self.window_icon(window),
+            title: card_title(&window.title).to_string(),
+            hovered: hot,
+            fade: 1.0,
+            lift: if hot { 1.0 } else { 0.0 },
+            max_w,
+            max_h,
+            on_press: Message::Activate(id.clone()),
+            on_close: Message::CloseWindow(id.clone()),
+            on_middle: Message::CloseWindow(id.clone()),
+            on_enter: Message::PreviewHot(Some(id)),
+            on_exit: Message::PreviewHot(None),
+        });
+        widget::container(card)
             .width(Length::Fixed(CARD_W))
             .height(Length::Fixed(CARD_H))
-            .padding([4, 4, 8, 8]);
-        widget::mouse_area(card)
-            .on_enter(Message::PreviewHot(Some(id.clone())))
-            .on_exit(Message::PreviewHot(None))
-            .on_middle_press(Message::CloseWindow(id))
+            .center_x(Length::Fixed(CARD_W))
+            .center_y(Length::Fixed(CARD_H))
             .into()
     }
 }

@@ -192,7 +192,7 @@ impl StartMenu {
         }
     }
 
-    pub(super) fn preview_thumb(&mut self, id: String, handle: Option<cosmic::widget::image::Handle>) {
+    pub(super) fn preview_thumb(&mut self, id: String, handle: Option<shared_card::Picture>) {
         self.capturing.remove(&id);
         if should_keep(self.hover.is_shown(), &self.shown_ids(), &id) {
             toplevels::store_thumb(&mut self.thumbs, id, handle);

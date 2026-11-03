@@ -36,3 +36,20 @@ fn it_scrolls_only_when_the_content_is_taller() {
     assert!(!needs_scroll(400.0, 400.0));
     assert!(!needs_scroll(100.0, 400.0));
 }
+
+#[test]
+fn the_picture_box_fits_inside_the_cell_and_leaves_it_unchanged() {
+    let (w, h) = picture_box(CARD_W, CARD_H);
+    assert_eq!((w, h), (CARD_W - 2.0 * CELL_INSET, CARD_H - 2.0 * CELL_INSET));
+    // A full HD window, grown under the pointer, still fits the cell.
+    let (pw, ph) = crate::shared::preview_card::picture_size(Some((1920, 1080)), w, h);
+    let grow = 1.0 + crate::shared::preview_card::LIFT * 1.2;
+    assert!(pw * grow / (1.0 + crate::shared::preview_card::LIFT) <= CARD_W, "pw={pw}");
+    assert!(ph <= CARD_H, "ph={ph}");
+}
+
+#[test]
+fn the_picture_box_never_collapses() {
+    let (w, h) = picture_box(0.0, 0.0);
+    assert!(w > 0.0 && h > 0.0);
+}

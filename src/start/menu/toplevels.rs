@@ -38,18 +38,18 @@ fn capture_gate(windows_shown: bool, preview_shown: bool) -> bool {
 
 /// The menu's message for a finished capture.
 fn thumb_message(id: String, image: Option<image::RgbaImage>) -> Message {
-    let handle = image.map(|img| {
+    let picture = image.map(|img| {
         let (w, h) = img.dimensions();
-        cosmic::widget::image::Handle::from_rgba(w, h, img.into_raw())
+        (cosmic::widget::image::Handle::from_rgba(w, h, img.into_raw()), w, h)
     });
-    Message::Thumb(id, handle)
+    Message::Thumb(id, picture)
 }
 
-/// Keeps the thumbnail of a window; `None` forgets it.
+/// Keeps the thumbnail of a window, with its size; `None` forgets it.
 pub(super) fn store_thumb(
-    thumbs: &mut HashMap<String, cosmic::widget::image::Handle>,
+    thumbs: &mut HashMap<String, shared_card::Picture>,
     id: String,
-    handle: Option<cosmic::widget::image::Handle>,
+    handle: Option<shared_card::Picture>,
 ) {
     match handle {
         Some(handle) => {
