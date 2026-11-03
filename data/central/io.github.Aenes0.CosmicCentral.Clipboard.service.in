@@ -1,4 +1,4 @@
 [D-BUS Service]
 Name=io.github.Aenes0.CosmicCentral.Clipboard
-Exec=@bindir@/cosmic-ext-applet-central --clipboard
+Exec=@bindir@/cosmic-taskbar central --clipboard
 SystemdService=central-clipboard.service

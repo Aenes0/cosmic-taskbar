@@ -1,4 +1,4 @@
 [D-BUS Service]
 Name=io.github.Aenes0.CosmicCentral.Panels
-Exec=@bindir@/cosmic-ext-applet-central --panels
+Exec=@bindir@/cosmic-taskbar central --panels
 SystemdService=central-panels.service

@@ -6,7 +6,7 @@ PartOf=graphical-session.target
 [Service]
 Type=dbus
 BusName=io.github.Aenes0.CosmicCentral.Clipboard
-ExecStart=@bindir@/cosmic-ext-applet-central --clipboard
+ExecStart=@bindir@/cosmic-taskbar central --clipboard
 Restart=on-failure
 RestartSec=2
 
