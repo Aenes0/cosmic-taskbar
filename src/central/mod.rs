@@ -42,16 +42,7 @@ pub fn run() -> cosmic::iced::Result {
         // SAFETY: first thing, before any thread starts.
         unsafe { std::env::set_var("TOKIO_WORKER_THREADS", "2") };
     }
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        // A write that fails is dropped: told on stderr, if that is what
-        // failed, it would abort the program.
-        .log_internal_errors(false)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn,cosmic_taskbar=info".into()),
-        )
-        .init();
+    crate::shared::logging::init("warn,cosmic_taskbar=info", &[]);
     // The Central's and the monitor's panels, for every screen: one host,
     // hidden between uses; a second run only hands it what it was asked.
     if let Some(at) = panels {

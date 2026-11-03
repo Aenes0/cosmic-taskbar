@@ -478,15 +478,9 @@ pub fn strings() -> &'static Strings {
         sound: "Son",
         muted: "Muet",
     };
-    let lang = ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .iter()
-        .find_map(|v| std::env::var(v).ok().filter(|l| !l.is_empty()))
-        .unwrap_or_default();
-    if lang.starts_with("pt") {
-        &PT
-    } else if lang.starts_with("fr") {
-        &FR
-    } else {
-        &EN
+    match crate::shared::locale::language() {
+        crate::shared::locale::Language::Portuguese => &PT,
+        crate::shared::locale::Language::French => &FR,
+        crate::shared::locale::Language::English => &EN,
     }
 }

@@ -5,4 +5,5 @@
 pub mod anim;
 pub mod capture;
 pub mod locale;
+pub mod logging;
 pub mod preview_card;

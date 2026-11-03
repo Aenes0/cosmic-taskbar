@@ -26,16 +26,7 @@ pub fn run() -> cosmic::iced::Result {
     WORKERS.get_or_init(|| std::env::var_os("TOKIO_WORKER_THREADS"));
     // SAFETY: nothing else runs yet.
     unsafe { std::env::set_var("TOKIO_WORKER_THREADS", "1") };
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        // A write that fails is dropped: told on stderr, if that is what
-        // failed, it would abort the program.
-        .log_internal_errors(false)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| DEFAULT_LOG.into()),
-        )
-        .init();
+    crate::shared::logging::init(DEFAULT_LOG, &[]);
     // The menu, which stays running, hidden between uses: a second run
     // only asks the first to show or hide.
     // Win+X's "Desktop", by itself.

@@ -13,6 +13,33 @@ fn is_portuguese(values: &[Option<String>]) -> bool {
         .is_some_and(|v| v.starts_with("pt"))
 }
 
+/// The languages the texts come in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    Portuguese,
+    French,
+    English,
+}
+
+/// The language of the first non-empty of `LC_ALL`, `LC_MESSAGES` and `LANG`
+/// (in that order, as `values` gives them): Portuguese, French, or else English.
+fn language_of(values: &[Option<String>]) -> Language {
+    match values.iter().flatten().find(|v| !v.is_empty()) {
+        Some(v) if v.starts_with("pt") => Language::Portuguese,
+        Some(v) if v.starts_with("fr") => Language::French,
+        _ => Language::English,
+    }
+}
+
+/// The session's language.
+pub fn language() -> Language {
+    let values: Vec<Option<String>> = ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .map(|v| std::env::var(v).ok())
+        .collect();
+    language_of(&values)
+}
+
 /// Whether the session's language is Portuguese.
 pub fn portuguese() -> bool {
     let values: Vec<Option<String>> = ["LC_ALL", "LC_MESSAGES", "LANG"]
@@ -28,6 +55,21 @@ mod tests {
 
     fn some(s: &str) -> Option<String> {
         Some(s.to_owned())
+    }
+
+    #[test]
+    fn the_language_is_portuguese_french_or_else_english() {
+        assert_eq!(language_of(&[some("pt_BR.UTF-8"), None, None]), Language::Portuguese);
+        assert_eq!(language_of(&[None, some("fr_FR.UTF-8"), some("pt_BR")]), Language::French);
+        assert_eq!(language_of(&[some("de_DE.UTF-8"), None, None]), Language::English);
+        assert_eq!(language_of(&[some(""), None, some("fr_CA")]), Language::French);
+        assert_eq!(language_of(&[None, None, None]), Language::English);
+    }
+
+    #[test]
+    fn portuguese_agrees_with_the_language() {
+        let values = [some("pt_PT"), None, None];
+        assert_eq!(is_portuguese(&values), language_of(&values) == Language::Portuguese);
     }
 
     #[test]
