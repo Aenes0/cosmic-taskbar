@@ -58,6 +58,21 @@ pub fn view<'a, M: 'a>(percent: f32, icon_px: u16, dark: bool) -> Element<'a, M>
     widget::row::with_children(dots.collect::<Vec<_>>()).spacing(gap).into()
 }
 
+/// The thermometer beside an icon, by its setting: `None`, not shown;
+/// `Some(true)`, red (past the limit, or lately); `Some(false)`, shown in the
+/// bar's own color. Nothing without a temperature to tell.
+pub fn thermometer(mode: super::config::BarMode, hot: bool, has_temp: bool) -> Option<bool> {
+    use super::config::BarMode;
+    if !has_temp {
+        return None;
+    }
+    match mode {
+        BarMode::Never => None,
+        BarMode::Always => Some(hot),
+        BarMode::Over => hot.then_some(true),
+    }
+}
+
 /// What the hover says: "CPU 95% · 72°".
 pub fn usage_tip(name: &str, percent: f32, temp: Option<f32>) -> String {
     let mut tip = format!("{name} {:.0}%", percent.max(0.0));
@@ -138,6 +153,18 @@ mod tests {
             assert!(f32::from(icon) + 3.0 + dot <= f32::from(icon + 2 * padding), "icon {icon}");
             assert!(dot >= 3.0 && gap >= 1.0);
         }
+    }
+
+    #[test]
+    fn the_thermometer_follows_its_setting() {
+        use crate::central::monitor::config::BarMode;
+        assert_eq!(thermometer(BarMode::Never, true, true), None);
+        assert_eq!(thermometer(BarMode::Always, false, true), Some(false));
+        assert_eq!(thermometer(BarMode::Always, true, true), Some(true));
+        assert_eq!(thermometer(BarMode::Over, false, true), None);
+        assert_eq!(thermometer(BarMode::Over, true, true), Some(true));
+        // No temperature (a GPU that says none): nothing to show.
+        assert_eq!(thermometer(BarMode::Always, true, false), None);
     }
 
     #[test]

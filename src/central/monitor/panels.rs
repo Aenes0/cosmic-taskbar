@@ -49,6 +49,9 @@ pub fn icon_memory() -> widget::icon::Handle {
 pub fn icon_bolt() -> widget::icon::Handle {
     svg(BOLT_SVG)
 }
+pub fn icon_thermometer() -> widget::icon::Handle {
+    svg(THERMOMETER_SVG)
+}
 pub fn icon_down() -> widget::icon::Handle {
     svg(DOWN_SVG)
 }
@@ -1083,6 +1086,17 @@ impl Monitor {
                 ),
             });
         }
+        // The thermometer beside the CPU's and the GPU's icons.
+        bar = bar.push(
+            widget::column::with_children(vec![
+                widget::text::body(t.bar_thermometer).into(),
+                widget::segmented_control::horizontal(&self.thermometer_model)
+                    .on_activate(Message::ThermometerMode)
+                    .into(),
+            ])
+            .spacing(spacing.space_xxs)
+            .padding([4, 0]),
+        );
         bar = bar.push(faint(t.bar_limits));
         let content = widget::column::with_children(vec![
             widget::row::with_children(vec![

@@ -193,6 +193,8 @@ pub struct Settings {
     pub bar_hidden: Vec<BarItem>,
     /// Of those with modes, the ones set.
     pub bar_modes: HashMap<BarItem, BarMode>,
+    /// The red thermometer beside the CPU's and the GPU's icons.
+    pub thermometer: BarMode,
     /// Price of a kWh, in the local money.
     pub tariff: Option<f64>,
     /// Watts the rest of the computer takes, guessed: board, memory,
@@ -210,6 +212,7 @@ impl Default for Settings {
             folded: Vec::new(),
             bar_hidden: Vec::new(),
             bar_modes: HashMap::new(),
+            thermometer: BarMode::Over,
             tariff: None,
             rest_watts: 0.0,
             weather_expanded: false,
@@ -260,6 +263,9 @@ impl Settings {
             folded: panels("folded").unwrap_or_default(),
             bar_hidden: bar_hidden.into_iter().filter(|b| !b.has_modes()).collect(),
             bar_modes,
+            thermometer: get::<String>("bar_thermometer")
+                .and_then(|id| BarMode::ALL.into_iter().find(|m| m.id() == id))
+                .unwrap_or(BarMode::Over),
             tariff: get::<f64>("tariff").filter(|t| *t > 0.0),
             rest_watts: get::<f64>("rest_watts").unwrap_or(0.0).max(0.0),
             weather_expanded: get::<bool>("weather_expanded").unwrap_or(false),
@@ -305,6 +311,11 @@ impl Settings {
         self.bar_modes.get(&item).copied().unwrap_or(BarMode::Over)
     }
 
+    pub fn set_thermometer(&mut self, mode: BarMode) {
+        self.thermometer = mode;
+        set("bar_thermometer", mode.id());
+    }
+
     pub fn set_bar_mode(&mut self, item: BarItem, mode: BarMode) {
         self.bar_modes.insert(item, mode);
         self.save_bar_modes();
@@ -341,6 +352,8 @@ impl Settings {
         self.folded.clear();
         self.bar_hidden.clear();
         self.bar_modes.clear();
+        self.thermometer = defaults.thermometer;
+        set("bar_thermometer", self.thermometer.id());
         save_panels("order", &self.order);
         save_panels("hidden", &[]);
         save_panels("folded", &[]);

@@ -105,6 +105,8 @@ pub enum Message {
     Shift(Panel, bool),
     ToggleBar(BarItem),
     BarMode(BarItem, Entity),
+    /// The thermometer's setting chosen.
+    ThermometerMode(Entity),
     ResetLayout,
     ToggleEnergySettings,
     TariffInput(String),
@@ -209,6 +211,8 @@ pub struct Monitor {
     closed_at: Option<Instant>,
     /// Each item with modes: its choice on the arranging.
     bar_models: Vec<(BarItem, SingleSelectModel)>,
+    /// The thermometer's choices, the one set chosen.
+    pub(crate) thermometer_model: SingleSelectModel,
     /// When each item's use and temperature were last past their limits.
     over_at: HashMap<(BarItem, Part), Instant>,
     /// The GPU's energy counter as last read, and when.
@@ -224,6 +228,18 @@ pub struct Monitor {
     /// What a search found; none while not searched.
     pub(crate) place_results: Option<Vec<weather::Place>>,
     pub(crate) place_searching: bool,
+}
+
+/// The thermometer's choices, the one set chosen.
+fn thermometer_model(settings: &Settings) -> SingleSelectModel {
+    let mut model = SingleSelectModel::default();
+    for mode in BarMode::ALL {
+        let entity = model.insert().text(mode.name()).data(mode).id();
+        if mode == settings.thermometer {
+            model.activate(entity);
+        }
+    }
+    model
 }
 
 /// The choices of each item with modes, the one set chosen.
@@ -269,6 +285,7 @@ impl Monitor {
             self.settings_seen = seen;
             self.settings = Settings::load();
             self.bar_models = bar_models(&self.settings);
+            self.thermometer_model = thermometer_model(&self.settings);
         }
     }
 
@@ -629,6 +646,7 @@ impl cosmic::Application for Monitor {
             tariff_input: settings.tariff.map(|t| decimal(t, 2)).unwrap_or_default(),
             rest_input: if settings.rest_watts > 0.0 { decimal(settings.rest_watts, 0) } else { String::new() },
             bar_models: bar_models(&settings),
+            thermometer_model: thermometer_model(&settings),
             settings,
             info: sample::info(),
             ..Self::default()
@@ -763,9 +781,16 @@ impl cosmic::Application for Monitor {
                     }
                 }
             }
+            Message::ThermometerMode(entity) => {
+                self.thermometer_model.activate(entity);
+                if let Some(mode) = self.thermometer_model.data::<BarMode>(entity).copied() {
+                    self.settings.set_thermometer(mode);
+                }
+            }
             Message::ResetLayout => {
                 self.settings.reset();
                 self.bar_models = bar_models(&self.settings);
+                self.thermometer_model = thermometer_model(&self.settings);
             }
             Message::ToggleEnergySettings => self.energy_settings = !self.energy_settings,
             Message::TariffInput(text) => {
@@ -965,10 +990,28 @@ impl cosmic::Application for Monitor {
         };
         // A use as five dots under its icon, the numbers on hover; the icon
         // amber past its limit.
-        let dotted = |icon: widget::icon::Handle, hue: chart::Hue, percent: f32, past: bool, tip: String| -> Element<'_, Message> {
+        // `thermometer`: beside the icon, red or not (see `dots::thermometer`).
+        let dotted = |icon: widget::icon::Handle,
+                      hue: chart::Hue,
+                      percent: f32,
+                      past: bool,
+                      thermometer: Option<bool>,
+                      tip: String|
+         -> Element<'_, Message> {
             let hue = if past { chart::Hue::Warm } else { hue };
+            let mut top = widget::row::with_capacity(2).push(tinted(icon, size, hue));
+            if let Some(red) = thermometer {
+                let hue = if red { chart::Hue::Hot } else { chart::Hue::Fine };
+                let mut thermometer = widget::icon::icon(panels::icon_thermometer()).size(small);
+                if red {
+                    thermometer = thermometer.class(theme::Svg::Custom(std::rc::Rc::new(move |theme| {
+                        iced::widget::svg::Style { color: Some(hue.color(theme.cosmic().is_dark)) }
+                    })));
+                }
+                top = top.push(thermometer);
+            }
             let content = widget::column::with_children(vec![
-                tinted(icon, size, hue).into(),
+                top.spacing(1).align_y(Alignment::End).into(),
                 dots::view(percent, size, dark),
             ])
             .spacing(3)
@@ -983,6 +1026,8 @@ impl cosmic::Application for Monitor {
                 continue;
             }
             let (usage_past, temp_past) = self.past_limits(bar_item);
+            // Hot now or lately: the thermometer stays as long as the item would.
+            let hot = temp_past || self.lingers(bar_item, Part::Temp);
             match bar_item {
                 BarItem::Weather => {
                     if let Some(weather) = &self.weather {
@@ -1027,21 +1072,25 @@ impl cosmic::Application for Monitor {
                 }
                 BarItem::Cpu => {
                     let temp = now.and_then(|n| panels::cpu_temp(&n.chips));
+                    let thermometer = dots::thermometer(self.settings.thermometer, hot, temp.is_some());
                     items.push(dotted(
                         panels::icon_cpu(),
                         chart::Hue::Cpu,
                         self.rates.cpu,
-                        usage_past || temp_past,
+                        usage_past || (temp_past && thermometer.is_none()),
+                        thermometer,
                         dots::usage_tip("CPU", self.rates.cpu, temp),
                     ));
                 }
                 BarItem::Gpu => {
                     if let Some(gpu) = now.and_then(|n| n.gpu.as_ref()) {
+                        let thermometer = dots::thermometer(self.settings.thermometer, hot, gpu.temp.is_some());
                         items.push(dotted(
                             panels::icon_gpu(),
                             chart::Hue::Gpu,
                             gpu.usage,
-                            usage_past || temp_past,
+                            usage_past || (temp_past && thermometer.is_none()),
+                            thermometer,
                             dots::usage_tip("GPU", gpu.usage, gpu.temp),
                         ));
                     }
@@ -1055,6 +1104,7 @@ impl cosmic::Application for Monitor {
                             chart::Hue::Memory,
                             percent,
                             usage_past,
+                            None,
                             dots::memory_tip(texts::texts().memory, percent, &used),
                         ));
                     }
