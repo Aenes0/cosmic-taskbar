@@ -175,6 +175,8 @@ impl DockItem {
         badge: &Badge,
         window_id: window::Id,
         filter: Option<&dyn Fn(&ToplevelInfo) -> bool>,
+        // How much the icon has grown and how high it hops, in px.
+        zoom: (f32, f32),
     ) -> Element<'_, Message> {
         let Self {
             toplevels,
@@ -272,6 +274,9 @@ impl DockItem {
                 .into()
         };
 
+        // Larger and higher on the screen only: its room in the layout is the same.
+        let icon: Element<_> = crate::bar::zoomed::Zoomed::new(icon, zoom.0, zoom.1).into();
+
         // The line under a running app: always there, so the icons don't
         // move; long and in the accent color under the app in front.
         let bar_length = match (toplevel_count, is_focused) {
@@ -341,7 +346,7 @@ impl DockItem {
             mouse_area(
                 icon_button
                     .on_press_maybe(if toplevel_count == 0 {
-                        launch_on_preferred_gpu(desktop_info, gpus)
+                        launch_on_preferred_gpu(desktop_info, gpus).map(|_| Message::LaunchItem(*id))
                     } else if toplevel_count == 1 {
                         filtered_toplevels
                             .first()
@@ -465,6 +470,8 @@ pub struct Taskbar {
     /// the compositor is slow to say it is active, so a click soon after
     /// minimizes it rather than asking again.
     last_activate: Option<(ExtForeignToplevelHandleV1, std::time::Instant)>,
+    /// The icons' zoom under the pointer and the hop of a launching app.
+    fx: crate::bar::fx::Fx,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -516,6 +523,10 @@ pub enum Message {
     OpenActive,
     Surface(surface::Action<Message>),
     PreviewFadeTick,
+    /// A frame of the icons' zoom and hop.
+    FxTick,
+    /// Click on an app that is not open: it hops, then starts.
+    LaunchItem(u32),
 }
 
 fn index_in_list(
@@ -583,8 +594,11 @@ const TOPLEVEL_BUTTON_HEIGHT: f32 = 260.0;
 const ACTIVATE_GRACE: Duration = Duration::from_secs(8);
 /// One frame of the preview's animations: 30 Hz keeps the software redraw cheap, and
 /// every frame is a full software redraw of the popup.
+/// One frame of the icons' zoom and hop: 60 Hz, on a bar a few dozen px tall.
+const FX_FRAME: Duration = Duration::from_millis(16);
 const PREVIEW_FRAME: Duration = Duration::from_millis(33);
-const HOVER_OPEN: Duration = Duration::from_millis(400);
+/// How long the pointer rests on an app before its previews open.
+const HOVER_OPEN: Duration = Duration::from_millis(250);
 const HOVER_CLOSE: Duration = Duration::from_millis(300);
 /// How often the previews' pictures are taken again while they show.
 const PREVIEW_REFRESH: Duration = Duration::from_millis(1000);
@@ -1340,6 +1354,14 @@ impl Taskbar {
             &badge,
             window_id,
             Some(&filter),
+            (
+                crate::bar::fx::REST_SCALE * self.fx.scale_of(dock_item.id),
+                self.fx.rise_of(
+                    dock_item.id,
+                    f32::from(self.core.applet.suggested_size(false).0),
+                    has_windows,
+                ),
+            ),
         );
         if has_windows || !interaction_enabled {
             return button;
@@ -2111,9 +2133,15 @@ impl cosmic::Application for Taskbar {
         } else {
             Subscription::none()
         };
+        let fx_frames = if self.fx.animating() {
+            iced::time::every(FX_FRAME).map(|_| Message::FxTick)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             refresh,
             fade,
+            fx_frames,
             launcher_entry::subscription().map(Message::Badge),
             wayland_subscription().map(Message::Wayland),
             listen_with(|e, _, id| match e {
@@ -2235,6 +2263,7 @@ impl Taskbar {
                 return Task::batch([close, self.open_preview(id, parent_window_id)]);
             }
             Message::IconHover(id, parent_window_id, entering) => {
+                self.fx.set_hover(id, entering);
                 tracing::trace!("DIAG IconHover id={id} parent={parent_window_id:?} entering={entering} preview_of={:?} hover={:?} popup={:?}", self.preview_of(), self.hover, self.popup.as_ref().map(|p| (p.id, p.popup_type == PopupType::Preview)));
                 self.hover_gen += 1;
                 let hover_gen = self.hover_gen;
@@ -2274,6 +2303,8 @@ impl Taskbar {
             }
             Message::PreviewOnStart => return self.preview_on_start(),
             Message::PointerLeft(id) => {
+                // Out of the bar, so out of every icon: the zoom comes back down.
+                self.fx.clear_hover();
                 tracing::trace!("DIAG PointerLeft id={id:?} hover={:?}", self.hover);
                 // Out of a surface fast, past its edge, its widgets may keep
                 // the pointer's last place inside them and never see it
@@ -2306,6 +2337,32 @@ impl Taskbar {
                         }
                     }
                     _ => return self.begin_close_preview(),
+                }
+            }
+            Message::FxTick => {
+                let items: Vec<(u32, f32)> = self
+                    .rectangles
+                    .iter()
+                    .filter_map(|(k, r)| match k {
+                        DockItemId::Item(i) => Some((*i, r.x + r.width / 2.0)),
+                        _ => None,
+                    })
+                    .collect();
+                let open: Vec<u32> = items
+                    .iter()
+                    .map(|(i, _)| *i)
+                    .filter(|i| self.has_windows(*i))
+                    .collect();
+                let icon_px = f32::from(self.core.applet.suggested_size(false).0);
+                self.fx.tick(&items, icon_px, &|id| open.contains(&id));
+            }
+            Message::LaunchItem(id) => {
+                let launch = self.item(id).and_then(|item| {
+                    launch_on_preferred_gpu(&item.desktop_info, self.gpus.as_deref())
+                });
+                if let Some(message) = launch {
+                    self.fx.launch(id);
+                    return self.update_main(message);
                 }
             }
             Message::PreviewFadeTick => {

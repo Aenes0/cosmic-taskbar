@@ -8,6 +8,7 @@ mod launcher_entry;
 mod texts;
 mod wayland_handler;
 mod wayland_subscription;
+mod zoomed;
 
 pub const APP_ID: &str = "io.github.Aenes0.CosmicTaskbar";
 

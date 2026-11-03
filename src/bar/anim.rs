@@ -5,19 +5,18 @@
 
 pub use crate::shared::anim::{Spring, motion_scale};
 
-pub const MAX_ZOOM: f32 = 1.7;
-pub const ZOOM_RADIUS_ICONS: f32 = 2.5;
-
-/// Scale of an icon whose centre is `distance_px` from the pointer: the
-/// maximum at the pointer, a cosine falloff, 1.0 from the radius on.
-pub fn zoom_scale(distance_px: f32, icon_px: f32) -> f32 {
-    let radius = ZOOM_RADIUS_ICONS * icon_px;
+/// How much an icon whose centre is `distance_px` from the pointer is
+/// magnified: `peak` under the pointer, half of the way to it (so +25% for a
+/// +50% peak) at one icon pitch, back to 1.0 two pitches away. A cosine in
+/// between, as on macOS.
+pub fn magnification(distance_px: f32, pitch_px: f32, peak: f32) -> f32 {
+    let radius = 2.0 * pitch_px;
     let d = distance_px.abs();
-    if d >= radius {
+    if radius <= 0.0 || d >= radius {
         return 1.0;
     }
     let k = 0.5 * (1.0 + (std::f32::consts::PI * d / radius).cos());
-    1.0 + (MAX_ZOOM - 1.0) * k
+    1.0 + (peak - 1.0) * k
 }
 
 const BOUNCE_FIRST_S: f32 = 0.5;
@@ -44,29 +43,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zoom_peaks_at_the_pointer_and_ends_at_the_radius() {
-        assert_eq!(zoom_scale(0.0, 32.0), MAX_ZOOM);
-        assert_eq!(zoom_scale(80.0, 32.0), 1.0);
-        assert_eq!(zoom_scale(500.0, 32.0), 1.0);
+    fn the_icon_under_the_pointer_gets_the_peak_and_a_neighbour_half_of_it() {
+        assert_eq!(magnification(0.0, 52.0, 1.5), 1.5);
+        assert!((magnification(52.0, 52.0, 1.5) - 1.25).abs() < 0.001);
+        assert!((magnification(-52.0, 52.0, 1.5) - 1.25).abs() < 0.001);
     }
 
     #[test]
-    fn zoom_falls_monotonically() {
-        let mut prev = zoom_scale(0.0, 32.0);
-        for d in 1..=80 {
-            let s = zoom_scale(d as f32, 32.0);
-            assert!(s <= prev, "d={d}: {s} > {prev}");
-            prev = s;
+    fn two_pitches_away_and_beyond_nothing_grows() {
+        assert_eq!(magnification(104.0, 52.0, 1.5), 1.0);
+        assert_eq!(magnification(500.0, 52.0, 1.5), 1.0);
+    }
+
+    #[test]
+    fn the_magnification_falls_monotonically_with_distance() {
+        let mut prev = magnification(0.0, 52.0, 1.5);
+        for d in 1..=104 {
+            let m = magnification(d as f32, 52.0, 1.5);
+            assert!(m <= prev, "d={d}: {m} > {prev}");
+            prev = m;
         }
     }
 
     #[test]
-    fn zoom_ignores_the_sign_of_the_distance() {
-        assert_eq!(zoom_scale(-20.0, 32.0), zoom_scale(20.0, 32.0));
+    fn a_zero_pitch_does_not_divide_by_zero() {
+        assert!(magnification(10.0, 0.0, 1.5).is_finite());
+        assert_eq!(magnification(10.0, 0.0, 1.5), 1.0);
     }
-
-
-
 
     #[test]
     fn bounce_starts_and_ends_at_zero_and_peaks_in_range() {
