@@ -1354,14 +1354,19 @@ impl Taskbar {
             &badge,
             window_id,
             Some(&filter),
-            (
-                crate::bar::fx::REST_SCALE * self.fx.scale_of(dock_item.id),
-                self.fx.rise_of(
-                    dock_item.id,
-                    f32::from(self.core.applet.suggested_size(false).0),
-                    has_windows,
-                ),
-            ),
+            {
+                // The button's own height, as the panel gave it: how big the icon
+                // may rest and how high it may hop follow it.
+                let icon_px = f32::from(self.core.applet.suggested_size(false).0);
+                let cell_px = self
+                    .rectangles
+                    .get(&dock_item.id.into())
+                    .map_or(icon_px + 8.0, |r| r.height);
+                (
+                    crate::bar::fx::rest_scale(cell_px, icon_px) * self.fx.scale_of(dock_item.id),
+                    self.fx.rise_of(dock_item.id, icon_px, cell_px, has_windows),
+                )
+            },
         );
         if has_windows || !interaction_enabled {
             return button;

@@ -10,14 +10,24 @@ use std::time::Instant;
 
 const STIFFNESS: f32 = 320.0;
 const DAMPING: f32 = 22.0;
-/// An icon rests at 26 px (of a 32 px box) so the one under the pointer can
-/// reach 39 px, which is what the 40 px of the panel allows: it is what the
-/// icons are drawn at, times their magnification.
-pub const REST_SCALE: f32 = 26.0 / 32.0;
 /// The icon under the pointer grows by half; the next ones, by a quarter.
 const PEAK_MAGNIFICATION: f32 = 1.5;
-/// The room above an icon at rest: how high a hop can go.
-pub const MAX_RISE_PX: f32 = 6.0;
+
+/// How much of its box an icon is drawn at when at rest, so that the one under
+/// the pointer, half again as big, still fits the button's height `cell_px`:
+/// 26 of 32 px in the 40 px panel, more as the panel is taller (never more
+/// than the box itself, never under half).
+pub fn rest_scale(cell_px: f32, icon_px: f32) -> f32 {
+    if icon_px <= 0.0 {
+        return 1.0;
+    }
+    ((cell_px - 1.0) / PEAK_MAGNIFICATION / icon_px).clamp(0.5, 1.0)
+}
+
+/// How high a hop goes: the room above an icon at rest, about 15% of the button.
+pub fn max_rise(cell_px: f32) -> f32 {
+    cell_px.max(0.0) * 0.15
+}
 /// The distance between two icons when there is only one to go by.
 const DEFAULT_PITCH_PX: f32 = 52.0;
 /// A launching app keeps hopping this long, or until its window shows.
@@ -66,11 +76,11 @@ impl Fx {
     }
 
     /// Upward offset in px of the item's hop right now.
-    pub fn rise_of(&self, id: u32, icon_px: f32, has_windows: bool) -> f32 {
+    pub fn rise_of(&self, id: u32, icon_px: f32, cell_px: f32, has_windows: bool) -> f32 {
         let Some(start) = self.bounces.get(&id) else {
             return 0.0;
         };
-        hop_rise(start.elapsed().as_secs_f32(), icon_px, has_windows)
+        hop_rise(start.elapsed().as_secs_f32(), icon_px, cell_px, has_windows)
     }
 
     /// Whether frames are needed: a change not yet drawn, a hop going, or a
@@ -134,10 +144,10 @@ fn pitch_of(items: &[(u32, f32)]) -> f32 {
 
 /// Rise at `t_s` since the click: one hop if the window is already up,
 /// repeated hops while the app is still opening.
-fn hop_rise(t_s: f32, icon_px: f32, has_windows: bool) -> f32 {
+fn hop_rise(t_s: f32, icon_px: f32, cell_px: f32, has_windows: bool) -> f32 {
     let t = if has_windows { t_s } else { t_s % HOP_PERIOD_S };
-    // The hop is shaped for half an icon of height; the panel has MAX_RISE_PX.
-    bounce_offset(t, icon_px) * MAX_RISE_PX / (0.5 * icon_px)
+    // The hop is shaped for half an icon of height; the panel has `max_rise`.
+    bounce_offset(t, icon_px) * max_rise(cell_px) / (0.5 * icon_px).max(1.0)
 }
 
 #[cfg(test)]
@@ -182,16 +192,16 @@ mod tests {
     #[test]
     fn the_hop_rises_no_more_than_the_room_above_the_icon() {
         let peak = (0..=900)
-            .map(|ms| hop_rise(ms as f32 / 1000.0, 32.0, true))
+            .map(|ms| hop_rise(ms as f32 / 1000.0, 32.0, 40.0, true))
             .fold(0.0f32, f32::max);
-        assert!(peak <= MAX_RISE_PX + 0.01, "peak {peak}");
-        assert!(peak >= MAX_RISE_PX * 0.9, "peak {peak}");
-        assert_eq!(hop_rise(0.9, 32.0, true), 0.0);
+        assert!(peak <= max_rise(40.0) + 0.01, "peak {peak}");
+        assert!(peak >= max_rise(40.0) * 0.9, "peak {peak}");
+        assert_eq!(hop_rise(0.9, 32.0, 40.0, true), 0.0);
     }
 
     #[test]
     fn an_app_still_opening_keeps_hopping() {
-        assert!(hop_rise(0.9 + 0.25, 32.0, false) > MAX_RISE_PX * 0.9);
+        assert!(hop_rise(0.9 + 0.25, 32.0, 40.0, false) > max_rise(40.0) * 0.9);
     }
 
     #[test]
@@ -199,8 +209,8 @@ mod tests {
         let mut fx = Fx::default();
         fx.launch(7);
         assert!(fx.animating());
-        assert!(fx.rise_of(7, 32.0, false) >= 0.0);
-        assert_eq!(fx.rise_of(8, 32.0, false), 0.0);
+        assert!(fx.rise_of(7, 32.0, 40.0, false) >= 0.0);
+        assert_eq!(fx.rise_of(8, 32.0, 40.0, false), 0.0);
     }
 
     #[test]
@@ -232,6 +242,30 @@ mod tests {
         let mut fx = Fx::default();
         fx.clear_hover();
         assert!(!fx.animating());
+    }
+
+    #[test]
+    fn the_resting_size_leaves_room_for_the_half_again_zoom_in_any_panel() {
+        // The 40 px panel with 32 px icons: they rest at 26 px.
+        assert!((rest_scale(40.0, 32.0) - 26.0 / 32.0).abs() < 0.001);
+        for (cell, icon) in [(40.0, 32.0), (48.0, 36.0), (56.0, 40.0), (64.0, 48.0), (80.0, 48.0)] {
+            let rest = rest_scale(cell, icon) * icon;
+            assert!(rest * PEAK_MAGNIFICATION <= cell, "cell {cell} icon {icon}: {}", rest * PEAK_MAGNIFICATION);
+            assert!((0.5..=1.0).contains(&rest_scale(cell, icon)));
+        }
+    }
+
+    #[test]
+    fn a_taller_panel_makes_the_icons_rest_bigger_and_the_hop_higher() {
+        assert!(rest_scale(64.0, 48.0) * 48.0 > rest_scale(40.0, 32.0) * 32.0);
+        assert!(max_rise(64.0) > max_rise(40.0));
+        assert_eq!(max_rise(40.0), 6.0);
+    }
+
+    #[test]
+    fn a_degenerate_panel_does_not_divide_by_zero() {
+        assert!((0.5..=1.0).contains(&rest_scale(0.0, 0.0)));
+        assert!((0.5..=1.0).contains(&rest_scale(40.0, 0.0)));
     }
 
     #[test]
