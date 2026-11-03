@@ -2,21 +2,16 @@
 //! servidor `org.freedesktop.Notifications` falso que grava as chamadas `Notify`.
 //! Mesmo modelo do `PrivateBus` do daemon de notificações (`tests/common/mod.rs`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use dbus::Message;
-use dbus::arg::{PropMap, RefArg, cast};
-use dbus::blocking::Connection;
-use dbus::channel::Channel;
-use dbus::message::MessageType;
+use zbus::message::Header;
+use zbus::zvariant::{OwnedValue, Value};
 
 use crate::logi::notify::Hint;
 
@@ -69,24 +64,25 @@ impl PrivateBus {
 
     /// Espera o nome ficar sem dono (≤ 2 s): a saída do dono é processada pelo barramento depois.
     pub fn wait_name_released(&self) {
-        let client = self.client();
-        let proxy = client.with_proxy("org.freedesktop.DBus", "/org/freedesktop/DBus", Duration::from_secs(2));
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while std::time::Instant::now() < deadline {
-            let owned: Result<(bool,), _> = proxy.method_call("org.freedesktop.DBus", "NameHasOwner", (NAME,));
-            if matches!(owned, Ok((false,))) {
-                return;
+        let rt = runtime();
+        let released = rt.block_on(async {
+            let conn = zbus::connection::Builder::address(self.address.as_str())?.build().await?;
+            let proxy = zbus::fdo::DBusProxy::new(&conn).await?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                if !proxy.name_has_owner(NAME.try_into()?).await? {
+                    return Ok::<bool, zbus::Error>(true);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("{NAME} ainda tem dono");
+            Ok(false)
+        });
+        assert!(released.expect("cliente do barramento privado"), "{NAME} ainda tem dono");
     }
+}
 
-    pub fn client(&self) -> Connection {
-        let mut channel = Channel::open_private(&self.address).expect("cliente não conectou");
-        channel.register().expect("cliente não registrou");
-        Connection::from(channel)
-    }
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime tokio do teste")
 }
 
 impl Drop for PrivateBus {
@@ -113,73 +109,87 @@ pub struct Recorded {
 /// chamada. Para no `Drop`.
 pub struct Recorder {
     pub calls: Receiver<Recorded>,
-    stop: Arc<AtomicBool>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Recorder {
     pub fn start(bus: &PrivateBus) -> Recorder {
-        let conn = bus.client();
-        conn.request_name(NAME, false, true, false).expect("RequestName do servidor falso");
+        let address = bus.address.clone();
         let (tx, calls) = mpsc::channel();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_thread = stop.clone();
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let thread = std::thread::spawn(move || {
-            let mut next_id = 1u32;
-            while !stop_thread.load(Ordering::Relaxed) {
-                let Ok(msg) = conn.channel().blocking_pop_message(Duration::from_millis(20)) else { return };
-                let Some(msg) = msg else { continue };
-                if msg.msg_type() != MessageType::MethodCall || msg.member().is_none_or(|m| &*m != "Notify") {
-                    continue;
+            runtime().block_on(async move {
+                let server = FakeServer { tx, next_id: std::sync::atomic::AtomicU32::new(1) };
+                let built = async {
+                    zbus::connection::Builder::address(address.as_str())?
+                        .serve_at("/org/freedesktop/Notifications", server)?
+                        .name(NAME)?
+                        .build()
+                        .await
                 }
-                if let Some(rec) = parse(&msg) {
-                    let _ = tx.send(rec);
+                .await;
+                match built {
+                    Ok(conn) => {
+                        let _ = ready_tx.send(Ok(()));
+                        let _ = stopped.await;
+                        drop(conn);
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e.to_string()));
+                    }
                 }
-                let _ = conn.channel().send(msg.method_return().append1(next_id));
-                conn.channel().flush();
-                next_id += 1;
-            }
+            });
         });
-        Recorder { calls, stop, thread: Some(thread) }
+        ready_rx.recv().expect("servidor falso não subiu").expect("RequestName do servidor falso");
+        Recorder { calls, stop: Some(stop), thread: Some(thread) }
     }
 }
 
 impl Drop for Recorder {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
     }
 }
 
-fn parse(msg: &Message) -> Option<Recorded> {
-    let mut signature = String::new();
-    let mut it = msg.iter_init();
-    while it.arg_type() != dbus::arg::ArgType::Invalid {
-        signature.push_str(&it.signature());
-        it.next();
-    }
-    let (app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout): (
-        String,
-        u32,
-        String,
-        String,
-        String,
-        Vec<String>,
-        PropMap,
-        i32,
-    ) = msg.read_all().ok()?;
-    let hints = hints.into_iter().filter_map(|(k, v)| hint(&*v.0).map(|h| (k, h))).collect();
-    Some(Recorded { signature, app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout })
+struct FakeServer {
+    tx: Sender<Recorded>,
+    next_id: std::sync::atomic::AtomicU32,
 }
 
-fn hint(v: &(dyn RefArg + 'static)) -> Option<Hint> {
-    if let Some(b) = cast::<bool>(v) {
-        return Some(Hint::Bool(*b));
+#[zbus::interface(name = "org.freedesktop.Notifications")]
+impl FakeServer {
+    #[allow(clippy::too_many_arguments)]
+    fn notify(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        app_name: String,
+        replaces_id: u32,
+        app_icon: String,
+        summary: String,
+        body: String,
+        actions: Vec<String>,
+        hints: HashMap<String, OwnedValue>,
+        expire_timeout: i32,
+    ) -> u32 {
+        let signature = header.signature().to_string_no_parens();
+        let hints = hints.into_iter().filter_map(|(k, v)| hint(&v).map(|h| (k, h))).collect();
+        let _ = self.tx.send(Recorded { signature, app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout });
+        self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
-    if let Some(i) = cast::<i32>(v) {
-        return Some(Hint::Int(*i));
+}
+
+fn hint(v: &Value<'_>) -> Option<Hint> {
+    match v {
+        Value::Bool(b) => Some(Hint::Bool(*b)),
+        Value::I32(i) => Some(Hint::Int(*i)),
+        Value::Str(s) => Some(Hint::Str(s.to_string())),
+        _ => None,
     }
-    cast::<String>(v).map(|s| Hint::Str(s.clone()))
 }

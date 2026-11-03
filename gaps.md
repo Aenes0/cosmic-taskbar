@@ -6,8 +6,6 @@
 - **Central e logi-osd (03/11)**: importados com histórico em `src/central/` e `src/logi/`; o
   Central foi portado do libcosmic d4d71fd para o 5a8bd94 (2 mudanças: ação de superfície com o
   tipo da mensagem). Memória total 263 -> 232 MB (PSS+SwapPss), threads 145 -> 135.
-- **logi-osd usa libdbus** (crate `dbus`) além do zbus que o resto usa: dá para trocar por zbus e
-  tirar a dependência de sistema `libdbus-1`; ficou como estava para não mudar comportamento.
 - **Avisos do logi-osd sem o estilo próprio**: ele manda dicas `x-estilo`, `x-tom`, `x-pontos` que
   só o daemon `notificacoes` (depreciado, nunca em uso) desenhava; o daemon do COSMIC as ignora e
   mostra uma notificação comum.

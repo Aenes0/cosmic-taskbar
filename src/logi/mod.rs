@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use calloop::channel::{self, Sender};
 use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
-use calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction};
+use calloop::{EventLoop, Interest, Mode, PostAction};
 
 use crate::logi::app::{Action, App, NodeEvent};
 use crate::logi::battery::BatteryAlert;
@@ -58,15 +58,14 @@ pub struct State {
     /// Os avisos vão ao daemon de notificações (que desenha a pílula e troca a anterior).
     notifier: Notifier,
     cfg: Config,
-    handle: LoopHandle<'static, State>,
     live: LiveNodes,
     tx: Sender<NodeEvent>,
     /// `LOGI_OSD_DEBUG=1`: imprime `{ms} ms evento→envio`.
     debug: bool,
 }
 
-/// Repouso: nenhum timer armado; o loop dorme em `run(None)` até um evento de nó, de hotplug ou
-/// uma resposta do barramento (só logo depois de um aviso enviado).
+/// Repouso: nenhum timer armado; o loop dorme em `run(None)` até um evento de nó ou de hotplug
+/// (o cliente D-Bus dos avisos roda na thread dele).
 fn run(mode: RunMode) -> Result<(), BoxError> {
     let cfg = config::load();
     let mut event_loop: EventLoop<'static, State> = EventLoop::try_new()?;
@@ -85,7 +84,6 @@ fn run(mode: RunMode) -> Result<(), BoxError> {
         app: App::new(&cfg),
         notifier: Notifier::new(None),
         cfg,
-        handle: handle.clone(),
         live: LiveNodes::default(),
         tx,
         debug: std::env::var_os("LOGI_OSD_DEBUG").is_some_and(|v| v == "1"),
@@ -193,7 +191,7 @@ impl State {
 
     /// `now` = instante do evento (base da medição do `LOGI_OSD_DEBUG`).
     fn show(&mut self, pill: Pill, now: Instant) {
-        self.notifier.send(&self.handle, &pill);
+        self.notifier.send(&pill);
         if self.debug {
             eprintln!("logi-osd: {:.1} ms evento→envio", now.elapsed().as_secs_f64() * 1000.0);
         }
