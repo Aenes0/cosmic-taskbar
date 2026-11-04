@@ -1,0 +1,236 @@
+diff --git a/cosmic-panel-bin/src/space/popup.rs b/cosmic-panel-bin/src/space/popup.rs
+index 8aeabe1..0d008a9 100644
+--- a/cosmic-panel-bin/src/space/popup.rs
++++ b/cosmic-panel-bin/src/space/popup.rs
+@@ -9,6 +9,45 @@ use wayland_egl::WlEglSurface;
+ use super::PanelSpace;
+ 
+ impl PanelSpace {
++    /// aenes: tear down, right away, the proxied popups whose embedded popup the applet
++    /// destroyed itself. This used to wait for the next `handle_events` with a renderer, so the
++    /// real compositor kept the old popup (and its grab) around while the applet already asked
++    /// for the next one. Same cleanup as `close_popups`, without `send_popup_done` (the client
++    /// popup is already gone). Dropping the `WrapperPopup` destroys the EGL surface, then
++    /// `xdg_popup`, `xdg_surface` and `wl_surface` in protocol order (sctk `Popup` drop).
++    pub(crate) fn popup_destroyed(&mut self) {
++        let mut removed = Vec::new();
++        self.popups.retain(|p| {
++            if p.s_surface.alive() {
++                return true;
++            }
++            removed.push((
++                p.popup.c_popup.wl_surface().clone(),
++                p.s_surface.wl_surface().clone(),
++            ));
++            if let Some(w) = p.popup.fractional_scale.as_ref() {
++                w.destroy();
++            }
++            if let Some(w) = p.popup.viewport.as_ref() {
++                w.destroy();
++            }
++            false
++        });
++        if removed.is_empty() {
++            return;
++        }
++        for (c_surface, s_surface) in removed {
++            tracing::info!("Destroying popup closed by its client: {:?}", c_surface);
++            self.shared.c_focused_surface.borrow_mut().retain(|s| s.0 != c_surface);
++            self.shared.c_hovered_surface.borrow_mut().retain(|s| s.0 != c_surface);
++            self.s_focused_surface
++                .retain(|s| !s.0.wl_surface().is_some_and(|s| s.as_ref() == &s_surface));
++            self.s_hovered_surface
++                .retain(|s| !s.surface.wl_surface().is_some_and(|s| s.as_ref() == &s_surface));
++        }
++        self.is_dirty = true;
++    }
++
+     pub(crate) fn close_popups(&mut self, exclude: impl Fn(&PanelPopup) -> bool) {
+         let mut to_destroy = Vec::with_capacity(self.popups.len());
+         self.popups.retain_mut(|p| {
+diff --git a/cosmic-panel-bin/src/space/wrapper_space.rs b/cosmic-panel-bin/src/space/wrapper_space.rs
+index 6ffc4d2..3ca90eb 100644
+--- a/cosmic-panel-bin/src/space/wrapper_space.rs
++++ b/cosmic-panel-bin/src/space/wrapper_space.rs
+@@ -332,7 +332,10 @@ impl WrapperSpace for PanelSpace {
+         seat: wl_seat::WlSeat,
+         serial: u32,
+     ) -> anyhow::Result<()> {
+-        if let Some(p) = self.popups.iter().find(|wp| wp.s_surface == popup) {
++        // aenes: `PopupSurface == ` only compares the wl_surface, so skip dead entries that may
++        // still share it with the new popup.
++        if let Some(p) = self.popups.iter().find(|wp| wp.s_surface.alive() && wp.s_surface == popup)
++        {
+             p.popup.forward_grab(&seat, serial);
+         }
+         Ok(())
+@@ -861,7 +864,10 @@ impl WrapperSpace for PanelSpace {
+         self.needs_layout = true;
+         self.space.refresh();
+ 
+-        if let Some(p) = self.popups.iter_mut().find(|p| p.s_surface.wl_surface() == s) {
++        // aenes: skip dead entries sharing the wl_surface, or the new popup is never mapped.
++        if let Some(p) =
++            self.popups.iter_mut().find(|p| p.s_surface.alive() && p.s_surface.wl_surface() == s)
++        {
+             // the client is done setting up its popup, and any `grab` it
+             // requested has been forwarded from the pre-commit hook
+             // that runs before this
+diff --git a/cosmic-panel-bin/src/space_container/space_container.rs b/cosmic-panel-bin/src/space_container/space_container.rs
+index db2616f..7d1882f 100644
+--- a/cosmic-panel-bin/src/space_container/space_container.rs
++++ b/cosmic-panel-bin/src/space_container/space_container.rs
+@@ -68,6 +68,13 @@ pub struct SpaceContainer {
+ }
+ 
+ impl SpaceContainer {
++    /// aenes: an embedded client destroyed one of its popups; tear down the proxied popups now.
++    pub fn popup_destroyed(&mut self) {
++        for space in &mut self.space_list {
++            space.popup_destroyed();
++        }
++    }
++
+     pub fn new(
+         config: CosmicPanelContainerConfig,
+         tx: mpsc::Sender<AppletMsg>,
+diff --git a/cosmic-panel-bin/src/xdg_shell_wrapper/client/handlers/data_device/data_device.rs b/cosmic-panel-bin/src/xdg_shell_wrapper/client/handlers/data_device/data_device.rs
+index fdb05e8..d2e718b 100644
+--- a/cosmic-panel-bin/src/xdg_shell_wrapper/client/handlers/data_device/data_device.rs
++++ b/cosmic-panel-bin/src/xdg_shell_wrapper/client/handlers/data_device/data_device.rs
+@@ -175,8 +175,15 @@ impl DataDeviceHandler for GlobalState {
+         };
+         let c_ptr = seat.client.ptr.as_ref().map(|p| p.pointer().clone());
+         let s_ptr = seat.server.seat.get_pointer();
++        let seat_name = seat.name.clone();
++        // aenes: release the server DnD grab before any early return. `focused_surface` is the
++        // keyboard focus and stays empty when the panel has keyboard_interactivity None, which
++        // skipped the unset below and left the whole panel stuck in a DnD grab.
++        if let Some(s) = s_ptr.as_ref() {
++            s.unset_grab(self, SERIAL_COUNTER.next_serial(), InputTime::now());
++        }
+         let surface = if let Some(f) =
+-            self.client_state.focused_surface.borrow_mut().iter_mut().find(|f| f.1 == seat.name)
++            self.client_state.focused_surface.borrow_mut().iter_mut().find(|f| f.1 == seat_name)
+         {
+             f.2 = FocusStatus::LastFocused(Instant::now());
+             f.0.clone()
+@@ -198,10 +205,7 @@ impl DataDeviceHandler for GlobalState {
+             kind: PointerEventKind::Motion { time: time.millis() },
+             position: (0.0, 0.0),
+         };
+-        if let Some(s) = s_ptr {
+-            s.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+-        }
+-
++        // aenes: the server grab is released above, before the early return.
+         if let Some(pointer) = c_ptr {
+             self.pointer_frame(conn, qh, &pointer, &[leave_event]);
+         }
+diff --git a/cosmic-panel-bin/src/xdg_shell_wrapper/client/handlers/data_device/data_source.rs b/cosmic-panel-bin/src/xdg_shell_wrapper/client/handlers/data_device/data_source.rs
+index f2a2148..ae4a07d 100644
+--- a/cosmic-panel-bin/src/xdg_shell_wrapper/client/handlers/data_device/data_source.rs
++++ b/cosmic-panel-bin/src/xdg_shell_wrapper/client/handlers/data_device/data_source.rs
+@@ -89,12 +89,14 @@ impl DataSourceHandler for GlobalState {
+ 
+         if let Some(dnd_source) = seat.server.dnd_source.take() {
+             dnd_source.cancelled();
+-            seat.server.dnd_icon = None;
+-            seat.server.seat.get_pointer().unwrap().unset_grab(
+-                self,
+-                SERIAL_COUNTER.next_serial(),
+-                InputTime::now(),
+-            );
++        }
++        // aenes: `server.dnd_source` is never assigned (see `dnd_requested`), so the unset used
++        // to live in dead code and the server DnDGrab outlived the compositor's drag. Release it
++        // whenever the cancelled source is ours; DnDGrab::unset cancels the applet's source.
++        seat.server.dnd_icon = None;
++        let pointer = seat.server.seat.get_pointer();
++        if let Some(pointer) = pointer {
++            pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), InputTime::now());
+         }
+     }
+ 
+@@ -132,15 +134,16 @@ impl DataSourceHandler for GlobalState {
+ 
+         if let Some(dnd_source) = seat.server.dnd_source.take() {
+             dnd_source.dnd_finished();
+-            seat.server.dnd_icon = None;
+-            seat.client.dnd_icon = None;
+-            seat.client.dnd_source = None;
+-            seat.client.next_dnd_offer_is_mine = false;
+-            seat.server.seat.get_pointer().unwrap().unset_grab(
+-                self,
+-                SERIAL_COUNTER.next_serial(),
+-                InputTime::now(),
+-            );
++        }
++        // aenes: clean up whenever the finished source is ours, not only when the (never
++        // assigned) `server.dnd_source` is set; otherwise the server DnDGrab stays installed.
++        seat.server.dnd_icon = None;
++        seat.client.dnd_icon = None;
++        seat.client.dnd_source = None;
++        seat.client.next_dnd_offer_is_mine = false;
++        let pointer = seat.server.seat.get_pointer();
++        if let Some(pointer) = pointer {
++            pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), InputTime::now());
+         }
+     }
+ 
+diff --git a/cosmic-panel-bin/src/xdg_shell_wrapper/server/handlers/mod.rs b/cosmic-panel-bin/src/xdg_shell_wrapper/server/handlers/mod.rs
+index 315a9d4..17c0f61 100644
+--- a/cosmic-panel-bin/src/xdg_shell_wrapper/server/handlers/mod.rs
++++ b/cosmic-panel-bin/src/xdg_shell_wrapper/server/handlers/mod.rs
+@@ -278,9 +278,35 @@ impl WaylandDndGrabHandler for GlobalState {
+                 metadata.mime_types.iter().map(|m| m.as_str()).collect_vec(),
+                 actions,
+             );
+-            if let Some(focus) =
+-                self.client_state.focused_surface.borrow().iter().find(|f| f.1 == seat.name)
++            // aenes: the drag origin must be the surface holding the implicit pointer grab, i.e.
++            // the hovered one. `focused_surface` is keyboard focus and stays empty with
++            // keyboard_interactivity None, so it is only a fallback now.
++            let hovered = self
++                .client_state
++                .hovered_surface
++                .borrow()
++                .iter()
++                .find(|f| f.1 == seat.name)
++                .map(|f| f.0.clone());
++            let origin = hovered.or_else(|| {
++                self.client_state
++                    .focused_surface
++                    .borrow()
++                    .iter()
++                    .find(|f| f.1 == seat.name)
++                    .map(|f| f.0.clone())
++            });
++            let Some(origin) = origin else {
++                // aenes: without an origin the real compositor never starts a drag, so a server
++                // DnDGrab would have nothing to end it; cancel the applet's drag instead.
++                tracing::warn!("No origin surface for DnD on seat {}, cancelling it", seat.name);
++                dnd_source.inner().destroy();
++                seat.client.next_dnd_offer_is_mine = false;
++                source.cancel();
++                return;
++            };
+             {
++                let focus = (origin,);
+                 let c_icon_surface = icon.as_ref().map(|_| {
+                     self.client_state
+                         .compositor_state
+diff --git a/cosmic-panel-bin/src/xdg_shell_wrapper/server/handlers/xdg_shell.rs b/cosmic-panel-bin/src/xdg_shell_wrapper/server/handlers/xdg_shell.rs
+index 090f744..326849b 100644
+--- a/cosmic-panel-bin/src/xdg_shell_wrapper/server/handlers/xdg_shell.rs
++++ b/cosmic-panel-bin/src/xdg_shell_wrapper/server/handlers/xdg_shell.rs
+@@ -102,6 +102,9 @@ impl XdgShellHandler for GlobalState {
+     }
+ 
+     fn popup_destroyed(&mut self, surface: PopupSurface) {
++        // aenes: destroy the proxied popup now instead of on the next render pass, so the real
++        // compositor drops it (and its grab) before the applet requests the next grabbing popup.
++        self.space.popup_destroyed();
+         self.server_state.popup_manager.commit(surface.wl_surface());
+     }
+ 

@@ -30,9 +30,10 @@ for id in io.github.Aenes0.CosmicTaskbar io.github.Aenes0.CosmicStart io.github.
     sed "s|@bindir@|$bindir|" "data/$id.desktop.in" > "$apps/$id.desktop"
 done
 # The Central's applets: quick settings, show desktop, system monitor, tray
-# (the tray keeps the id it had as its own program, and its place on the panel).
+# (the tray keeps the id it had as its own program, and its place on the panel),
+# and the Canto, the three corner ones in one (setup.sh swaps them).
 central=io.github.Aenes0.CosmicCentral
-for id in "$central" "$central.ShowDesktop" "$central.Monitor" io.github.Aenes0.CosmicTray; do
+for id in "$central" "$central.ShowDesktop" "$central.Monitor" "$central.Corner" io.github.Aenes0.CosmicTray; do
     sed "s|@bindir@|$bindir|" "data/central/$id.desktop.in" > "$apps/$id.desktop"
 done
 install -Dm0644 "data/central/$central.metainfo.xml" "$prefix/share/metainfo/$central.metainfo.xml"

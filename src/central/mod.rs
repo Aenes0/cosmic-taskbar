@@ -6,6 +6,7 @@ mod bar_spacing;
 mod board;
 mod calendar;
 mod clipboard;
+mod corner;
 mod host;
 mod i18n;
 mod layout;
@@ -15,6 +16,7 @@ mod monitor;
 mod notifications;
 mod pages;
 mod panels;
+mod privileged;
 mod services;
 mod show_desktop;
 mod slow;
@@ -28,7 +30,7 @@ mod workspaces;
 
 pub const APP_ID: &str = "io.github.Aenes0.CosmicCentral";
 
-/// The Central's modes: the main applet, `--panels`, `--monitor`, `--tray`,
+/// The Central's modes: the main applet, `--panels`, `--corner`, `--monitor`, `--tray`,
 /// `--show-desktop`, `--clipboard` and `--notifications`.
 pub fn run() -> cosmic::iced::Result {
     let args: Vec<String> = std::env::args().collect();
@@ -42,6 +44,8 @@ pub fn run() -> cosmic::iced::Result {
         // SAFETY: first thing, before any thread starts.
         unsafe { std::env::set_var("TOKIO_WORKER_THREADS", "2") };
     }
+    // SAFETY: first thing, before any thread starts.
+    unsafe { privileged::take() };
     crate::shared::logging::init("warn,cosmic_taskbar=info", &[]);
     // The Central's and the monitor's panels, for every screen: one host,
     // hidden between uses; a second run only hands it what it was asked.
@@ -54,6 +58,10 @@ pub fn run() -> cosmic::iced::Result {
         }
         panels::own_output();
         return panels::run(request);
+    }
+    // The bar's right corner, the tray, the Central and "show desktop" in one.
+    if std::env::args().any(|arg| arg == "--corner") {
+        return cosmic::applet::run::<corner::Corner>(());
     }
     // The same program is also the "show desktop" button, its own applet.
     if std::env::args().any(|arg| arg == "--show-desktop") {

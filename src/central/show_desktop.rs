@@ -6,11 +6,6 @@
 //! the pointer leaves, unless a click pinned them. Its own applet, by the
 //! same program, put after the clock.
 
-use std::os::{
-    fd::{FromRawFd, RawFd},
-    unix::net::UnixStream,
-};
-
 use cosmic::{
     Element, Task, app,
     cctk::{
@@ -57,6 +52,71 @@ pub struct ShowDesktop {
     core: app::Core,
     tx: Option<calloop::channel::Sender<Action>>,
     peek: Peek,
+    /// Embedded in a bigger applet: the pointer comes from a `mouse_area`
+    /// around the button, not from the window.
+    corner: bool,
+}
+
+/// What a window event means to us; in the corner the window is not ours.
+fn window_event(
+    corner: bool,
+    event: &cosmic::iced::Event,
+    id: cosmic::iced::window::Id,
+) -> Option<Message> {
+    use cosmic::iced::{Event, mouse};
+    if corner {
+        return None;
+    }
+    match event {
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => Some(Message::Press(id)),
+        // The applet's window is the button itself, so the pointer
+        // entering or leaving it is the pointer on the button.
+        Event::Mouse(mouse::Event::CursorEntered) => Some(Message::Hover(id, true)),
+        Event::Mouse(mouse::Event::CursorLeft) => Some(Message::Hover(id, false)),
+        _ => None,
+    }
+}
+
+/// The same applet, living in a corner of a bigger one.
+pub(crate) fn in_corner(core: app::Core) -> (ShowDesktop, app::Task<Message>) {
+    let (mut app, task) = <ShowDesktop as cosmic::Application>::init(core, ());
+    app.corner = true;
+    (app, task)
+}
+
+impl ShowDesktop {
+    /// The button for the embedding applet: no autosize, the pointer through
+    /// a `mouse_area` as the window is not ours.
+    pub(crate) fn corner_view(&self) -> Element<'_, Message> {
+        // The press is the button's, on the press as the window's was: a
+        // mouse_area would never see it, the button takes it.
+        widget::mouse_area(self.button().on_press_down(Message::Click))
+            .on_enter(Message::Enter)
+            .on_exit(Message::Leave)
+            .into()
+    }
+
+    fn button(&self) -> widget::Button<'_, Message> {
+        let applet = &self.core.applet;
+        let horizontal = applet.is_horizontal();
+        let size = applet.suggested_size(true).0 as f32 + 2.0 * applet.suggested_padding(true).1 as f32;
+        // A sliver, as Windows has it: a thin line in it, the rest to aim at.
+        let line = widget::container(widget::space::horizontal())
+            .width(if horizontal { Length::Fixed(1.0) } else { Length::Fixed(size * 0.6) })
+            .height(if horizontal { Length::Fixed(size * 0.6) } else { Length::Fixed(1.0) })
+            .class(theme::Container::custom(|theme| widget::container::Style {
+                background: Some(iced::Background::Color(
+                    theme.cosmic().background(theme.transparent).divider.into(),
+                )),
+                ..Default::default()
+            }));
+        widget::button::custom(widget::container(line).center(Length::Fill))
+            .width(if horizontal { Length::Fixed(10.0) } else { Length::Fixed(size) })
+            .height(if horizontal { Length::Fixed(size) } else { Length::Fixed(10.0) })
+            .padding(0)
+            .class(theme::Button::AppletIcon)
+            .on_press(Message::None)
+    }
 }
 
 impl ShowDesktop {
@@ -80,7 +140,7 @@ impl cosmic::Application for ShowDesktop {
         // See-through, but no blur behind: the theme stays transparent while any
         // kind is set, and only layer surfaces, which there are none of here, blur.
         core.set_auto_blur(cosmic::core::Auto::System.into());
-        (Self { core, tx: None, peek: Peek::default() }, Task::none())
+        (Self { core, tx: None, peek: Peek::default(), corner: false }, Task::none())
     }
 
     fn core(&self) -> &app::Core {
@@ -135,20 +195,12 @@ impl cosmic::Application for ShowDesktop {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let press = cosmic::iced::event::listen_with(|event, _, id| match event {
-            cosmic::iced::Event::Mouse(cosmic::iced::mouse::Event::ButtonPressed(
-                cosmic::iced::mouse::Button::Left,
-            )) => Some(Message::Press(id)),
-            // The applet's window is the button itself, so the pointer
-            // entering or leaving it is the pointer on the button.
-            cosmic::iced::Event::Mouse(cosmic::iced::mouse::Event::CursorEntered) => {
-                Some(Message::Hover(id, true))
-            }
-            cosmic::iced::Event::Mouse(cosmic::iced::mouse::Event::CursorLeft) => {
-                Some(Message::Hover(id, false))
-            }
-            _ => None,
-        });
+        // `listen_with` takes a plain fn, so the mode picks which one.
+        let press = if self.corner {
+            Subscription::none()
+        } else {
+            cosmic::iced::event::listen_with(|event, _, id| window_event(false, &event, id))
+        };
         let wayland = Subscription::run_with(std::any::TypeId::of::<Message>(), |_| {
             stream::channel(4, |mut output: mpsc::Sender<Message>| async move {
                 let (tx, rx) = calloop::channel::channel::<Action>();
@@ -165,28 +217,7 @@ impl cosmic::Application for ShowDesktop {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let applet = &self.core.applet;
-        let horizontal = applet.is_horizontal();
-        let size = applet.suggested_size(true).0 as f32 + 2.0 * applet.suggested_padding(true).1 as f32;
-        // A sliver, as Windows has it: a thin line in it, the rest to aim at.
-        let line = widget::container(widget::space::horizontal())
-            .width(if horizontal { Length::Fixed(1.0) } else { Length::Fixed(size * 0.6) })
-            .height(if horizontal { Length::Fixed(size * 0.6) } else { Length::Fixed(1.0) })
-            .class(theme::Container::custom(|theme| widget::container::Style {
-                background: Some(iced::Background::Color(
-                    theme.cosmic().background(theme.transparent).divider.into(),
-                )),
-                ..Default::default()
-            }));
-        let button = widget::button::custom(
-            widget::container(line).center(Length::Fill),
-        )
-        .width(if horizontal { Length::Fixed(10.0) } else { Length::Fixed(size) })
-        .height(if horizontal { Length::Fixed(size) } else { Length::Fixed(10.0) })
-        .padding(0)
-        .class(theme::Button::AppletIcon)
-        .on_press(Message::None);
-        applet.autosize_window(button).into()
+        self.core.applet.autosize_window(self.button()).into()
     }
 }
 
@@ -275,6 +306,30 @@ impl Peek {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn press() -> cosmic::iced::Event {
+        cosmic::iced::Event::Mouse(cosmic::iced::mouse::Event::ButtonPressed(
+            cosmic::iced::mouse::Button::Left,
+        ))
+    }
+
+    #[test]
+    fn corner_ignores_window_press_and_hover() {
+        let id = cosmic::iced::window::Id::unique();
+        let enter = cosmic::iced::Event::Mouse(cosmic::iced::mouse::Event::CursorEntered);
+        let leave = cosmic::iced::Event::Mouse(cosmic::iced::mouse::Event::CursorLeft);
+        assert!(window_event(true, &press(), id).is_none());
+        assert!(window_event(true, &enter, id).is_none());
+        assert!(window_event(true, &leave, id).is_none());
+    }
+
+    #[test]
+    fn alone_still_converts_window_events() {
+        let id = cosmic::iced::window::Id::unique();
+        let enter = cosmic::iced::Event::Mouse(cosmic::iced::mouse::Event::CursorEntered);
+        assert!(matches!(window_event(false, &press(), id), Some(Message::Press(i)) if i == id));
+        assert!(matches!(window_event(false, &enter, id), Some(Message::Hover(i, true)) if i == id));
+    }
 
     #[test]
     fn enter_then_timer_hides() {
@@ -402,14 +457,8 @@ impl State {
 fn run(rx: calloop::channel::Channel<Action>) -> Result<(), Box<dyn std::error::Error>> {
     // The real compositor, which knows the windows, through the socket the
     // panel gives applets that ask for it.
-    let socket = std::env::var("X_PRIVILEGED_WAYLAND_SOCKET")
-        .ok()
-        .and_then(|fd| fd.parse::<RawFd>().ok())
-        .map(|fd| unsafe { UnixStream::from_raw_fd(fd) });
-    let conn = match socket {
-        Some(socket) => Connection::from_socket(socket)?,
-        None => Connection::connect_to_env()?,
-    };
+    // Shared with the rest of the process (see `privileged`).
+    let conn = crate::central::privileged::connection()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
     let registry_state = RegistryState::new(&globals);

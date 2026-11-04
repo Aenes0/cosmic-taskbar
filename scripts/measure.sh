@@ -1,10 +1,10 @@
 #!/bin/sh
-# Peso do applet da barra: PSS_kB RSS_kB THREADS FDS CPU%
+# Peso do applet da barra (o primeiro dos 3, um por monitor; outro com [pid]): PSS_kB RSS_kB THREADS FDS CPU%
 # Uso: scripts/measure.sh [pid]   (dentro do sandbox, reexecuta no host)
 if [ -e /.flatpak-info ]; then
     exec flatpak-spawn --host sh "$0" "$@"
 fi
-pid=${1:-$(pgrep -f '^[^ ]*/cosmic-ext-applet-taskbar' | head -1)}
+pid=${1:-$(pgrep -f '^[^ ]*/cosmic-taskbar taskbar$' | head -1)}
 [ -n "$pid" ] || { echo "applet nao esta rodando" >&2; exit 1; }
 pss=$(awk '/^Pss:/{s+=$2}END{print s}' /proc/$pid/smaps)
 rss=$(awk '/^VmRSS:/{print $2}' /proc/$pid/status)

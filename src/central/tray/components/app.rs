@@ -11,6 +11,7 @@ use cosmic::{
     cosmic_config::{self, CosmicConfigEntry},
     iced::{
         self, Event::Mouse, Subscription, event,
+        keyboard::{self, key::{Key, Named}},
         mouse::{self, ScrollDelta},
         platform_specific::shell::commands::popup::destroy_popup,
         runtime::platform_specific::wayland::popup::SctkPopupSettings,
@@ -20,13 +21,14 @@ use cosmic::{
     surface,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     time::{Duration, Instant},
 };
 
 use crate::central::tray::{
     components::{
         drag::{self, Origin},
+        popups::{Cmd, Parent, Popups, Want},
         status_menu, view,
     },
     config::{CONFIG_ID, TrayConfig},
@@ -41,12 +43,34 @@ use crate::central::tray::{
 /// A press on the ^ this soon after the compositor closed the box is the same
 /// click that closed it (the grab dismisses, then delivers the press): no reopen.
 const DISMISS_CLICK_WINDOW: Duration = Duration::from_millis(300);
+/// How often the state machine is nudged while a popup is still pending.
+const POPUP_TICK: Duration = Duration::from_millis(100);
+
+/// Whether a press at `now` is the click that the compositor used, at `at`, to
+/// dismiss a popup: it must not open it again.
+fn dismiss_blocks(at: Option<Instant>, now: Instant) -> bool {
+    at.is_some_and(|t| now.saturating_duration_since(t) < DISMISS_CLICK_WINDOW)
+}
+
+/// Whether a destroy asked by a widget (libcosmic's tooltips, on leaving an
+/// icon) goes to the compositor: only for a surface seen open. libcosmic
+/// sends it for its tooltip even when that never opened, and destroying a
+/// surface that does not exist drops the one popup waiting to be made (the
+/// box, a menu) without a word (`event_loop/state.rs:1883`).
+fn forward_destroy(open: &mut HashSet<window::Id>, id: window::Id) -> bool {
+    open.remove(&id)
+}
 
 #[derive(Clone, Debug)]
 pub enum Msg {
     None,
     Activate(usize),
     Closed(window::Id),
+    /// The compositor confirmed the popup `id` exists.
+    PopupOpened(window::Id),
+    /// Nudge for the popup state machine while a request or a close is pending.
+    PopupTick,
+    Escape,
     // XXX don't use index (unique window id? or I guess that's created and destroyed)
     StatusMenu((usize, status_menu::Msg)),
     StatusNotifier(status_notifier_watcher::Event),
@@ -81,14 +105,18 @@ pub(crate) struct App {
     pub(super) core: app::Core,
     connection: Option<zbus::Connection>,
     pub(super) menus: BTreeMap<usize, status_menu::State>,
-    open_menu: Option<usize>,
     max_menu_id: usize,
-    popup: Option<window::Id>,
-    /// The box (opened by the ^).
-    overflow_popup: Option<window::Id>,
+    /// Every decision about the box and the menus; the app only executes its commands.
+    popups: Popups,
+    /// The item whose menu we told over D-Bus is open.
+    menu_notified: Option<usize>,
     pub(super) hovered_menu: Option<usize>,
     /// When the compositor last closed the box (click outside, grab).
     box_dismissed_at: Option<Instant>,
+    /// Same for a menu: the item and when.
+    menu_dismissed: Option<(usize, Instant)>,
+    /// Surfaces seen open that are not the box or a menu (libcosmic's tooltips).
+    others_open: HashSet<window::Id>,
     scroll_states: BTreeMap<usize, DiscreteScrollState>,
     token_tx: Option<calloop::channel::Sender<TokenRequest>>,
     pub(super) config: TrayConfig,
@@ -97,6 +125,21 @@ pub(crate) struct App {
     pub(super) drag: Option<drag::Drag>,
     /// Gap under the pointer while a drag is over the bar.
     pub(super) preview_slot: Option<usize>,
+    /// Embedded in a bigger applet ("corner"): the host owns the window size.
+    corner: bool,
+    /// Length (px) along the major axis taken by the others in the corner.
+    reserved: f32,
+}
+
+/// The major-axis bound left for the tray after the host's `reserved` px
+/// (never below 0).
+fn bounded_len(bounds: Option<f32>, reserved: f32) -> Option<f32> {
+    bounds.map(|len| (len - reserved.max(0.0)).max(0.0))
+}
+
+/// Only the standalone tray owns its window; in the corner the host does.
+fn resizes_window(corner: bool) -> bool {
+    !corner
 }
 
 impl App {
@@ -113,7 +156,7 @@ impl App {
     }
 
     /// Length of one button along the panel; always > 0.
-    pub(super) fn button_len(&self) -> f32 {
+    pub(crate) fn button_len(&self) -> f32 {
         let len = f32::from(self.core.applet.suggested_size(true).0)
             + 2.0 * f32::from(self.core.applet.suggested_padding(true).1);
         len.max(1.0)
@@ -140,6 +183,7 @@ impl App {
             .as_ref()
             .map(|c| if self.is_vertical() { c.height } else { c.width })
             .filter(|len| *len > 0.0);
+        let major_axis_len = bounded_len(major_axis_len, self.reserved);
         layout::split(
             &items,
             &self.config.visible,
@@ -180,6 +224,9 @@ impl App {
 
     /// Fits the applet to the bar as drawn: icons, the gap of a drag, the ^.
     pub(super) fn resize_window(&self) -> app::Task<Msg> {
+        if !resizes_window(self.corner) {
+            return Task::none();
+        }
         let Some(main_id) = self.core.main_window_id() else {
             return Task::none();
         };
@@ -199,7 +246,7 @@ impl App {
     /// box if nothing is left in it.
     fn relayout(&mut self) -> app::Task<Msg> {
         let mut cmds = vec![self.resize_window()];
-        if self.overflow_popup.is_some() && self.split().boxed.is_empty() {
+        if self.popups.box_id().is_some() && self.split().boxed.is_empty() {
             cmds.push(self.close_box());
         }
         Task::batch(cmds)
@@ -221,99 +268,94 @@ impl App {
         self.relayout()
     }
 
+    /// Closes the box if it is open (its menu goes with it).
     pub(super) fn close_box(&mut self) -> app::Task<Msg> {
-        tracing::trace!("DIAG close_box overflow_popup={:?} popup={:?}", self.overflow_popup, self.popup);
-        match self.overflow_popup.take() {
-            Some(popup_id) => destroy_popup(popup_id),
-            None => Task::none(),
+        if !self.popups.is_box_open() {
+            return Task::none();
         }
+        let cmds = self.popups.toggle_box(Instant::now(), window::Id::unique());
+        self.run(cmds)
     }
 
-    fn close_menu(&mut self) -> app::Task<Msg> {
-        tracing::trace!("DIAG close_menu open_menu={:?} popup={:?}", self.open_menu, self.popup);
-        if let Some(old) = self.open_menu.take()
-            && let Some(menu) = self.menus.get(&old)
-        {
+    fn open_menu_item(&self) -> Option<usize> {
+        self.popups.menu_item().map(|(item, _)| item)
+    }
+
+    /// Tells the item over D-Bus when its menu enters or leaves the state
+    /// (requested counts as open, as before).
+    fn sync_menu_events(&mut self) {
+        let now_open = self.open_menu_item();
+        if now_open == self.menu_notified {
+            return;
+        }
+        if let Some(menu) = self.menu_notified.and_then(|id| self.menus.get(&id)) {
             menu.closed();
         }
-        match self.popup.take() {
-            Some(popup_id) => destroy_popup(popup_id),
-            None => Task::none(),
-        }
-    }
-
-    /// Opens the menu of `id`, closing any other and the box (two popups with
-    /// a grab at once confuse the compositor); parent is always the main
-    /// window. An item that is not on the bar anchors at the ^.
-    fn open_menu_popup(&mut self, id: usize) -> app::Task<Msg> {
-        let Some(parent) = self.core.main_window_id() else {
-            return Task::none();
-        };
-        if !self.menus.contains_key(&id) {
-            return Task::none();
-        }
-        tracing::trace!(
-            "DIAG open_menu_popup id={id} popup={:?} overflow_popup={:?} open_menu={:?}",
-            self.popup, self.overflow_popup, self.open_menu
-        );
-        let mut cmds = vec![self.close_menu(), self.close_box()];
-        if let Some(menu) = self.menus.get(&id) {
+        if let Some(menu) = now_open.and_then(|id| self.menus.get(&id)) {
             menu.opened();
         }
-        self.open_menu = Some(id);
-        cmds.push(cosmic::surface::surface_task(
-            cosmic::surface::action::app_popup(
-                |_| Default::default(),
-                move |app: &mut Self| {
-                    let popup_id = window::Id::unique();
-                    tracing::trace!("DIAG menu popup created id={id} popup_id={popup_id:?}");
-                    app.popup = Some(popup_id);
-                    let slot = app.slot_of(id);
-                    app.popup_settings(parent, popup_id, slot)
-                },
-                None,
-            ),
-        ));
-        Task::batch(cmds)
+        self.menu_notified = now_open;
     }
 
-    /// Opens the box, anchored at the ^, closing any open menu first.
-    fn open_box(&mut self) -> app::Task<Msg> {
-        let Some(parent) = self.core.main_window_id() else {
-            return Task::none();
-        };
-        if self.split().boxed.is_empty() {
-            return Task::none();
+    /// Executes what the state machine decided.
+    fn run(&mut self, cmds: Vec<Cmd>) -> app::Task<Msg> {
+        self.sync_menu_events();
+        let mut tasks = Vec::with_capacity(cmds.len());
+        for cmd in cmds {
+            tracing::debug!(?cmd, "popup command");
+            match cmd {
+                Cmd::Destroy(id) => tasks.push(destroy_popup(id)),
+                Cmd::Open { want, id, parent } => {
+                    tasks.push(cosmic::surface::surface_task(
+                        cosmic::surface::action::app_popup(
+                            |_| Default::default(),
+                            move |app: &mut Self| app.settings_for(want, id, parent),
+                            None,
+                        ),
+                    ));
+                }
+            }
         }
-        tracing::trace!(
-            "DIAG open_box popup={:?} overflow_popup={:?} open_menu={:?}",
-            self.popup, self.overflow_popup, self.open_menu
-        );
-        let close = self.close_menu();
-        let open = cosmic::surface::surface_task(cosmic::surface::action::app_popup(
-            |_| Default::default(),
-            move |app: &mut Self| {
-                let popup_id = window::Id::unique();
-                let slot = app.split().bar.len();
-                let mut settings = app.popup_settings(parent, popup_id, slot);
-                settings.close_with_children = false;
-                tracing::trace!("DIAG box popup created popup_id={popup_id:?}");
-                app.overflow_popup = Some(popup_id);
-                settings
-            },
-            None,
-        ));
-        Task::batch([close, open])
+        Task::batch(tasks)
     }
-}
 
-impl cosmic::Application for App {
-    type Message = Msg;
-    type Executor = cosmic::SingleThreadExecutor;
-    type Flags = ();
-    const APP_ID: &'static str = crate::central::tray::APP_ID;
+    /// Positioning of a requested popup. Pure with respect to the state: the
+    /// machine alone decides what is open.
+    fn settings_for(&self, want: Want, id: window::Id, parent: Parent) -> SctkPopupSettings {
+        let main = self
+            .core
+            .main_window_id()
+            .unwrap_or_else(window::Id::unique);
+        match (want, parent) {
+            (Want::Box, _) => {
+                let mut settings = self.popup_settings(main, id, self.split().bar.len());
+                settings.close_with_children = false;
+                settings
+            }
+            (Want::Menu { item, in_box: true }, Parent::Box(box_id)) => {
+                let mut settings = self
+                    .core
+                    .applet
+                    .get_popup_settings(box_id, id, None, None, None);
+                let index = self
+                    .split()
+                    .boxed
+                    .iter()
+                    .position(|&b| b == item)
+                    .unwrap_or(0);
+                settings.positioner.anchor_rect = view::box_cell_anchor(
+                    index,
+                    view::BOX_COLUMNS,
+                    self.button_len(),
+                    view::BOX_PADDING,
+                );
+                settings
+            }
+            (Want::Menu { item, .. }, _) => self.popup_settings(main, id, self.slot_of(item)),
+        }
+    }
 
-    fn init(core: app::Core, _flags: ()) -> (Self, app::Task<Msg>) {
+    fn build(core: app::Core, corner: bool) -> (Self, app::Task<Msg>) {
         let mut core = core;
         // See-through, but no blur behind: the theme stays transparent while any
         // kind is set, and only layer surfaces, which there are none of here, blur.
@@ -339,10 +381,37 @@ impl cosmic::Application for App {
                 core,
                 config,
                 config_handle,
+                corner,
                 ..Self::default()
             },
             Task::none(),
         )
+    }
+
+    /// Same as `init`, but embedded in a bigger applet: it does not size the window.
+    pub(crate) fn in_corner(core: app::Core) -> (Self, app::Task<Msg>) {
+        Self::build(core, true)
+    }
+
+    /// The bar as a plain element, for the host applet to place (no autosize).
+    pub(crate) fn corner_view(&self) -> cosmic::Element<'_, Msg> {
+        view::corner_view(self)
+    }
+
+    /// Length (px) the host uses along the major axis; the tray gets the rest.
+    pub(crate) fn set_reserved(&mut self, px: f32) {
+        self.reserved = px.max(0.0);
+    }
+}
+
+impl cosmic::Application for App {
+    type Message = Msg;
+    type Executor = cosmic::SingleThreadExecutor;
+    type Flags = ();
+    const APP_ID: &'static str = crate::central::tray::APP_ID;
+
+    fn init(core: app::Core, _flags: ()) -> (Self, app::Task<Msg>) {
+        Self::build(core, false)
     }
 
     fn core(&self) -> &app::Core {
@@ -375,28 +444,55 @@ impl cosmic::Application for App {
                 let close = self.close_box();
                 Task::batch([close, self.update(Msg::Activate(id))])
             }
+            // The menu opens as a child of the box, which stays.
             Msg::MenuFromBox(id) => {
-                let close = self.close_box();
-                Task::batch([close, self.open_menu_popup(id)])
+                if !self.menus.contains_key(&id) {
+                    return Task::none();
+                }
+                let cmds = self.popups.menu(id, true, Instant::now(), window::Id::unique());
+                self.run(cmds)
+            }
+            Msg::PopupOpened(id) => {
+                tracing::debug!(?id, "popup opened");
+                let ours = self.popups.box_id() == Some(id)
+                    || self.popups.menu_item().is_some_and(|(_, m)| m == id);
+                if !ours {
+                    self.others_open.insert(id);
+                }
+                let cmds = self.popups.opened(id, Instant::now());
+                self.run(cmds)
+            }
+            Msg::PopupTick => {
+                let cmds = self.popups.tick(Instant::now(), window::Id::unique());
+                self.run(cmds)
+            }
+            Msg::Escape => {
+                let cmds = self.popups.escape(Instant::now());
+                self.run(cmds)
             }
             Msg::Closed(surface) => {
-                tracing::trace!(
-                    "DIAG Closed surface={surface:?} popup={:?} overflow_popup={:?} open_menu={:?}",
-                    self.popup, self.overflow_popup, self.open_menu
-                );
-                if self.popup == Some(surface) {
-                    self.popup = None;
-                    self.open_menu = None;
+                self.others_open.remove(&surface);
+                let now = Instant::now();
+                // Only what we did not destroy is still "open" here: the
+                // compositor closed it (click outside, grab).
+                let box_by_compositor = self.popups.box_id() == Some(surface);
+                let menu_by_compositor = self
+                    .popups
+                    .menu_item()
+                    .filter(|(_, id)| *id == surface)
+                    .map(|(item, _)| item);
+                tracing::debug!(?surface, box_by_compositor, ?menu_by_compositor, "popup closed");
+                let cmds = self.popups.closed(surface, now, window::Id::unique());
+                let mut tasks = vec![self.run(cmds)];
+                if let Some(item) = menu_by_compositor {
+                    self.menu_dismissed = Some((item, now));
                 }
-                // With a grab, a click outside closes the box without us
-                // asking: forget it, or the next ^ would destroy a dead surface.
-                if self.overflow_popup == Some(surface) {
-                    self.overflow_popup = None;
+                if box_by_compositor {
                     self.hovered_menu = None;
-                    self.box_dismissed_at = Some(Instant::now());
-                    return self.box_closed();
+                    self.box_dismissed_at = Some(now);
+                    tasks.push(self.box_closed());
                 }
-                Task::none()
+                Task::batch(tasks)
             }
             Msg::StatusMenu((id, msg)) => match self.menus.get_mut(&id) {
                 Some(state) => state
@@ -444,12 +540,9 @@ impl cosmic::Application for App {
                             self.drag = None;
                             self.preview_slot = None;
                         }
-                        if self.open_menu == Some(id) {
-                            self.open_menu = None;
-                            if let Some(popup_id) = self.popup.take() {
-                                tracing::trace!("DIAG item removed, destroying popup_id={popup_id:?} id={id}");
-                                cmds.push(destroy_popup(popup_id));
-                            }
+                        if self.open_menu_item() == Some(id) {
+                            let close = self.popups.escape(Instant::now());
+                            cmds.push(self.run(close));
                         }
                     }
                     cmds.push(self.relayout());
@@ -475,17 +568,20 @@ impl cosmic::Application for App {
                 self.relayout()
             }
             Msg::TogglePopup(id) => {
-                tracing::trace!(
-                    "DIAG TogglePopup id={id} open_menu={:?} popup={:?} overflow_popup={:?}",
-                    self.open_menu, self.popup, self.overflow_popup
-                );
                 if !self.menus.contains_key(&id) {
                     return Task::none();
                 }
-                if self.open_menu.is_some() {
-                    return self.close_menu();
+                let now = Instant::now();
+                let reopens = self.open_menu_item() != Some(id)
+                    && self
+                        .menu_dismissed
+                        .is_some_and(|(item, at)| item == id && dismiss_blocks(Some(at), now));
+                self.menu_dismissed = None;
+                if reopens {
+                    return Task::none();
                 }
-                self.open_menu_popup(id)
+                let cmds = self.popups.menu(id, false, now, window::Id::unique());
+                self.run(cmds)
             }
             Msg::Token(u) => match u {
                 TokenUpdate::Init(tx) => {
@@ -523,9 +619,13 @@ impl cosmic::Application for App {
             },
             Msg::Hovered(id) => {
                 self.hovered_menu = id;
-                // With a menu open, hovering another icon switches to its menu.
-                match (id, self.open_menu) {
-                    (Some(id), Some(open)) if open != id => self.open_menu_popup(id),
+                // With a menu open, hovering another icon of the bar switches
+                // to its menu; icons of the box do not.
+                match (id, self.open_menu_item()) {
+                    (Some(id), Some(open)) if open != id && self.split().bar.contains(&id) => {
+                        let cmds = self.popups.menu(id, false, Instant::now(), window::Id::unique());
+                        self.run(cmds)
+                    }
                     _ => Task::none(),
                 }
             }
@@ -542,23 +642,24 @@ impl cosmic::Application for App {
                 };
                 scroll(id, menu.item.item_proxy().clone(), delta, orientation)
             }
+            Msg::Surface(surface::Action::DestroyPopup(id)) => {
+                if forward_destroy(&mut self.others_open, id) {
+                    return cosmic::surface::surface_task(surface::Action::DestroyPopup(id));
+                }
+                tracing::debug!(?id, "destroy of a surface never open, dropped");
+                Task::none()
+            }
             Msg::Surface(a) => cosmic::surface::surface_task(a),
             Msg::ToggleOverflow => {
-                tracing::trace!(
-                    "DIAG ToggleOverflow popup={:?} overflow_popup={:?} open_menu={:?}",
-                    self.popup, self.overflow_popup, self.open_menu
-                );
-                if let Some(popup_id) = self.overflow_popup.take() {
-                    return destroy_popup(popup_id);
-                }
-                if self
-                    .box_dismissed_at
-                    .take()
-                    .is_some_and(|t| t.elapsed() < DISMISS_CLICK_WINDOW)
-                {
+                let now = Instant::now();
+                let opening = self.popups.box_id().is_none();
+                let blocked = opening && dismiss_blocks(self.box_dismissed_at, now);
+                self.box_dismissed_at = None;
+                if blocked || (opening && self.split().boxed.is_empty()) {
                     return Task::none();
                 }
-                self.open_box()
+                let cmds = self.popups.toggle_box(now, window::Id::unique());
+                self.run(cmds)
             }
             message @ (Msg::DragStart(..)
             | Msg::DragEnd
@@ -570,10 +671,14 @@ impl cosmic::Application for App {
             Msg::HoveredOverflow => {
                 self.hovered_menu = None;
                 // With a menu open, hovering the ^ switches to the box.
-                if self.overflow_popup.is_some() || self.open_menu.is_none() {
+                if self.popups.box_id().is_some()
+                    || self.open_menu_item().is_none()
+                    || self.split().boxed.is_empty()
+                {
                     return Task::none();
                 }
-                self.open_box()
+                let cmds = self.popups.toggle_box(Instant::now(), window::Id::unique());
+                self.run(cmds)
             }
         }
     }
@@ -584,16 +689,27 @@ impl cosmic::Application for App {
         subscriptions.push(status_notifier_watcher::subscription().map(Msg::StatusNotifier));
 
         for (id, menu) in &self.menus {
-            let is_open = self.open_menu == Some(*id);
+            let is_open = self.open_menu_item() == Some(*id);
             subscriptions.push(menu.subscription(is_open).with(*id).map(Msg::StatusMenu));
         }
         subscriptions.push(activation_token_subscription(0).map(Msg::Token));
-        subscriptions.push(event::listen_with(|e, status, _| match (e, status) {
+        subscriptions.push(event::listen_with(|e, status, id| match (e, status) {
             (Mouse(mouse::Event::WheelScrolled { delta }), event::Status::Ignored) => {
                 Some(Msg::WheelScrolled(delta))
             }
+            (iced::Event::Window(window::Event::Opened { .. }), _) => Some(Msg::PopupOpened(id)),
+            (
+                iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: Key::Named(Named::Escape),
+                    ..
+                }),
+                _,
+            ) => Some(Msg::Escape),
             _ => None,
         }));
+        if self.popups.pending() {
+            subscriptions.push(iced::time::every(POPUP_TICK).map(|_| Msg::PopupTick));
+        }
         subscriptions.push(self.core.watch_config::<TrayConfig>(CONFIG_ID).map(|u| {
             for why in u.errors.into_iter().filter(cosmic_config::Error::is_err) {
                 tracing::error!(why = why.to_string(), "Error watching config");
@@ -609,7 +725,7 @@ impl cosmic::Application for App {
     }
 
     fn view_window(&self, surface: window::Id) -> cosmic::Element<'_, Msg> {
-        if self.overflow_popup == Some(surface) {
+        if self.popups.box_id() == Some(surface) {
             return view::view_box(self, surface);
         }
 
@@ -617,7 +733,12 @@ impl cosmic::Application for App {
         let cosmic = theme.cosmic();
         let corners = cosmic.corner_radii;
         let pad = corners.radius_m[0];
-        match self.open_menu.and_then(|id| Some((id, self.menus.get(&id)?))) {
+        let open = self
+            .popups
+            .menu_item()
+            .filter(|(_, id)| *id == surface)
+            .and_then(|(item, _)| Some((item, self.menus.get(&item)?)));
+        match open {
             Some((id, menu)) => self
                 .core
                 .applet
@@ -710,6 +831,44 @@ fn discrete_scroll_delta(delta: DiscreteScrollDelta) -> Option<(i32, &'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tooltip_never_open_is_not_destroyed() {
+        let mut open = HashSet::new();
+        let tooltip = window::Id::unique();
+        assert!(!forward_destroy(&mut open, tooltip), "never seen open: dropped");
+        open.insert(tooltip);
+        assert!(forward_destroy(&mut open, tooltip), "seen open: goes");
+        assert!(!forward_destroy(&mut open, tooltip), "once");
+    }
+
+    #[test]
+    fn a_press_right_after_the_dismissal_is_the_same_click() {
+        let t = Instant::now();
+        assert!(dismiss_blocks(Some(t), t + Duration::from_millis(50)));
+        assert!(!dismiss_blocks(Some(t), t + DISMISS_CLICK_WINDOW));
+        assert!(!dismiss_blocks(None, t));
+    }
+
+    #[test]
+    fn reserved_is_taken_from_the_major_axis() {
+        let bounds = bounded_len(Some(300.0), 90.0);
+        assert_eq!(bounds, Some(210.0));
+        assert_eq!(layout::capacity(bounds, 30.0), Some(7));
+    }
+
+    #[test]
+    fn reserved_never_goes_below_zero_and_none_stays_none() {
+        assert_eq!(bounded_len(Some(50.0), 90.0), Some(0.0));
+        assert_eq!(bounded_len(None, 90.0), None);
+        assert_eq!(bounded_len(Some(50.0), -5.0), Some(50.0));
+    }
+
+    #[test]
+    fn corner_does_not_resize_the_window() {
+        assert!(!resizes_window(true));
+        assert!(resizes_window(false));
+    }
 
     #[test]
     fn discrete_scroll_prefers_vertical_delta() {

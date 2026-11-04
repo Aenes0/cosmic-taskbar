@@ -21,8 +21,10 @@ theirs=com.system76.CosmicAppList
 workspaces=io.github.Aenes0.CosmicWorkspacesButton
 their_workspaces=com.system76.CosmicPanelWorkspacesButton
 menu_service="(cosmic-taskbar|cosmic-ext-applet-start) --menu$"
+. "$(dirname "$0")/scripts/corner_wings.sh"
 
 if [ "$1" = "--undo" ]; then
+    corner_undo "$panel/plugins_wings"
     rm -f "$actions"
     [ -f "$actions.bak" ] && mv "$actions.bak" "$actions"
     if [ -f "$center" ]; then
@@ -73,6 +75,8 @@ fi
 for f in "$panel/plugins_center" "$panel/plugins_wings"; do
     [ -f "$f" ] && sed -i -e "s|\"$theirs\"|\"$ours\"|" -e "s|\"$their_workspaces\"|\"$workspaces\"|" "$f"
 done
+# The corner's three applets (tray, Central, show desktop) become the Canto.
+[ -f "$panel/plugins_wings" ] && corner_use "$panel/plugins_wings"
 # The bar never takes the keys, as on Windows: the compositor gives them to
 # every top layer that asks when it maps, so each restart of the panel took
 # them from the window in use. Its popups still get them (by their grab),

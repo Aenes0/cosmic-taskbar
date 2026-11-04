@@ -1,0 +1,17 @@
+[Desktop Entry]
+Name=Corner
+Name[pt_BR]=Canto
+Comment=Tray, clock and show desktop in one panel applet
+Comment[pt_BR]=Bandeja, relógio e mostrar área num só applet
+Type=Application
+Exec=@bindir@/cosmic-taskbar central --corner
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Corner;Tray;Clock;Desktop;Canto;Bandeja;
+Icon=io.github.Aenes0.CosmicCentral
+NoDisplay=true
+X-CosmicApplet=true
+X-HostWaylandDisplay=true
+X-CosmicHoverPopup=Auto
+X-OverflowPriority=99
+X-OverflowMinSize=2

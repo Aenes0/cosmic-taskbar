@@ -3,11 +3,6 @@
 //! Tiling of the active workspace on this panel's output, through COSMIC's
 //! workspace protocol, as the tiling applet does it.
 
-use std::os::{
-    fd::{FromRawFd, RawFd},
-    unix::net::UnixStream,
-};
-
 use cosmic::{
     cctk::{
         self,
@@ -111,14 +106,8 @@ fn run(
     rx: calloop::channel::Channel<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // The real compositor, not the panel's, which applets live in.
-    let socket = std::env::var("X_PRIVILEGED_WAYLAND_SOCKET")
-        .ok()
-        .and_then(|fd| fd.parse::<RawFd>().ok())
-        .map(|fd| unsafe { UnixStream::from_raw_fd(fd) });
-    let conn = match socket {
-        Some(socket) => Connection::from_socket(socket)?,
-        None => Connection::connect_to_env()?,
-    };
+    // Shared with the rest of the process (see `privileged`).
+    let conn = crate::central::privileged::connection()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
     let mut event_loop = calloop::EventLoop::<State>::try_new()?;

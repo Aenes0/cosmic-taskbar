@@ -9,9 +9,16 @@
 - **Avisos do logi-osd sem o estilo próprio**: ele manda dicas `x-estilo`, `x-tom`, `x-pontos` que
   só o daemon `notificacoes` (depreciado, nunca em uso) desenhava; o daemon do COSMIC as ignora e
   mostra uma notificação comum.
-- **Registros DIAG da bandeja** (`src/central/tray/components/app.rs`): vieram junto, a pedido, em
-  `trace` (mudos por padrão; `RUST_LOG=cosmic_taskbar::central::tray=trace` os liga). Remover
-  quando a investigação do travamento for encerrada.
+- **Registros DIAG em `trace`** (mudos por padrão), 18 linhas: na bandeja
+  (`src/central/tray/components/app.rs`, investigação do travamento;
+  `RUST_LOG=cosmic_taskbar::central::tray=trace` os liga) e na barra (`src/bar/app.rs`, prévia presa
+  na taskbar; `RUST_LOG=cosmic_taskbar::bar=trace`). Remover quando cada investigação for encerrada.
+- **Bandeja reconstruída (03/11)**: popups pela máquina `tray/components/popups.rs` (confirma pelo
+  `Opened`, sem destroy às cegas); menu de ícone da caixa como filho dela; destroy de tooltip nunca
+  aberto filtrado (`forward_destroy`). A "loteria" do ^ era do `cosmic-panel` (popup com grab
+  destruído pelo applet deixava entrada morta): corrigido no fork `~/Projetos/cosmic-panel`
+  (branch `aenes`, pacote `cosmic-panel-aenes`). **Pendente: arrastar ícones não funciona** (sem
+  log; o fork também corrigiu o grab de DnD preso, que travava a barra).
 - **Painel de medições lê a GPU pela libnvidia-ml** (temperatura e uso): é leitura de sensor, não
   renderização.
 - **Lista de janelas (toplevels): decidido NÃO compartilhar (30/10).** O que as duas têm de igual é

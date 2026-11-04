@@ -5,7 +5,7 @@
 //! bar, the ones not chosen in a box under a ^; dragging picks which show.
 //! Its own applet, by the same program (a fork of cosmic-applet-status-area).
 
-mod components;
+pub(crate) mod components;
 mod config;
 mod dnd;
 mod identity;

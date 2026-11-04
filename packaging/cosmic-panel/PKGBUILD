@@ -1,0 +1,71 @@
+# Maintainer: Alexandre <alexandre.enes1@gmail.com>
+#
+# cosmic-panel-aenes: cosmic-panel 1.11.0 (tag epoch-1.11.0) com o patch aenes.patch:
+#   - popup com grab some depois que o applet fecha o próprio popup;
+#   - painel travado num grab de DnD (sem cliques) até reiniciar.
+# O patch sai do clone de trabalho ~/Projetos/cosmic-panel (branch aenes):
+#   git -C ~/Projetos/cosmic-panel diff epoch-1.11.0 > packaging/cosmic-panel/aenes.patch
+#
+# Instalar:  cd packaging/cosmic-panel && makepkg -f && sudo pacman -U cosmic-panel-aenes-<versão>-x86_64.pkg.tar.zst
+#            (depois: killall cosmic-panel; o cosmic-session o reinicia)
+# Voltar ao pacote oficial:
+#   sudo pacman -U /var/cache/pacman/pkg/cosmic-panel-1:1.11.0-1.1-x86_64_v3.pkg.tar.zst   # "s" para remover cosmic-panel-aenes
+#   # sem o cache: sudo pacman -S cosmic-panel
+#
+# Compilado para x86-64-v3, o nível dos pacotes v3 do CachyOS; não usa o target-cpu=native do makepkg.conf.
+
+pkgname=cosmic-panel-aenes
+pkgver=1.11.0
+pkgrel=1
+pkgdesc='XDG Shell Wrapper Panel for Cosmic (aenes fixes) (x86-64-v3)'
+arch=(x86_64)
+url='https://github.com/pop-os/cosmic-panel'
+license=(GPL-3.0-only)
+depends=(libgcc glibc libxkbcommon wayland)
+makedepends=(cargo git)
+provides=("cosmic-panel=1:${pkgver}")
+conflicts=(cosmic-panel)
+options=(!lto !debug)
+
+source=("cosmic-panel::git+https://github.com/pop-os/cosmic-panel.git#tag=epoch-${pkgver}"
+        aenes.patch)
+sha256sums=('SKIP'
+            'SKIP')
+
+_target="$srcdir/target"
+
+prepare() {
+  cd "$srcdir/cosmic-panel"
+  patch -Np1 -i "$srcdir/aenes.patch"
+  cargo fetch --locked
+}
+
+_v3_flags() {
+  export RUSTFLAGS="-C target-cpu=x86-64-v3"
+  CFLAGS="${CFLAGS//-march=native/-march=x86-64-v3}"; CFLAGS="${CFLAGS//-mtune=native/-mtune=generic}"
+  CXXFLAGS="${CXXFLAGS//-march=native/-march=x86-64-v3}"; CXXFLAGS="${CXXFLAGS//-mtune=native/-mtune=generic}"
+  export CFLAGS CXXFLAGS
+  case "$RUSTFLAGS $CFLAGS $CXXFLAGS" in *native*) echo "flags com native: $RUSTFLAGS | $CFLAGS" >&2; return 1 ;; esac
+}
+
+build() {
+  _v3_flags
+  cd "$srcdir/cosmic-panel"
+  CARGO_TARGET_DIR="$_target" cargo build --release --frozen --bin cosmic-panel
+}
+
+check() {
+  _v3_flags
+  cd "$srcdir/cosmic-panel"
+  CARGO_TARGET_DIR="$_target" cargo test --release --frozen
+}
+
+package() {
+  cd "$srcdir/cosmic-panel"
+  install -Dm0755 "$_target/release/cosmic-panel" "$pkgdir/usr/bin/cosmic-panel"
+  # Mesmo layout do `just install` / pacote oficial: /usr/share/cosmic/<APPID>*/v1/<chave>
+  cd data/default_schema
+  find . -type f -print0 | while IFS= read -r -d '' f; do
+    install -Dm0644 "$f" "$pkgdir/usr/share/cosmic/${f#./}"
+  done
+}

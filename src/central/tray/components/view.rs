@@ -18,11 +18,40 @@ use super::{
 use crate::central::tray::dnd::TrayDrag;
 
 /// Icons per row in the box.
-const BOX_COLUMNS: usize = 5;
+pub(super) const BOX_COLUMNS: usize = 5;
+/// Padding (px) around the grid of the box.
+pub(super) const BOX_PADDING: i32 = 8;
+
+/// The cell of the `index`-th icon of the box, relative to the box surface:
+/// where the menu of a box icon anchors.
+pub(super) fn box_cell_anchor(
+    index: usize,
+    columns: usize,
+    button_len: f32,
+    padding: i32,
+) -> cosmic::iced::Rectangle<i32> {
+    let columns = columns.max(1);
+    let len = button_len as i32;
+    cosmic::iced::Rectangle {
+        x: padding + (index % columns) as i32 * len,
+        y: padding + (index / columns) as i32 * len,
+        width: len,
+        height: len,
+    }
+}
 
 /// The bar: the visible icons in the chosen order (with the gap of a drag),
 /// then the ^ if anything is hidden or a drag from the bar is on.
 pub(super) fn view(app: &App) -> Element<'_, Msg> {
+    app.core.applet.autosize_window(bar(app)).into()
+}
+
+/// The same bar without autosize: for the host applet to embed in the corner.
+pub(super) fn corner_view(app: &App) -> Element<'_, Msg> {
+    bar(app)
+}
+
+fn bar(app: &App) -> Element<'_, Msg> {
     let applet = &app.core.applet;
     let split = app.split();
     let main_id = app.core.main_window_id();
@@ -74,7 +103,7 @@ pub(super) fn view(app: &App) -> Element<'_, Msg> {
         );
     }
 
-    applet.autosize_window(line(app, children)).into()
+    line(app, children)
 }
 
 /// A row, or a column on a vertical panel. No Length::Fill here: inside
@@ -111,7 +140,7 @@ pub(super) fn view_box(app: &App, box_id: window::Id) -> Element<'_, Msg> {
     });
 
     applet
-        .popup_container(container(cosmic::iced::widget::column(rows)).padding(8))
+        .popup_container(container(cosmic::iced::widget::column(rows)).padding(BOX_PADDING as f32))
         .into()
 }
 
@@ -145,4 +174,23 @@ pub(super) fn menu_icon_button<'a>(
     .width(Length::Fixed((suggested.0 + 2 * padding) as f32))
     .height(Length::Fixed((suggested.1 + 2 * padding) as f32))
     .class(cosmic::theme::Button::AppletIcon)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box_cell_anchor_places_the_index_in_the_grid() {
+        let r = box_cell_anchor(7, 5, 30.0, 8);
+        assert_eq!((r.x, r.y, r.width, r.height), (68, 38, 30, 30));
+    }
+
+    #[test]
+    fn box_cell_anchor_first_cell_is_at_the_padding() {
+        let r = box_cell_anchor(0, 5, 30.0, 8);
+        assert_eq!((r.x, r.y), (8, 8));
+        let last_of_row = box_cell_anchor(4, 5, 30.0, 8);
+        assert_eq!((last_of_row.x, last_of_row.y), (128, 8));
+    }
 }

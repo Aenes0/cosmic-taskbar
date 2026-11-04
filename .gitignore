@@ -4,3 +4,10 @@
 __pycache__/
 # estado de sessão do visual companion (porta e token): nunca no git
 .superpowers/brainstorm/
+
+# makepkg do cosmic-panel-aenes
+/packaging/cosmic-panel/src/
+/packaging/cosmic-panel/pkg/
+/packaging/cosmic-panel/cosmic-panel/
+/packaging/cosmic-panel/*.pkg.tar.*
+/packaging/cosmic-panel/*.log*
