@@ -1,0 +1,11 @@
+[
+    "cpu",
+    "energy",
+    "gpu",
+    "memory",
+    "disks",
+    "network",
+    "sensors",
+    "processes",
+    "system",
+]

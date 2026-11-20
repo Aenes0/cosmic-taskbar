@@ -1,0 +1,5 @@
+{
+    "power": "always",
+    "volume": "always",
+    "peripherals": "never",
+}

@@ -1,0 +1,12 @@
+[
+    "brightness:horizontal",
+    "divider:horizontal",
+    "wifi:short",
+    "do-not-disturb:icon",
+    "bluetooth:short",
+    "power:icon",
+    "dark-mode:icon",
+    "airplane:icon",
+    "keep-awake:icon",
+    "camera:icon",
+]

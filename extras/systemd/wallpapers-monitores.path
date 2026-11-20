@@ -1,0 +1,11 @@
+[Unit]
+Description=Observa a pasta de wallpapers, a config do cosmic-bg e os monitores
+
+[Path]
+PathChanged=%h/Imagens/wallpapers
+PathChanged=%h/.config/cosmic/com.system76.CosmicBackground/v1
+PathChanged=%h/.config/wallpapers-monitores
+PathChanged=%h/.local/state/cosmic-comp/outputs.ron
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,4 @@
+{
+    Launcher: "@HOME@/.local/bin/cosmic-taskbar --menu",
+    AppLibrary: "@HOME@/.local/bin/cosmic-taskbar --menu",
+}

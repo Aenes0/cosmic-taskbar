@@ -1,0 +1,23 @@
+#!/bin/sh
+# Corrige o Icon= dos web apps (PWA) do Brave Flatpak: o Brave grava o caminho
+# visto de dentro do sandbox (~/.var/app/.../data/icons), mas o ícone fica em
+# ~/.local/share/icons. Aponta para o PNG real, se existir, e acerta o StartupWMClass.
+apps="$HOME/.local/share/applications"
+icons="$HOME/.local/share/icons/hicolor"
+for f in "$apps"/com.brave.Browser.flextop.*.desktop; do
+    [ -f "$f" ] || continue
+    cur=$(sed -n "s/^Icon=//p" "$f" | head -n1)
+    # No Wayland a janela do PWA tem app_id "brave-<id>-<perfil>" (o mesmo nome
+    # do arquivo sem o prefixo); a dock usa StartupWMClass para achar o ícone.
+    wmclass=$(basename "$f" .desktop); wmclass=${wmclass#com.brave.Browser.flextop.}
+    grep -qx "StartupWMClass=$wmclass" "$f" || sed -i "s|^StartupWMClass=.*|StartupWMClass=$wmclass|" "$f"
+    [ -n "$cur" ] && [ -f "$cur" ] && continue
+    name=$(basename "$cur" .png)
+    for size in 256x256 512x512 128x128 48x48 32x32; do
+        png="$icons/$size/apps/$name.png"
+        if [ -f "$png" ]; then
+            sed -i "s|^Icon=.*|Icon=$png|" "$f"
+            break
+        fi
+    done
+done

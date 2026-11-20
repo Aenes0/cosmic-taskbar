@@ -1,0 +1,14 @@
+[Unit]
+Description=Wallpapers recortados por monitor (COSMIC)
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+# espera cópias de imagens grandes terminarem e junta rajadas de eventos
+ExecStartPre=/usr/bin/sleep 3
+ExecStart=%h/.local/bin/wallpapers-monitores sincronizar
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=graphical-session.target

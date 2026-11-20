@@ -1,0 +1,7 @@
+[Unit]
+Description=Corrige icones dos web apps do Brave
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 2
+ExecStart=%h/.local/bin/fix-brave-pwa-icons

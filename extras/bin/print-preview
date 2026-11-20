@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+# Prévia flutuante estilo Windows para o print-recorte.
+# Uso: print-preview ARQUIVO [X Y]   (X Y = ponto da seleção, para abrir no monitor certo)
+# Clique na miniatura = editar no Satty; pasta = abre ~/Imagens/Screenshots; some sozinha em 6 s.
+from ctypes import CDLL
+CDLL("libgtk4-layer-shell.so")  # precisa carregar antes do GTK
+
+import os, sys, subprocess
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gtk4LayerShell", "1.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gtk, Gdk, GLib, Gio, GdkPixbuf
+from gi.repository import Gtk4LayerShell as LayerShell
+
+FILE = sys.argv[1]
+POINT = (int(sys.argv[2]), int(sys.argv[3])) if len(sys.argv) >= 4 else None
+TIMEOUT_MS = 6000
+THUMB_W, THUMB_H = 320, 180   # tamanho máximo da miniatura
+
+CSS = b"""
+window { background: transparent; }
+.card {
+  background: alpha(#1e1f24, 0.94);
+  border: 1px solid alpha(white, 0.08);
+  border-radius: 16px;
+  padding: 10px;
+  box-shadow: 0 8px 28px alpha(black, 0.45);
+  opacity: 0;
+  transition: opacity 180ms ease-out;
+}
+.card.shown { opacity: 1; }
+.thumb { border-radius: 10px; background: alpha(black, 0.35); }
+.thumb-btn { padding: 0; border-radius: 10px; background: none; border: none; box-shadow: none; }
+.thumb-btn:hover .thumb { opacity: 0.85; }
+.title { color: #f2f2f5; font-weight: 600; font-size: 13px; }
+.sub { color: alpha(#f2f2f5, 0.6); font-size: 11px; }
+.icon-btn {
+  min-width: 30px; min-height: 30px; padding: 0;
+  border-radius: 999px; background: alpha(white, 0.06); color: #f2f2f5;
+  border: none; box-shadow: none;
+}
+.icon-btn:hover { background: alpha(white, 0.14); }
+.edit-btn {
+  border-radius: 999px; padding: 4px 14px;
+  background: #3daee9; color: #0b1a24; font-weight: 600; border: none; box-shadow: none;
+}
+.edit-btn:hover { background: #63c0f0; }
+progressbar trough { min-height: 3px; background: alpha(white, 0.08); border-radius: 2px; }
+progressbar progress { min-height: 3px; background: #3daee9; border-radius: 2px; }
+"""
+
+def edit(*_):
+    subprocess.Popen(["satty", "--filename", FILE, "--output-filename", FILE,
+                      "--initial-tool", "arrow", "--copy-command", "wl-copy",
+                      "--actions-on-enter", "save-to-clipboard,save-to-file,exit",
+                      "--early-exit", "all", "--disable-notifications"],
+                     start_new_session=True)
+    app.quit()
+
+def open_folder(*_):
+    subprocess.Popen(["xdg-open", os.path.dirname(FILE)], start_new_session=True)
+    app.quit()
+
+def activate(app):
+    prov = Gtk.CssProvider(); prov.load_from_data(CSS)
+    Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov,
+                                              Gtk.STYLE_PROVIDER_PRIORITY_USER)
+    win = Gtk.ApplicationWindow(application=app)
+    LayerShell.init_for_window(win)
+    LayerShell.set_layer(win, LayerShell.Layer.OVERLAY)
+    LayerShell.set_namespace(win, "print-preview")
+    LayerShell.set_keyboard_mode(win, LayerShell.KeyboardMode.NONE)
+    for edge, m in ((LayerShell.Edge.BOTTOM, 24), (LayerShell.Edge.RIGHT, 24)):
+        LayerShell.set_anchor(win, edge, True); LayerShell.set_margin(win, edge, m)
+
+    if POINT:  # monitor onde a captura foi feita
+        mons = Gdk.Display.get_default().get_monitors()
+        for i in range(mons.get_n_items()):
+            g = mons.get_item(i).get_geometry()
+            if g.x <= POINT[0] < g.x + g.width and g.y <= POINT[1] < g.y + g.height:
+                LayerShell.set_monitor(win, mons.get_item(i)); break
+
+    card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8); card.add_css_class("card")
+    card.set_size_request(THUMB_W + 20, -1)
+
+    # miniatura reduzida já na leitura: a janela nunca passa de ~340 px de largura
+    w, h = GdkPixbuf.Pixbuf.get_file_info(FILE)[1:]
+    pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(FILE, THUMB_W, THUMB_H, True)
+    pic = Gtk.Picture.new_for_paintable(Gdk.Texture.new_for_pixbuf(pix)); pic.add_css_class("thumb")
+    pic.set_can_shrink(True); pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+    pic.set_size_request(THUMB_W, min(pix.get_height(), THUMB_H))
+    thumb = Gtk.Button(child=pic); thumb.add_css_class("thumb-btn")
+    thumb.set_cursor(Gdk.Cursor.new_from_name("pointer")); thumb.connect("clicked", edit)
+    card.append(thumb)
+
+    row = Gtk.Box(spacing=8)
+    txt = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+    t = Gtk.Label(label="Captura copiada", xalign=0); t.add_css_class("title")
+    sub = Gtk.Label(label=f"{w}×{h} · salvo em Screenshots", xalign=0); sub.add_css_class("sub")
+    txt.append(t); txt.append(sub); row.append(txt)
+
+    eb = Gtk.Button(label="Editar"); eb.add_css_class("edit-btn"); eb.connect("clicked", edit)
+    fb = Gtk.Button(icon_name="folder-open-symbolic", tooltip_text="Abrir pasta"); fb.add_css_class("icon-btn")
+    fb.connect("clicked", open_folder)
+    xb = Gtk.Button(icon_name="window-close-symbolic", tooltip_text="Fechar"); xb.add_css_class("icon-btn")
+    xb.connect("clicked", lambda *_: app.quit())
+    for b in (eb, fb, xb): b.set_valign(Gtk.Align.CENTER); row.append(b)
+    card.append(row)
+
+    bar = Gtk.ProgressBar(fraction=1.0); card.append(bar)
+    win.set_child(card); win.present()
+    GLib.timeout_add(30, lambda: (card.add_css_class("shown"), False)[1])
+
+    # contagem regressiva, pausa com o mouse em cima
+    state = {"left": TIMEOUT_MS, "hover": False}
+    hov = Gtk.EventControllerMotion()
+    hov.connect("enter", lambda *_: state.update(hover=True))
+    hov.connect("leave", lambda *_: state.update(hover=False))
+    card.add_controller(hov)
+    def tick():
+        if not state["hover"]:
+            state["left"] -= 50
+            bar.set_fraction(max(state["left"], 0) / TIMEOUT_MS)
+            if state["left"] <= 0:
+                app.quit(); return False
+        return True
+    GLib.timeout_add(50, tick)
+
+app = Gtk.Application(application_id=None, flags=Gio.ApplicationFlags.NON_UNIQUE)
+app.connect("activate", activate)
+app.run([])

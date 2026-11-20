@@ -1,0 +1,12 @@
+#!/bin/sh
+# Reinicia o cosmic-panel sem sair da sessão (cosmic-session o relança sozinho).
+old=$(pgrep -x cosmic-panel | head -1)
+[ -z "$old" ] && { echo "cosmic-panel nao esta rodando"; exit 1; }
+kill "$old"
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 1
+    new=$(pgrep -x cosmic-panel | head -1)
+    [ -n "$new" ] && [ "$new" != "$old" ] && break
+done
+sleep 2
+echo "cosmic-panel: $old -> ${new:-nenhum}; applets: $(pgrep -fc 'cosmic-taskbar')"

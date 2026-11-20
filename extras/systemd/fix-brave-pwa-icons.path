@@ -1,0 +1,9 @@
+[Unit]
+Description=Observa novos web apps do Brave
+
+[Path]
+PathChanged=%h/.local/share/applications
+PathChanged=%h/.local/share/icons/hicolor/256x256/apps
+
+[Install]
+WantedBy=default.target

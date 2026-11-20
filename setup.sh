@@ -61,6 +61,18 @@ if ! grep -q "cosmic-taskbar --tools\|cosmic-ext-applet-start --tools" "$custom"
     fi
 fi
 
+# Super+Shift+S, Windows-style screen snipping (`print-recorte`).
+bindir="$(dirname "$bin")"
+if ! grep -q "print-recorte" "$custom" 2>/dev/null; then
+    line="    (modifiers: [Super, Shift], key: \"s\", description: Some(\"Recorte de tela\")): Spawn(\"$bindir/print-recorte\"),"
+    if [ -s "$custom" ] && grep -q "}" "$custom"; then
+        last=$(grep -n "}" "$custom" | tail -1 | cut -d: -f1)
+        sed -i "${last}i\\$line" "$custom"
+    else
+        printf '{\n%s\n}\n' "$line" > "$custom"
+    fi
+fi
+
 # One button for both in the panel, where the launcher's was (or where
 # the Start button was, when it was part of the Central).
 if [ -f "$center" ] && ! grep -q "\"$start\"" "$center"; then

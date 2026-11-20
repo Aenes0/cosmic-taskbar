@@ -68,6 +68,21 @@ if [ ! -e /etc/udev/rules.d/70-logi-osd.rules ] && [ ! -e /usr/lib/udev/rules.d/
     echo "  sudo install -Dm0644 data/logi/70-logi-osd.rules /etc/udev/rules.d/70-logi-osd.rules && sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw"
 fi
 
+# Utilitários visuais extras (print-recorte, print-preview, fix-brave-pwa-icons,
+# wallpapers-monitores, reiniciar-painel) e suas units de usuário.
+for tool in extras/bin/*; do
+    [ -f "$tool" ] || continue
+    install -Dm0755 "$tool" "$bindir/$(basename "$tool")"
+done
+if [ "$prefix" = "$HOME/.local" ]; then
+    user_units="$HOME/.config/systemd/user"
+    mkdir -p "$user_units"
+    for u in extras/systemd/*; do
+        [ -f "$u" ] || continue
+        install -Dm0644 "$u" "$user_units/$(basename "$u")"
+    done
+fi
+
 # Only a plain ~/.local install starts the services here; system prefixes
 # leave that to the packager. Restarting the panels' host closes an open
 # panel, nothing else: the bar is not touched.
@@ -81,6 +96,9 @@ if [ "$prefix" = "$HOME/.local" ]; then
     for unit in central-clipboard central-notifications central-panels logi-osd; do
         systemctl --user enable "$unit.service" >/dev/null 2>&1 || true
         systemctl --user restart "$unit.service" || echo "could not restart $unit now; it starts at the next login"
+    done
+    for path_unit in fix-brave-pwa-icons wallpapers-monitores; do
+        systemctl --user enable --now "$path_unit.path" >/dev/null 2>&1 || true
     done
 fi
 echo "Installed. Run ./setup.sh to use the taskbar and the Start menu in the panel."

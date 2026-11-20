@@ -1,0 +1,12 @@
+{
+    (
+        modifiers: [Super, Shift],
+        key: "s",
+        description: Some("Recorte de tela"),
+    ): Spawn("@HOME@/.local/bin/print-recorte"),
+    (modifiers: [Super], key: "x", description: Some("Start tools")): Spawn("@HOME@/.local/bin/cosmic-ext-applet-start --tools"),
+    (modifiers: [Alt], key: "Tab", description: Some("aenes-switcher")): Spawn("busctl --user call com.system76.CosmicWorkspaces /com/system76/CosmicWorkspaces com.system76.CosmicWorkspaces ShowSwitcherOn bs false \"$COSMIC_ACTIVE_OUTPUT\""),
+    (modifiers: [Alt, Shift], key: "Tab", description: Some("aenes-switcher")): Spawn("busctl --user call com.system76.CosmicWorkspaces /com/system76/CosmicWorkspaces com.system76.CosmicWorkspaces ShowSwitcherOn bs true \"$COSMIC_ACTIVE_OUTPUT\""),
+    (modifiers: [Super], key: "Tab", description: Some("aenes-switcher")): Spawn("busctl --user call com.system76.CosmicWorkspaces /com/system76/CosmicWorkspaces com.system76.CosmicWorkspaces ShowSwitcherOn bs false \"$COSMIC_ACTIVE_OUTPUT\""),
+    (modifiers: [Super, Shift], key: "Tab", description: Some("aenes-switcher")): Spawn("busctl --user call com.system76.CosmicWorkspaces /com/system76/CosmicWorkspaces com.system76.CosmicWorkspaces ShowSwitcherOn bs true \"$COSMIC_ACTIVE_OUTPUT\""),
+}
