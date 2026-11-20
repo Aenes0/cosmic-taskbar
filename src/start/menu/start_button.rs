@@ -57,25 +57,14 @@ impl cosmic::Application for StartButton {
                 return self.close();
             }
             ButtonMessage::RightClick => {
-                if self.popup.is_some() {
-                    return self.close();
-                }
-                let Some(parent) = self.core.main_window_id() else {
-                    return Task::none();
-                };
-                let id = window::Id::unique();
-                self.popup = Some(id);
-                self.power_open = false;
-                return cosmic::surface::surface_task(cosmic::surface::action::app_popup(
-                    |_: &Self| Default::default(),
-                    move |app: &mut Self| {
-                        let mut settings = app.core.applet.get_popup_settings(parent, id, None, None, None);
-                        settings.positioner.size_limits =
-                            Limits::NONE.min_width(1.0).min_height(1.0).max_width(500.0).max_height(800.0);
-                        settings
-                    },
-                    None,
-                ));
+                // Open the Win+X tools menu in the standalone Vulkan layer-shell
+                // host (`--tools`) instead of a cosmic-panel xdg_popup.
+                std::thread::spawn(|| {
+                    if !tools_running() {
+                        spawn_clean(&self_exe().to_string_lossy(), &["--tools"]);
+                    }
+                });
+                return self.close();
             }
             ButtonMessage::Tool(tool) => {
                 if matches!(tool, crate::start::tools::Tool::PowerMenu) {

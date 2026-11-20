@@ -462,7 +462,8 @@ impl StartMenu {
         self.ready = !self.apps.is_empty();
         self.recents_seen = false;
         self.anim_last = None;
-        self.anim = crate::start::anim::Spring::new(if crate::start::anim::motion_scale() > 0.0 { 0.0 } else { 1.0 });
+        // Show immediately without redrawing 20+ fullscreen Vulkan frames on every open.
+        self.anim = crate::start::anim::Spring::new(1.0);
         self.query.clear();
         self.selected = 0;
         self.page = Page::Home;
@@ -528,22 +529,12 @@ impl StartMenu {
         }
     }
 
-    /// Closes the menu: it slides out first, then `finish_hide` takes the surface.
+    /// Closes the menu immediately without a sluggish fullscreen slide-out.
     fn hide(&mut self) -> app::Task<Message> {
         if self.surface.is_none() || self.closing {
             return Task::none();
         }
-        if crate::start::anim::motion_scale() <= 0.0 {
-            return self.finish_hide();
-        }
-        self.closing = true;
-        self.anim_last = None;
-        // When it started to go: a Toggle soon after is the click that closed it.
-        self.hidden_at = Instant::now();
-        // The ticks end it; this is for the day they stop coming.
-        Task::perform(tokio::time::sleep(Duration::from_millis(500)), |()| {
-            cosmic::action::app(Message::HideNow)
-        })
+        self.finish_hide()
     }
 
     fn finish_hide(&mut self) -> app::Task<Message> {
