@@ -67,6 +67,31 @@ fn which(program: &str) -> bool {
     })
 }
 
+fn has_flatpak(app_id: &str) -> bool {
+    let sys = std::path::Path::new("/var/lib/flatpak/app").join(app_id);
+    if sys.is_dir() {
+        return true;
+    }
+    std::env::var_os("HOME").is_some_and(|home| {
+        std::path::Path::new(&home)
+            .join(".local/share/flatpak/app")
+            .join(app_id)
+            .is_dir()
+    })
+}
+
+fn task_manager_tool() -> Tool {
+    if which("missioncenter") {
+        Tool::Run("missioncenter", Vec::new())
+    } else if has_flatpak("io.missioncenter.MissionCenter") {
+        Tool::Run("flatpak", vec!["run".into(), "io.missioncenter.MissionCenter".into()])
+    } else if which("cosmic-monitor") {
+        Tool::Run("cosmic-monitor", Vec::new())
+    } else {
+        Tool::InTerminal(vec!["btop".into()])
+    }
+}
+
 fn settings(page: &str) -> Tool {
     Tool::Run("cosmic-settings", vec![page.into()])
 }
@@ -96,15 +121,7 @@ fn items() -> Vec<Option<(&'static str, &'static str, Tool)>> {
             Tool::InTerminal(vec!["sudo".into(), "-i".into()]),
         )),
         None,
-        Some((
-            "utilities-system-monitor-symbolic",
-            t.task_manager,
-            if which("cosmic-monitor") {
-                Tool::Run("cosmic-monitor", Vec::new())
-            } else {
-                Tool::InTerminal(vec!["btop".into()])
-            },
-        )),
+        Some(("utilities-system-monitor-symbolic", t.task_manager, task_manager_tool())),
         Some(("emblem-system-symbolic", t.settings, Tool::Run("cosmic-settings", Vec::new()))),
         Some(("system-file-manager-symbolic", t.file_explorer, Tool::Run("cosmic-files", Vec::new()))),
         Some(("system-search-symbolic", t.search, Tool::Search)),

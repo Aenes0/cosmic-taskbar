@@ -54,7 +54,7 @@ case "$MODE" in
         mkdir -p "$COSMIC_REPO" "$FISH_REPO/conf.d"
         for d in $COSMIC_DIRS; do
             [ -d "$COSMIC_SRC/$d" ] || continue
-            find "$COSMIC_SRC/$d" -type f ! -name "*.bak" | while IFS= read -r f; do
+            find "$COSMIC_SRC/$d" -type f ! -name "*.bak" ! -name ".*" | while IFS= read -r f; do
                 rel="${f#"$COSMIC_SRC/"}"
                 mkdir -p "$COSMIC_REPO/$(dirname "$rel")"
                 normalize_to_repo "$f" "$COSMIC_REPO/$rel"
