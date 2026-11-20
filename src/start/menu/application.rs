@@ -618,8 +618,8 @@ impl cosmic::Application for StartMenu {
         // the slide; until then, where the layout puts it.
         let placed: Element<'_, Message> = if self.room_width > 0.0 && self.room > 0.0 {
             let at = self.menu_rect();
-            // All the way out of the surface: its height and the gap to its edge.
-            let travel = at.height + MARGIN;
+            // Short crisp glide (48 px) so the menu is visible on the very first frame.
+            let travel = 48.0;
             let slide = crate::start::anim::slide_offset(self.anim.pos, travel) * if self.on_top { -1.0 } else { 1.0 };
             iced::widget::pin(menu).x(at.x).y(at.y + slide).into()
         } else {

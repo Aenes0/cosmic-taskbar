@@ -457,7 +457,9 @@ impl StartMenu {
         self.surface = Some(id);
         self.shown_at = Instant::now();
         self.closing = false;
-        self.ready = false;
+        // On warm opens the apps are already in memory: show immediately
+        // instead of blocking up to 300 ms for recent files I/O.
+        self.ready = !self.apps.is_empty();
         self.recents_seen = false;
         self.anim_last = None;
         self.anim = crate::start::anim::Spring::new(if crate::start::anim::motion_scale() > 0.0 { 0.0 } else { 1.0 });

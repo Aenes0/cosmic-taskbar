@@ -30,7 +30,7 @@ pub fn parse(value: &str) -> Option<Backend> {
     }
 }
 
-/// Override (for tests) > the user's ICED_BACKEND > the config key > tiny-skia.
+/// Override (for tests) > the user's ICED_BACKEND > the config key > wgpu.
 /// A value not recognized counts as absent at its level.
 pub fn decide(
     override_env: Option<&str>,
@@ -41,17 +41,12 @@ pub fn decide(
         .into_iter()
         .flatten()
         .find_map(parse)
-        .unwrap_or(Backend::TinySkia)
+        .unwrap_or(Backend::Wgpu)
 }
 
-/// What the menu really draws with: this program is built without the GPU
-/// renderer (the whole taskbar is meant to stay on the CPU), so whatever was
-/// asked, it is tiny-skia.
+/// What the menu really draws with: this build includes both wgpu and tiny-skia.
 fn available(requested: Backend) -> Backend {
-    if requested == Backend::Wgpu {
-        tracing::warn!("this build draws on the CPU only: ignoring the request for the GPU");
-    }
-    Backend::TinySkia
+    requested
 }
 
 /// What to write to ICED_BACKEND for the menu itself, if anything.
@@ -91,7 +86,9 @@ pub fn init_menu() {
     CPU.store(decision == Backend::TinySkia, Ordering::Relaxed);
 }
 
-/// The button always draws on the CPU; remembers what ICED_BACKEND was.
+/// Embedded panel buttons run inside cosmic-panel's nested compositor, where
+/// wgpu falls back to broken Mesa EGL and breaks popups; keep them on tiny-skia
+/// and remember the original ICED_BACKEND for `--menu` and launched apps.
 pub fn init_button() {
     crate::start::BACKEND.get_or_init(|| std::env::var_os("ICED_BACKEND"));
     // SAFETY: nothing else runs yet.
@@ -126,9 +123,9 @@ mod tests {
     fn decide_table() {
         let tiny = Backend::TinySkia;
         let wgpu = Backend::Wgpu;
-        assert_eq!(decide(None, None, None), tiny);
+        assert_eq!(decide(None, None, None), wgpu);
         assert_eq!(decide(None, None, Some("tiny-skia")), tiny);
-        assert_eq!(decide(None, None, Some("lixo")), tiny);
+        assert_eq!(decide(None, None, Some("lixo")), wgpu);
         assert_eq!(decide(None, Some("wgpu"), Some("tiny-skia")), wgpu);
         assert_eq!(decide(None, Some("tiny-skia"), Some("wgpu")), tiny);
         assert_eq!(decide(Some("wgpu"), Some("tiny-skia"), Some("tiny-skia")), wgpu);
@@ -139,8 +136,8 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_draws_on_the_cpu_whatever_was_asked() {
-        assert_eq!(available(Backend::Wgpu), Backend::TinySkia);
+    fn available_honors_the_requested_backend() {
+        assert_eq!(available(Backend::Wgpu), Backend::Wgpu);
         assert_eq!(available(Backend::TinySkia), Backend::TinySkia);
     }
 

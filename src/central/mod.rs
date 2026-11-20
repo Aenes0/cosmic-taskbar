@@ -59,6 +59,19 @@ pub fn run() -> cosmic::iced::Result {
         panels::own_output();
         return panels::run(request);
     }
+    // And the clipboard's history, a service of its own.
+    if std::env::args().any(|arg| arg == "--clipboard") {
+        clipboard::service::main()
+    }
+    // And the notifications' history, another service of its own.
+    if std::env::args().any(|arg| arg == "--notifications") {
+        notifications::service::main()
+    }
+    // Embedded panel applets run inside cosmic-panel's nested compositor, where
+    // wgpu falls back to Mesa EGL and breaks popup rendering (EGL_BAD_ALLOC).
+    // `--panels` (handled above) connects directly to cosmic-comp on Vulkan GPU.
+    // SAFETY: before starting the UI runtime.
+    unsafe { std::env::set_var("ICED_BACKEND", "tiny-skia") };
     // The bar's right corner, the tray, the Central and "show desktop" in one.
     if std::env::args().any(|arg| arg == "--corner") {
         return cosmic::applet::run::<corner::Corner>(());
@@ -74,14 +87,6 @@ pub fn run() -> cosmic::iced::Result {
     // And the tray of background apps.
     if std::env::args().any(|arg| arg == "--tray") {
         return tray::run();
-    }
-    // And the clipboard's history, a service of its own.
-    if std::env::args().any(|arg| arg == "--clipboard") {
-        clipboard::service::main()
-    }
-    // And the notifications' history, another service of its own.
-    if std::env::args().any(|arg| arg == "--notifications") {
-        notifications::service::main()
     }
     cosmic::applet::run::<app::App>(())
 }

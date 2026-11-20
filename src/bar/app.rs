@@ -43,7 +43,7 @@ use cosmic::{
         },
         window,
     },
-    surface::{self, action::LiveSettings},
+    surface,
     theme::{self, Button},
     widget::{
         DndDestination, button, container, divider, dnd_source,
@@ -359,7 +359,7 @@ impl DockItem {
                     .width(Length::Shrink)
                     .height(Length::Shrink),
             )
-            .on_right_release(Message::Popup(*id, window_id))
+            .on_right_press(Message::Popup(*id, window_id))
             .on_middle_release({
                 launch_on_preferred_gpu(desktop_info, gpus)
                     .unwrap_or(Message::Popup(*id, window_id))
@@ -402,6 +402,14 @@ impl DockItem {
 /// A message, some time from now.
 fn after(wait: Duration, message: Message) -> Task<cosmic::Action<Message>> {
     Task::perform(sleep(wait), move |()| cosmic::Action::App(message.clone()))
+}
+
+/// Sends a popup command to the standalone Vulkan layer-shell host off the UI thread.
+fn send_popup(cmd: crate::bar::popups::proto::PopupCommand) -> app::Task<Message> {
+    Task::future(async move {
+        crate::bar::popups::proto::send_command(cmd).await;
+        cosmic::Action::None
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -465,6 +473,9 @@ pub struct Taskbar {
     preview_fade_last: Option<std::time::Instant>,
     /// The preview is fading out; it is destroyed when the fade ends.
     preview_closing: bool,
+    /// How far the open right-click menu's items have faded in (0 to 1).
+    menu_fade: crate::bar::anim::Spring,
+    menu_fade_last: Option<std::time::Instant>,
     /// Per window: how far its card has lifted under the pointer (0 to 1).
     preview_lift: Vec<(ExtForeignToplevelHandleV1, crate::bar::anim::Spring)>,
     /// The window this bar last asked to bring forward: on another monitor
@@ -473,6 +484,10 @@ pub struct Taskbar {
     last_activate: Option<(ExtForeignToplevelHandleV1, std::time::Instant)>,
     /// The icons' zoom under the pointer and the hop of a launching app.
     fx: crate::bar::fx::Fx,
+    /// Tooltip surfaces confirmed open, so destroys for never-opened tooltips are dropped.
+    open_tooltips: rustc_hash::FxHashSet<window::Id>,
+    /// App id currently shown in the layer-shell preview host (for instant hover switching).
+    preview_shown: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -489,7 +504,8 @@ pub enum Message {
     PinApp(u32),
     UnpinApp(u32),
     Popup(u32, window::Id),
-    Pressed(window::Id),
+    Pressed(window::Id, Option<cosmic::iced::core::mouse::Button>),
+    Released(window::Id, cosmic::iced::core::mouse::Button),
     GroupClick(u32, window::Id),
     IconHover(u32, window::Id, bool),
     PreviewHover(bool),
@@ -502,6 +518,7 @@ pub enum Message {
     GpuRequest(Option<Vec<Gpu>>),
     CloseRequested(window::Id),
     ClosePopup,
+    MenuFadeTick,
     Toggle(ExtForeignToplevelHandleV1),
     Exec(String, Option<usize>, bool),
     CloseToplevel(ExtForeignToplevelHandleV1),
@@ -528,6 +545,7 @@ pub enum Message {
     FxTick,
     /// Click on an app that is not open: it hops, then starts.
     LaunchItem(u32),
+    WindowOpened(window::Id),
 }
 
 fn index_in_list(
@@ -803,7 +821,8 @@ impl Taskbar {
 
     /// Close any open popups.
     fn close_popups(&mut self) -> Task<cosmic::Action<Message>> {
-        let mut commands = Vec::new();
+        self.preview_shown = None;
+        let mut commands = vec![send_popup(crate::bar::popups::proto::PopupCommand::HideAll)];
         if let Some(popup) = self.popup.take() {
             commands.push(destroy_popup(popup.id));
         }
@@ -814,6 +833,100 @@ impl Taskbar {
             commands.push(destroy_popup(popup));
         }
         Task::batch(commands)
+    }
+
+    fn icon_screen_center(&self, id: u32) -> Option<f32> {
+        let rect = self.rectangles.get(&id.into()).copied()?;
+        let horizontal = self.core.applet.is_horizontal();
+        let (icon_pos, icon_len) = if horizontal {
+            (rect.x, rect.width)
+        } else {
+            (rect.y, rect.height)
+        };
+        let bar_total_len = self
+            .rectangles
+            .values()
+            .map(|r| if horizontal { r.x + r.width } else { r.y + r.height })
+            .fold(0.0f32, f32::max);
+        let screen_len = self
+            .output_list
+            .values()
+            .find(|o| o.name.as_deref() == Some(self.core.applet.output_name.as_str()))
+            .and_then(|o| o.logical_size)
+            .map_or(if horizontal { 1920.0 } else { 1080.0 }, |(w, h)| {
+                if horizontal { w as f32 } else { h as f32 }
+            });
+        // Start + Workspaces buttons sit immediately before CosmicTaskbar in plugins_center.
+        let slot = f32::from(self.core.applet.suggested_size(true).0)
+            + 2.0 * f32::from(self.core.applet.suggested_padding(true).0)
+            + self.core.applet.spacing as f32;
+        let prefix_len = 2.0 * slot;
+        Some(crate::bar::popups::proto::icon_center_on_screen(
+            icon_pos,
+            icon_len,
+            bar_total_len,
+            prefix_len,
+            screen_len,
+        ))
+    }
+
+    fn filtered_window_ids(&self, item: &DockItem) -> Vec<String> {
+        item.toplevels
+            .iter()
+            .filter(|(info, _)| self.is_on_current_monitor_and_workspace(info))
+            .map(|(info, _)| info.identifier.clone())
+            .collect()
+    }
+
+    fn open_right_click_menu(
+        &mut self,
+        id: u32,
+        _parent_window_id: window::Id,
+    ) -> app::Task<Message> {
+        let (item, is_pinned) = match self.pinned_list.iter().find(|t| t.id == id) {
+            Some(e) => (e, true),
+            None => match self.active_list.iter().find(|t| t.id == id) {
+                Some(e) => (e, false),
+                None => return Task::none(),
+            },
+        };
+        let Some(icon_center) = self.icon_screen_center(id) else {
+            return Task::none();
+        };
+        self.preview_shown = None;
+        let desktop_info = &item.desktop_info;
+        let actions: Vec<crate::bar::popups::proto::MenuAction> = desktop_info
+            .actions()
+            .into_iter()
+            .flatten()
+            .filter_map(|action| {
+                let exec = desktop_info.action_entry(action, "Exec")?.to_string();
+                let name = desktop_info
+                    .action_entry_localized(action, "Name", &self.locales)?
+                    .into_owned();
+                let icon = desktop_info.action_entry(action, "Icon").map(str::to_owned);
+                Some(crate::bar::popups::proto::MenuAction { name, exec, icon })
+            })
+            .collect();
+        let window_ids = self.filtered_window_ids(item);
+        let cmd = crate::bar::popups::proto::PopupCommand::ShowMenu {
+            output: self.core.applet.output_name.clone(),
+            anchor: self.core.applet.anchor.into(),
+            icon_center,
+            app_id: desktop_info.id().to_string(),
+            original_app_id: item.original_app_id.clone(),
+            app_name: desktop_info
+                .full_name(&self.locales)
+                .unwrap_or_default()
+                .into_owned(),
+            icon_name: desktop_info.icon().unwrap_or_default().to_string(),
+            exec: desktop_info.exec().map(str::to_owned),
+            terminal: desktop_info.terminal(),
+            is_pinned,
+            actions,
+            window_ids,
+        };
+        send_popup(cmd)
     }
 
     /// Returns the length of the group in the favorite list after which items are displayed in a popup.
@@ -960,6 +1073,11 @@ impl Taskbar {
             .is_some_and(|p| p.popup_type != PopupType::Preview)
     }
 
+    /// Whether the open menu's items are still fading in.
+    fn menu_animating(&self) -> bool {
+        self.menu_open() && !self.menu_fade.settled_loose(1.0)
+    }
+
     fn item(&self, id: u32) -> Option<&DockItem> {
         self.active_list
             .iter()
@@ -1002,18 +1120,8 @@ impl Taskbar {
         }
     }
 
-    /// Closes the preview with a short fade; at once if motion is off.
     fn begin_close_preview(&mut self) -> Task<cosmic::Action<Message>> {
-        let showing = self.popup.as_ref().is_some_and(|p| p.popup_type == PopupType::Preview);
-        if showing && crate::bar::anim::motion_scale() > 0.0 {
-            if !self.preview_closing {
-                self.preview_closing = true;
-                self.preview_fade_last = None;
-            }
-            Task::none()
-        } else {
-            self.close_preview()
-        }
+        self.close_preview()
     }
 
     fn preview_handles(&self) -> Vec<ExtForeignToplevelHandleV1> {
@@ -1043,78 +1151,35 @@ impl Taskbar {
         self.preview_closing = false;
         self.preview_hovered = false;
         self.hovered_toplevel = None;
-        match self.popup.take() {
-            Some(p) if p.popup_type == PopupType::Preview => destroy_popup(p.id),
-            other => {
-                self.popup = other;
-                Task::none()
-            }
+        if self.preview_shown.take().is_some() {
+            return send_popup(crate::bar::popups::proto::PopupCommand::HidePreview {
+                output: self.core.applet.output_name.clone(),
+            });
         }
+        Task::none()
     }
 
-    /// The app's windows, in a row of pictures over its button. Like the
-    /// tooltips, it takes no keyboard and no grab: the pointer can go on
-    /// to the next button, or into it to pick or close a window.
-    fn open_preview(&mut self, id: u32, parent: window::Id) -> Task<cosmic::Action<Message>> {
+    /// Opens the app's window previews in the standalone Vulkan layer-shell host.
+    fn open_preview(&mut self, id: u32, _parent: window::Id) -> Task<cosmic::Action<Message>> {
         let Some(item) = self.item(id).cloned() else {
             return Task::none();
         };
-        let Some(rectangle) = self.rectangles.get(&id.into()).copied() else {
-            tracing::trace!("DIAG open_preview id={id}: no rectangle");
+        let window_ids = self.filtered_window_ids(&item);
+        if window_ids.is_empty() {
+            return Task::none();
+        }
+        let Some(icon_center) = self.icon_screen_center(id) else {
             return Task::none();
         };
-        tracing::trace!("DIAG open_preview id={id} parent={parent:?} rect={rectangle:?}");
-        self.capture_windows(id);
-        let new_id = window::Id::unique();
-        self.preview_hovered = false;
-        self.preview_fade = crate::bar::anim::Spring::new(if crate::bar::anim::motion_scale() > 0.0 { 0.0 } else { 1.0 });
-        self.preview_fade_last = None;
-        self.preview_closing = false;
-        self.preview_lift.clear();
-        self.popup = Some(Popup {
-            parent,
-            id: new_id,
-            dock_item: item,
-            popup_type: PopupType::Preview,
-        });
-        cosmic::surface::surface_task(cosmic::surface::action::app_popup(
-            |_| Default::default(),
-            move |app: &mut Self| {
-                let mut popup_settings =
-                    app.core
-                        .applet
-                        .get_popup_settings(parent, new_id, None, None, None);
-                popup_settings.grab = false;
-                popup_settings.positioner.anchor_rect = iced::Rectangle::<i32> {
-                    x: rectangle.x as i32,
-                    y: rectangle.y as i32,
-                    width: rectangle.width as i32,
-                    height: rectangle.height as i32,
-                };
-                let max_windows = 7.0;
-                let window_spacing = 8.0;
-                popup_settings.positioner.size_limits = match app.core.applet.anchor {
-                    PanelAnchor::Right | PanelAnchor::Left => Limits::NONE
-                        .min_width(100.0)
-                        .min_height(30.0)
-                        .max_width(window_spacing * 2.0 + TOPLEVEL_BUTTON_WIDTH)
-                        .max_height(
-                            TOPLEVEL_BUTTON_HEIGHT * max_windows
-                                + window_spacing * (max_windows + 1.0),
-                        ),
-                    PanelAnchor::Bottom | PanelAnchor::Top => Limits::NONE
-                        .min_width(30.0)
-                        .min_height(100.0)
-                        .max_width(
-                            TOPLEVEL_BUTTON_WIDTH * max_windows
-                                + window_spacing * (max_windows + 1.0),
-                        )
-                        .max_height(window_spacing * 2.0 + TOPLEVEL_BUTTON_HEIGHT),
-                };
-                popup_settings
-            },
-            None,
-        ))
+        self.preview_shown = Some(id);
+        send_popup(crate::bar::popups::proto::PopupCommand::ShowPreview {
+            output: self.core.applet.output_name.clone(),
+            anchor: self.core.applet.anchor.into(),
+            icon_center,
+            app_id: item.desktop_info.id().to_string(),
+            icon_name: item.desktop_info.icon().unwrap_or_default().to_string(),
+            window_ids,
+        })
     }
 
     fn preview_on_start(&mut self) -> Task<cosmic::Action<Message>> {
@@ -1725,14 +1790,36 @@ impl cosmic::Application for Taskbar {
                             .on_press(Message::Quit(desktop_info.id().to_string())),
                         );
                     }
+                    let items: Element<_> = container(content)
+                        .padding(1)
+                        .height(Length::Shrink)
+                        .width(Length::Fill)
+                        .into();
+                    let items: Element<_> = match crate::bar::anim::veil_alpha(self.menu_fade.pos) {
+                        Some(alpha) => {
+                            let veil = container(iced::widget::Space::new().width(Length::Fill).height(Length::Fill))
+                                .width(Length::Fill)
+                                .height(Length::Fill)
+                                .style(move |theme: &cosmic::Theme| {
+                                    let cosmic = theme.cosmic();
+                                    let mut bg = iced::Color::from(cosmic.background(theme.transparent).base);
+                                    bg.a *= alpha;
+                                    container::Style {
+                                        background: Some(Background::Color(bg)),
+                                        border: iced::Border {
+                                            radius: cosmic.corner_radii.radius_m.into(),
+                                            ..Default::default()
+                                        },
+                                        ..Default::default()
+                                    }
+                                });
+                            iced::widget::Stack::with_children([items, veil.into()]).into()
+                        }
+                        None => items,
+                    };
                     self.core
                         .applet
-                        .popup_container(
-                            container(content)
-                                .padding(1)
-                                .height(Length::Shrink)
-                                .width(Length::Fill),
-                        )
+                        .popup_container(items)
                         .limits(
                             Limits::NONE
                                 .min_width(1.)
@@ -1969,10 +2056,16 @@ impl cosmic::Application for Taskbar {
         } else {
             Subscription::none()
         };
+        let menu_fade = if self.menu_animating() {
+            iced::time::every(PREVIEW_FRAME).map(|_| Message::MenuFadeTick)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             refresh,
             fade,
             fx_frames,
+            menu_fade,
             launcher_entry::subscription().map(Message::Badge),
             wayland_subscription().map(Message::Wayland),
             listen_with(|e, _, id| match e {
@@ -1983,10 +2076,16 @@ impl cosmic::Application for Taskbar {
                     event::wayland::SeatEvent::Leave => Some(Message::RemovedSeat),
                 },
                 cosmic::iced::core::Event::Mouse(
-                    cosmic::iced::core::mouse::Event::ButtonPressed(_),
-                ) => Some(Message::Pressed(id)),
+                    cosmic::iced::core::mouse::Event::ButtonPressed(button),
+                ) => Some(Message::Pressed(id, Some(button))),
+                cosmic::iced::core::Event::Mouse(
+                    cosmic::iced::core::mouse::Event::ButtonReleased(button),
+                ) => Some(Message::Released(id, button)),
                 cosmic::iced::core::Event::Mouse(cosmic::iced::core::mouse::Event::CursorLeft) => {
                     Some(Message::PointerLeft(id))
+                }
+                cosmic::iced::core::Event::Window(window::Event::Opened { .. }) => {
+                    Some(Message::WindowOpened(id))
                 }
                 _ => None,
             }),
@@ -2013,161 +2112,64 @@ impl Taskbar {
     pub(crate) fn update_main(&mut self, message: Message) -> app::Task<Message> {
         match message {
             Message::Popup(id, parent_window_id) => {
-                let mut closing = Task::none();
-                if self.preview_of().is_some() {
-                    closing = self.close_preview();
-                } else if let Some(Popup {
-                    parent,
-                    id: popup_id,
-                    ..
-                }) = self.popup.take()
-                {
-                    if parent == parent_window_id {
-                        return destroy_popup(popup_id);
-                    } else {
-                        self.overflow_active_popup = None;
-                        self.overflow_favorites_popup = None;
-                        return Task::batch([destroy_popup(popup_id), destroy_popup(parent)]);
-                    }
-                }
-                if let Some(toplevel_group) = self
-                    .active_list
-                    .iter()
-                    .chain(self.pinned_list.iter())
-                    .find(|t| t.id == id)
-                    .cloned()
-                {
-                    let Some(rectangle) = self.rectangles.get(&toplevel_group.id.into()).copied()
-                    else {
-                        tracing::error!("No rectangle found for toplevel group");
-                        return Task::none();
-                    };
-                    let popup_task =
-                        cosmic::surface::surface_task(cosmic::surface::action::app_popup(
-                            move |_| LiveSettings::default(),
-                            move |app: &mut Self| {
-                                let new_id = window::Id::unique();
-                                app.popup = Some(Popup {
-                                    parent: parent_window_id,
-                                    id: new_id,
-                                    dock_item: toplevel_group.clone(),
-                                    popup_type: PopupType::RightClickMenu,
-                                });
-
-                                let mut popup_settings = app.core.applet.get_popup_settings(
-                                    parent_window_id,
-                                    new_id,
-                                    None,
-                                    None,
-                                    None,
-                                );
-                                let iced::Rectangle {
-                                    x,
-                                    y,
-                                    width,
-                                    height,
-                                } = rectangle;
-                                popup_settings.positioner.anchor_rect = iced::Rectangle::<i32> {
-                                    x: x as i32,
-                                    y: y as i32,
-                                    width: width as i32,
-                                    height: height as i32,
-                                };
-                                popup_settings
-                            },
-                            None,
-                        ));
-
-                    let gpu_update = Task::perform(try_get_gpus(), |gpus| {
-                        cosmic::Action::App(Message::GpuRequest(gpus))
-                    });
-                    return Task::batch([closing, gpu_update, popup_task]);
-                }
+                self.hover_gen += 1;
+                self.hover = None;
+                return self.open_right_click_menu(id, parent_window_id);
             }
             Message::GroupClick(id, parent_window_id) => {
-                // The windows are already showing from the pointer: the click
-                // keeps them there.
-                if self.preview_of() == Some(id) {
-                    return Task::none();
-                }
-                let close = self.close_preview();
-                return Task::batch([close, self.open_preview(id, parent_window_id)]);
+                return self.open_preview(id, parent_window_id);
             }
             Message::IconHover(id, parent_window_id, entering) => {
                 self.fx.set_hover(id, entering);
-                tracing::trace!("DIAG IconHover id={id} parent={parent_window_id:?} entering={entering} preview_of={:?} hover={:?} popup={:?}", self.preview_of(), self.hover, self.popup.as_ref().map(|p| (p.id, p.popup_type == PopupType::Preview)));
-                self.hover_gen += 1;
-                let hover_gen = self.hover_gen;
                 if entering {
-                    self.preview_closing = false;
+                    self.hover_gen += 1;
+                    let hover_gen = self.hover_gen;
                     self.hover = Some((id, parent_window_id));
-                    // From one button to the next with the previews up, they
-                    // follow at once, as on Windows.
-                    if let Some(shown) = self.preview_of() {
+                    if let Some(shown) = self.preview_shown {
                         if shown == id {
                             return Task::none();
                         }
-                        let close = self.close_preview();
                         if self.has_windows(id) {
-                            return Task::batch([close, self.open_preview(id, parent_window_id)]);
+                            return self.open_preview(id, parent_window_id);
                         }
-                        return close;
+                        return self.close_preview();
                     }
                     return after(HOVER_OPEN, Message::HoverSettled(hover_gen));
                 }
+                // Stale exit from a previously hovered icon when re-entering the bar
+                // on a different icon must NOT cancel the new icon's HoverSettled timer
+                // or close its preview.
                 if self.hover.is_some_and(|(hovered, _)| hovered == id) {
                     self.hover = None;
+                    self.hover_gen += 1;
+                    return self.close_preview();
                 }
-                return after(HOVER_CLOSE, Message::HoverSettled(hover_gen));
-            }
-            Message::PreviewHover(entering) => {
-                if entering {
-                    self.preview_closing = false;
-                }
-                tracing::trace!("DIAG PreviewHover entering={entering}");
-                self.hover_gen += 1;
-                self.preview_hovered = entering;
-                if !entering {
-                    self.hovered_toplevel = None;
-                    return after(HOVER_CLOSE, Message::HoverSettled(self.hover_gen));
+                if self.hover.is_none() && self.preview_shown == Some(id) {
+                    return self.close_preview();
                 }
             }
+            Message::PreviewHover(_) => {}
             Message::PreviewOnStart => return self.preview_on_start(),
             Message::PointerLeft(id) => {
                 // Out of the bar, so out of every icon: the zoom comes back down.
                 self.fx.clear_hover();
-                tracing::trace!("DIAG PointerLeft id={id:?} hover={:?}", self.hover);
-                // Out of a surface fast, past its edge, its widgets may keep
-                // the pointer's last place inside them and never see it
-                // leave: the surface's own event says it.
-                if self.popup.as_ref().is_some_and(|p| p.id == id && p.popup_type == PopupType::Preview) {
-                    return self.update_main(Message::PreviewHover(false));
-                }
                 if self.hover.is_some_and(|(_, parent)| parent == id) {
                     self.hover = None;
                     self.hover_gen += 1;
-                    return after(HOVER_CLOSE, Message::HoverSettled(self.hover_gen));
+                    return self.close_preview();
                 }
             }
             Message::HoverSettled(hover_gen) => {
-                tracing::trace!("DIAG HoverSettled gen={hover_gen} cur={} preview_hovered={} preview_of={:?} menu_open={} hover={:?} has_windows={:?}", self.hover_gen, self.preview_hovered, self.preview_of(), self.menu_open(), self.hover, self.hover.map(|(id, _)| self.has_windows(id)));
-                if hover_gen != self.hover_gen
-                    || (self.preview_hovered && self.preview_of().is_some())
-                {
-                    return Task::none();
-                }
-                // A menu or a list that is open stays as it is.
-                if self.menu_open() {
+                if hover_gen != self.hover_gen {
                     return Task::none();
                 }
                 match self.hover {
                     Some((id, parent)) if self.has_windows(id) => {
-                        if self.preview_of() != Some(id) {
-                            let close = self.close_preview();
-                            return Task::batch([close, self.open_preview(id, parent)]);
+                        if self.preview_shown != Some(id) {
+                            return self.open_preview(id, parent);
                         }
                     }
-                    _ => return self.begin_close_preview(),
+                    _ => return self.close_preview(),
                 }
             }
             Message::FxTick => {
@@ -2193,7 +2195,20 @@ impl Taskbar {
                 });
                 if let Some(message) = launch {
                     self.fx.launch(id);
-                    return self.update_main(message);
+                    self.preview_shown = None;
+                    return Task::batch([
+                        send_popup(crate::bar::popups::proto::PopupCommand::HideAll),
+                        self.update_main(message),
+                    ]);
+                }
+            }
+            Message::MenuFadeTick => {
+                let now = std::time::Instant::now();
+                let dt = self.menu_fade_last.map_or(0.0, |t| (now - t).as_secs_f32());
+                self.menu_fade_last = Some(now);
+                self.menu_fade.step(1.0, dt, 260.0, 26.0);
+                if self.menu_fade.settled_loose(1.0) {
+                    self.menu_fade = crate::bar::anim::Spring::new(1.0);
                 }
             }
             Message::PreviewFadeTick => {
@@ -2241,6 +2256,7 @@ impl Taskbar {
                 }
             }
             Message::PinApp(id) => {
+                tracing::trace!("DIAG menu PinApp id={id}");
                 if let Some(i) = self.active_list.iter().position(|t| t.id == id) {
                     let entry = self.active_list.remove(i);
                     self.config.add_pinned(
@@ -2254,6 +2270,7 @@ impl Taskbar {
                 }
             }
             Message::UnpinApp(id) => {
+                tracing::trace!("DIAG menu UnpinApp id={id}");
                 if let Some(i) = self.pinned_list.iter().position(|t| t.id == id) {
                     let entry = self.pinned_list.remove(i);
 
@@ -2297,9 +2314,12 @@ impl Taskbar {
                         ToplevelRequest::Activate(handle)
                     }));
                 }
+                self.preview_shown = None;
+                let mut cmds = vec![send_popup(crate::bar::popups::proto::PopupCommand::HideAll)];
                 if let Some(p) = self.popup.take() {
-                    return destroy_popup(p.id);
+                    cmds.push(destroy_popup(p.id));
                 }
+                return Task::batch(cmds);
             }
             Message::CloseToplevel(handle) => {
                 if let Some(tx) = self.wayland_sender.as_ref() {
@@ -2307,6 +2327,7 @@ impl Taskbar {
                 }
             }
             Message::Quit(id) => {
+                tracing::trace!("[{}] DIAG menu Quit id={id}", self.core.applet.output_name);
                 if let Some(toplevel_group) = self
                     .active_list
                     .iter()
@@ -2714,6 +2735,11 @@ impl Taskbar {
                         terminal,
                     } => {
                         let mut envs = Vec::new();
+                        let original_backend = crate::bar::ORIGINAL_BACKEND
+                            .get()
+                            .and_then(|v| v.as_deref())
+                            .unwrap_or("");
+                        envs.push(("ICED_BACKEND".to_string(), original_backend.to_string()));
                         if let Some(token) = token {
                             envs.push(("XDG_ACTIVATION_TOKEN".to_string(), token.clone()));
                             envs.push(("DESKTOP_STARTUP_ID".to_string(), token));
@@ -2745,6 +2771,7 @@ impl Taskbar {
                 self.seat.take();
             }
             Message::Exec(exec, gpu_idx, terminal) => {
+                tracing::trace!("[{}] DIAG menu Exec exec={exec} gpu={gpu_idx:?} terminal={terminal}", self.core.applet.output_name);
                 if let Some(tx) = self.wayland_sender.as_ref() {
                     let _ = tx.send(WaylandRequest::TokenRequest {
                         app_id: <Self as cosmic::Application>::APP_ID.to_string(),
@@ -2813,7 +2840,7 @@ impl Taskbar {
                         .collect();
             }
             Message::CloseRequested(id) => {
-                tracing::trace!("DIAG CloseRequested id={id:?}");
+                self.open_tooltips.remove(&id);
                 if Some(id) == self.popup.as_ref().map(|p| p.id) {
                     self.popup = None;
                 }
@@ -2822,6 +2849,15 @@ impl Taskbar {
                 }
                 if self.overflow_favorites_popup.is_some_and(|p| p == id) {
                     self.overflow_favorites_popup = None;
+                }
+            }
+            Message::WindowOpened(id) => {
+                let ours = self.core.main_window_id() == Some(id)
+                    || self.popup.as_ref().is_some_and(|p| p.id == id)
+                    || self.overflow_active_popup == Some(id)
+                    || self.overflow_favorites_popup == Some(id);
+                if !ours {
+                    self.open_tooltips.insert(id);
                 }
             }
             Message::GpuRequest(gpus) => {
@@ -2963,9 +2999,20 @@ impl Taskbar {
                 }
                 return Task::batch(cmds);
             }
-            Message::Pressed(id) => {
-                if self.menu_open() && self.core.main_window_id() == Some(id) {
-                    return self.close_popups();
+            Message::Pressed(_id, button) => {
+                if button == Some(cosmic::iced::core::mouse::Button::Right) {
+                    self.hover_gen += 1;
+                    self.hover = None;
+                }
+            }
+            Message::Released(id, button) => {
+                tracing::trace!("[{}] DIAG Released window={id:?} button={button:?} menu_open={} popup={:?}", self.core.applet.output_name, self.menu_open(), self.popup.as_ref().map(|p| p.id));
+            }
+            Message::Surface(surface::Action::DestroyPopup(id)) => {
+                if self.open_tooltips.remove(&id) {
+                    return cosmic::task::message(cosmic::Action::Surface(
+                        surface::Action::DestroyPopup(id),
+                    ));
                 }
             }
             Message::Surface(a) => {

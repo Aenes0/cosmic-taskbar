@@ -29,6 +29,8 @@ use std::process::ExitCode;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Taskbar,
+    /// The taskbar's layer-shell popup host (previews & right-click menu on GPU).
+    TaskbarPopups,
     Start,
     /// The workspaces' button.
     Workspaces,
@@ -41,6 +43,7 @@ enum Mode {
 fn mode(program: &str, first_arg: Option<&str>) -> Option<Mode> {
     match first_arg {
         Some("taskbar") => return Some(Mode::Taskbar),
+        Some("--taskbar-popups") => return Some(Mode::TaskbarPopups),
         Some("start" | "--menu" | "--tools") => return Some(Mode::Start),
         Some("workspaces") => return Some(Mode::Workspaces),
         Some("central") => return Some(Mode::Central),
@@ -87,6 +90,7 @@ fn main() -> ExitCode {
     let program = args.first().map(String::as_str).unwrap_or_default();
     match mode(program, args.get(1).map(String::as_str)) {
         Some(Mode::Taskbar) => exit_code(bar::run()),
+        Some(Mode::TaskbarPopups) => exit_code(bar::run_popups()),
         Some(Mode::Start) => exit_code(start::run()),
         Some(Mode::Workspaces) => exit_code(start::run_workspaces()),
         Some(Mode::Central) => exit_code(central::run()),
@@ -108,6 +112,7 @@ mod tests {
     #[test]
     fn the_first_argument_picks_the_part() {
         assert_eq!(mode("cosmic-taskbar", Some("taskbar")), Some(Mode::Taskbar));
+        assert_eq!(mode("cosmic-taskbar", Some("--taskbar-popups")), Some(Mode::TaskbarPopups));
         assert_eq!(mode("cosmic-taskbar", Some("start")), Some(Mode::Start));
         assert_eq!(mode("cosmic-taskbar", Some("--menu")), Some(Mode::Start));
         assert_eq!(mode("cosmic-taskbar", Some("--tools")), Some(Mode::Start));

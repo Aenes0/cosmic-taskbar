@@ -11,6 +11,5 @@ Keywords=COSMIC;Applet;App;Indicator;Notification;Tray;Status;Bandeja;
 Icon=com.system76.CosmicAppletStatusArea
 NoDisplay=true
 X-CosmicApplet=true
-X-CosmicHoverPopup=Auto
 X-OverflowPriority=99
 X-OverflowMinSize=2

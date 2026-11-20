@@ -38,6 +38,14 @@ pub fn bounce_offset(t_s: f32, icon_px: f32) -> f32 {
     }
 }
 
+/// The veil over a menu that has just opened: its own background, lying
+/// over the items and thinning as they fade in (`fade` from 0 to 1); none
+/// once they are fully shown, so it never stands between them and the pointer.
+pub fn veil_alpha(fade: f32) -> Option<f32> {
+    let alpha = 1.0 - fade.clamp(0.0, 1.0);
+    (alpha > 0.0).then_some(alpha)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,4 +91,17 @@ mod tests {
         assert!((0..=900).all(|ms| bounce_offset(ms as f32 / 1000.0, 32.0) >= 0.0));
     }
 
+    #[test]
+    fn the_veil_is_opaque_before_the_fade_and_gone_at_its_end() {
+        assert_eq!(veil_alpha(0.0), Some(1.0));
+        assert_eq!(veil_alpha(-1.0), Some(1.0));
+        assert_eq!(veil_alpha(1.0), None);
+        assert_eq!(veil_alpha(1.5), None);
+    }
+
+    #[test]
+    fn the_veil_thins_as_the_items_fade_in() {
+        let a = veil_alpha(0.75).expect("still fading");
+        assert!((a - 0.25).abs() < 0.001, "{a}");
+    }
 }

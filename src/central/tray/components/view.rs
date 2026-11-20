@@ -139,9 +139,17 @@ pub(super) fn view_box(app: &App, box_id: window::Id) -> Element<'_, Msg> {
         Element::from(cosmic::iced::widget::row(icons))
     });
 
-    applet
-        .popup_container(container(cosmic::iced::widget::column(rows)).padding(BOX_PADDING as f32))
-        .into()
+    let mut content = container(cosmic::iced::widget::column(rows)).padding(BOX_PADDING as f32);
+    if app.repaint_frames > 0 {
+        let a = 0.004 * f32::from(app.repaint_frames);
+        content = content.class(cosmic::theme::Container::custom(move |_| {
+            cosmic::widget::container::Style {
+                background: Some(cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, a).into()),
+                ..Default::default()
+            }
+        }));
+    }
+    applet.popup_container(content).into()
 }
 
 pub(super) fn menu_icon_button<'a>(

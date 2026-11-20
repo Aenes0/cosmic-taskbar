@@ -21,6 +21,7 @@ pub enum Msg {
     Icon(IconUpdate),
     Click(i32, bool),
     ClickToken(String),
+    CloseMenu,
 }
 
 pub struct State {
@@ -148,10 +149,11 @@ impl State {
                         None
                     };
                 } else {
-                    // TODO: Close menu?
+                    return iced::Task::done(Msg::CloseMenu);
                 }
                 iced::Task::none()
             }
+            Msg::CloseMenu => iced::Task::none(),
         }
     }
 

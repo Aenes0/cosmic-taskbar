@@ -186,8 +186,10 @@ mod tests {
     }
 
     fn new_renderer() -> cosmic::Renderer {
-        // Built without the GPU feature, `cosmic::Renderer` is the tiny-skia one itself.
-        iced_tiny_skia::Renderer::new(iced::Font::default(), iced::Pixels(14.0))
+        cosmic::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::default(),
+            iced::Pixels(14.0),
+        ))
     }
 
     /// `widget::icon(handle).size(size)` drawn by the real tiny-skia renderer at `at`.
@@ -206,7 +208,9 @@ mod tests {
             scale_factor: 1.0,
         };
         ui.draw(renderer, &cosmic::Theme::dark(), &style, mouse::Cursor::Unavailable);
-        let inner = renderer;
+        let cosmic::Renderer::Secondary(inner) = renderer else {
+            unreachable!("test renderer is always tiny-skia");
+        };
         let mut pixmap = tiny_skia::Pixmap::new(CANVAS, CANVAS).expect("canvas");
         let mut mask = tiny_skia::Mask::new(CANVAS, CANVAS).expect("mask");
         let viewport = Viewport::with_physical_size(iced::Size::new(CANVAS, CANVAS), 1.0);

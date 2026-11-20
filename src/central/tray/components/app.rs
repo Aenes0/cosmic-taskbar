@@ -70,6 +70,9 @@ pub enum Msg {
     PopupOpened(window::Id),
     /// Nudge for the popup state machine while a request or a close is pending.
     PopupTick,
+    /// Forces a couple of extra frames after a popup opens: cosmic-panel + NVIDIA
+    /// can drop the first frame of a static xdg_popup, leaving it unseen.
+    RepaintTick,
     Escape,
     // XXX don't use index (unique window id? or I guess that's created and destroyed)
     StatusMenu((usize, status_menu::Msg)),
@@ -129,6 +132,8 @@ pub(crate) struct App {
     corner: bool,
     /// Length (px) along the major axis taken by the others in the corner.
     reserved: f32,
+    /// Extra frames to repaint after a popup opens so static popups are never left unseen.
+    pub(super) repaint_frames: u8,
 }
 
 /// The major-axis bound left for the tray after the host's `reserved` px
@@ -277,6 +282,12 @@ impl App {
         self.run(cmds)
     }
 
+    /// Closes any open or pending tray popup (box and/or menu).
+    pub(crate) fn close_all_popups(&mut self) -> app::Task<Msg> {
+        let cmds = self.popups.close_all(Instant::now());
+        self.run(cmds)
+    }
+
     fn open_menu_item(&self) -> Option<usize> {
         self.popups.menu_item().map(|(item, _)| item)
     }
@@ -302,7 +313,7 @@ impl App {
         self.sync_menu_events();
         let mut tasks = Vec::with_capacity(cmds.len());
         for cmd in cmds {
-            tracing::debug!(?cmd, "popup command");
+            tracing::info!(?cmd, "tray popup command");
             match cmd {
                 Cmd::Destroy(id) => tasks.push(destroy_popup(id)),
                 Cmd::Open { want, id, parent } => {
@@ -453,10 +464,12 @@ impl cosmic::Application for App {
                 self.run(cmds)
             }
             Msg::PopupOpened(id) => {
-                tracing::debug!(?id, "popup opened");
+                tracing::info!(?id, "tray popup opened");
                 let ours = self.popups.box_id() == Some(id)
                     || self.popups.menu_item().is_some_and(|(_, m)| m == id);
-                if !ours {
+                if ours {
+                    self.repaint_frames = 4;
+                } else {
                     self.others_open.insert(id);
                 }
                 let cmds = self.popups.opened(id, Instant::now());
@@ -466,6 +479,10 @@ impl cosmic::Application for App {
                 let cmds = self.popups.tick(Instant::now(), window::Id::unique());
                 self.run(cmds)
             }
+            Msg::RepaintTick => {
+                self.repaint_frames = self.repaint_frames.saturating_sub(1);
+                Task::none()
+            }
             Msg::Escape => {
                 let cmds = self.popups.escape(Instant::now());
                 self.run(cmds)
@@ -473,15 +490,19 @@ impl cosmic::Application for App {
             Msg::Closed(surface) => {
                 self.others_open.remove(&surface);
                 let now = Instant::now();
-                // Only what we did not destroy is still "open" here: the
-                // compositor closed it (click outside, grab).
-                let box_by_compositor = self.popups.box_id() == Some(surface);
-                let menu_by_compositor = self
-                    .popups
-                    .menu_item()
-                    .filter(|(_, id)| *id == surface)
-                    .map(|(item, _)| item);
-                tracing::debug!(?surface, box_by_compositor, ?menu_by_compositor, "popup closed");
+                // Only a confirmed-open popup closed by the compositor (click outside,
+                // grab) counts as a dismissal; a rejected request must not block the next click.
+                let box_by_compositor =
+                    self.popups.is_box_open() && self.popups.box_id() == Some(surface);
+                let menu_by_compositor = if self.popups.is_menu_open() {
+                    self.popups
+                        .menu_item()
+                        .filter(|(_, id)| *id == surface)
+                        .map(|(item, _)| item)
+                } else {
+                    None
+                };
+                tracing::info!(?surface, box_by_compositor, ?menu_by_compositor, "tray popup closed");
                 let cmds = self.popups.closed(surface, now, window::Id::unique());
                 let mut tasks = vec![self.run(cmds)];
                 if let Some(item) = menu_by_compositor {
@@ -494,6 +515,7 @@ impl cosmic::Application for App {
                 }
                 Task::batch(tasks)
             }
+            Msg::StatusMenu((_, status_menu::Msg::CloseMenu)) => self.close_all_popups(),
             Msg::StatusMenu((id, msg)) => match self.menus.get_mut(&id) {
                 Some(state) => state
                     .update(msg, id, self.token_tx.as_ref())
@@ -654,8 +676,10 @@ impl cosmic::Application for App {
                 let now = Instant::now();
                 let opening = self.popups.box_id().is_none();
                 let blocked = opening && dismiss_blocks(self.box_dismissed_at, now);
+                let boxed_len = self.split().boxed.len();
+                tracing::info!(opening, blocked, boxed_len, corner = self.corner, "tray ToggleOverflow");
                 self.box_dismissed_at = None;
-                if blocked || (opening && self.split().boxed.is_empty()) {
+                if blocked || (opening && boxed_len == 0) {
                     return Task::none();
                 }
                 let cmds = self.popups.toggle_box(now, window::Id::unique());
@@ -709,6 +733,11 @@ impl cosmic::Application for App {
         }));
         if self.popups.pending() {
             subscriptions.push(iced::time::every(POPUP_TICK).map(|_| Msg::PopupTick));
+        }
+        if self.repaint_frames > 0 {
+            subscriptions.push(
+                iced::time::every(Duration::from_millis(33)).map(|_| Msg::RepaintTick),
+            );
         }
         subscriptions.push(self.core.watch_config::<TrayConfig>(CONFIG_ID).map(|u| {
             for why in u.errors.into_iter().filter(cosmic_config::Error::is_err) {

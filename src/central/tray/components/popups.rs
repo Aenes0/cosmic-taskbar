@@ -90,6 +90,32 @@ impl Popups {
         matches!(self.box_, Some(Slot { phase: Phase::Open, .. }))
     }
 
+    pub fn is_menu_open(&self) -> bool {
+        matches!(self.menu, Some(MenuSlot { slot: Slot { phase: Phase::Open, .. }, .. }))
+    }
+
+    /// Closes everything open (box and/or menu) and drops any queued open request.
+    pub fn close_all(&mut self, now: Instant) -> Vec<Cmd> {
+        self.expire(now);
+        self.queue = None;
+        let mut cmds = Vec::new();
+        if self.is_box_open() {
+            self.destroy_box(now, &mut cmds);
+        } else if let Some(s) = self.box_.as_mut() {
+            if s.phase == Phase::Requested {
+                s.dismiss = true;
+            }
+        }
+        if self.is_menu_open() {
+            self.destroy_menu(now, &mut cmds);
+        } else if let Some(m) = self.menu.as_mut() {
+            if m.slot.phase == Phase::Requested {
+                m.slot.dismiss = true;
+            }
+        }
+        cmds
+    }
+
     pub fn pending(&self) -> bool {
         self.queue.is_some()
             || !self.orphans.is_empty()
@@ -166,6 +192,9 @@ impl Popups {
         if let Some(s) = self.box_.as_mut().filter(|s| s.id == id && s.phase == Phase::Requested) {
             s.phase = Phase::Open;
             s.since = now;
+            if s.dismiss {
+                self.destroy_box(now, &mut cmds);
+            }
         } else if self.menu.is_some_and(|m| m.slot.id == id && m.slot.phase == Phase::Requested) {
             if let Some(m) = self.menu.as_mut() {
                 m.slot.phase = Phase::Open;

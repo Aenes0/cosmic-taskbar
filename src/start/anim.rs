@@ -5,9 +5,9 @@
 
 pub use crate::shared::anim::{Spring, motion_scale};
 
-/// Spring constants: the opening gives a little overshoot, the closing none.
-pub const OPEN: (f32, f32) = (380.0, 26.0);
-pub const CLOSE: (f32, f32) = (520.0, 46.0);
+/// Spring constants: snappy open with a hint of overshoot, fast clean close.
+pub const OPEN: (f32, f32) = (750.0, 48.0);
+pub const CLOSE: (f32, f32) = (900.0, 56.0);
 
 /// The menu's offset from its place at spring position `pos` (0 = away,
 /// 1 = in place), when `travel` px is the way out of the screen: it slides as

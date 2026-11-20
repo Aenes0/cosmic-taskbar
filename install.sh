@@ -29,13 +29,14 @@ mkdir -p "$apps"
 for id in io.github.Aenes0.CosmicTaskbar io.github.Aenes0.CosmicStart io.github.Aenes0.CosmicWorkspacesButton; do
     sed "s|@bindir@|$bindir|" "data/$id.desktop.in" > "$apps/$id.desktop"
 done
-# The Central's applets: quick settings, show desktop, system monitor, tray
-# (the tray keeps the id it had as its own program, and its place on the panel),
-# and the Canto, the three corner ones in one (setup.sh swaps them).
+# The Central's applets: Corner (Central + clock + show desktop), Monitor,
+# and the standalone Central / ShowDesktop entries. Custom Tray is omitted so
+# COSMIC's native Status Area applet is used directly in Panel Settings.
 central=io.github.Aenes0.CosmicCentral
-for id in "$central" "$central.ShowDesktop" "$central.Monitor" "$central.Corner" io.github.Aenes0.CosmicTray; do
+for id in "$central" "$central.ShowDesktop" "$central.Monitor" "$central.Corner"; do
     sed "s|@bindir@|$bindir|" "data/central/$id.desktop.in" > "$apps/$id.desktop"
 done
+rm -f "$apps/io.github.Aenes0.CosmicTray.desktop"
 install -Dm0644 "data/central/$central.metainfo.xml" "$prefix/share/metainfo/$central.metainfo.xml"
 install -Dm0644 "data/central/icons/scalable/apps/$central.svg" "$prefix/share/icons/hicolor/scalable/apps/$central.svg"
 
