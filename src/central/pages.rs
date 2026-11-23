@@ -28,6 +28,8 @@ use crate::central::{background::Msg as BackgroundMsg, tray::components::status_
 
 /// Icons of background apps in a row of their strip.
 const BACKGROUND_COLUMNS: usize = 9;
+/// Icons of background apps in a row of the dedicated background page.
+const BACKGROUND_PAGE_COLUMNS: usize = 5;
 /// One of those icons' buttons, a side.
 const BACKGROUND_BUTTON: f32 = 34.0;
 
@@ -355,8 +357,19 @@ impl App {
         body: Vec<Element<'a, Message>>,
         more: Option<(&'a str, &'static str)>,
     ) -> Element<'a, Message> {
+        self.page_back(title, Page::Main, switch, body, more)
+    }
+
+    fn page_back<'a>(
+        &'a self,
+        title: &'a str,
+        back: Page,
+        switch: Option<(bool, Message)>,
+        body: Vec<Element<'a, Message>>,
+        more: Option<(&'a str, &'static str)>,
+    ) -> Element<'a, Message> {
         let mut header = widget::row::with_capacity(4)
-            .push(circle_button("go-previous-symbolic", Message::ShowPage(Page::Main), 36.0))
+            .push(circle_button("go-previous-symbolic", Message::ShowPage(back), 36.0))
             .push(
                 widget::text::title4(title)
                     .width(Length::Fill),
@@ -2093,6 +2106,42 @@ fn background_icon(id: usize, state: &status_menu::State) -> Element<'static, Me
     widget::tooltip(area, widget::text::body(name), widget::tooltip::Position::Bottom).into()
 }
 
+/// An app on the dedicated background page: icon + short name, clickable
+/// with left button to activate and right button for its menu.
+fn background_tile(id: usize, state: &status_menu::State) -> Element<'static, Message> {
+    let name = state
+        .identity
+        .label()
+        .unwrap_or(crate::central::texts::texts().background_apps)
+        .to_owned();
+    let one_line =
+        || iced::core::text::Ellipsize::End(iced::core::text::EllipsizeHeightLimit::Lines(1));
+    let content = widget::column::with_children(vec![
+        widget::icon::icon(state.icon_handle().clone()).size(24).into(),
+        widget::text::caption(name.clone())
+            .align_x(iced::alignment::Horizontal::Center)
+            .ellipsize(one_line())
+            .width(Length::Fill)
+            .into(),
+    ])
+    .spacing(4)
+    .align_x(Alignment::Center);
+    let button = button::custom(widget::container(content).center(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fixed(64.0))
+        .padding([6, 4])
+        .class(chip_class(false))
+        .on_press(Message::Tray(BackgroundMsg::Activate(id)));
+    let area = widget::mouse_area(button).on_right_press(Message::Tray(BackgroundMsg::OpenMenu(id)));
+    widget::container(widget::tooltip(
+        area,
+        widget::text::body(name),
+        widget::tooltip::Position::Bottom,
+    ))
+    .width(Length::Fill)
+    .into()
+}
+
 impl App {
     /// The background apps as a strip of icons, when there are any.
     pub(crate) fn background_panel(&self) -> Option<Element<'_, Message>> {
@@ -2100,6 +2149,7 @@ impl App {
             return None;
         }
         let tx = crate::central::texts::texts();
+        let t = strings();
         let spacing = theme::spacing();
         let apps: Vec<(usize, &status_menu::State)> = self.background.apps().collect();
         let rows: Vec<Element<'_, Message>> = apps
@@ -2112,10 +2162,26 @@ impl App {
                 .into()
             })
             .collect();
-        let content = widget::column::with_children(vec![
+        let header = widget::row::with_children(vec![
             widget::text::caption(tx.background_apps)
                 .class(theme::Text::Custom(dimmed))
+                .width(Length::Fill)
                 .into(),
+            widget::tooltip(
+                button::icon(icon("document-edit-symbolic"))
+                    .icon_size(14)
+                    .padding(2)
+                    .class(theme::Button::Text)
+                    .on_press(Message::Tray(BackgroundMsg::OpenEdit)),
+                widget::text::body(t.edit),
+                widget::tooltip::Position::Bottom,
+            )
+            .into(),
+        ])
+        .spacing(spacing.space_xs)
+        .align_y(Alignment::Center);
+        let content = widget::column::with_children(vec![
+            header.into(),
             widget::column::with_children(rows).spacing(spacing.space_xxs).into(),
         ])
         .spacing(spacing.space_xs)
@@ -2139,17 +2205,213 @@ impl App {
             + PANEL_GAP
     }
 
+    /// Dedicated compact page opened by the `^` shortcut on the bar:
+    /// shows background apps in a clean grid, and in edit mode lets the user
+    /// reorder/hide background apps as well as configure every system bar icon.
+    pub fn background_page(&self) -> Element<'_, Message> {
+        use crate::central::layout::BarItem;
+        let tx = crate::central::texts::texts();
+        let t = strings();
+        let spacing = theme::spacing();
+        let one_line =
+            || iced::core::text::Ellipsize::End(iced::core::text::EllipsizeHeightLimit::Lines(1));
+
+        let edit_btn: Element<'_, Message> = if self.background_editing {
+            button::custom(
+                widget::row::with_children(vec![
+                    widget::icon::icon(icon("object-select-symbolic")).size(16).into(),
+                    widget::text::caption(tx.done).into(),
+                ])
+                .spacing(spacing.space_xxs)
+                .align_y(Alignment::Center),
+            )
+            .padding([6, 12])
+            .class(chip_class(true))
+            .on_press(Message::Tray(BackgroundMsg::ToggleEdit))
+            .into()
+        } else {
+            widget::tooltip(
+                circle_button(
+                    "document-edit-symbolic",
+                    Message::Tray(BackgroundMsg::ToggleEdit),
+                    32.0,
+                ),
+                widget::text::body(t.edit),
+                widget::tooltip::Position::Bottom,
+            )
+            .into()
+        };
+
+        let header = widget::row::with_children(vec![
+            widget::text::title4(tx.background_apps)
+                .width(Length::Fill)
+                .into(),
+            edit_btn,
+        ])
+        .spacing(spacing.space_xs)
+        .align_y(Alignment::Center);
+
+        let apps: Vec<(usize, &status_menu::State)> = self.background.apps().collect();
+        let mut body: Vec<Element<'_, Message>> = Vec::new();
+
+        if !self.background_editing {
+            if apps.is_empty() {
+                body.push(note(tx.no_background_apps));
+            } else {
+                let rows: Vec<Element<'_, Message>> = apps
+                    .chunks(BACKGROUND_PAGE_COLUMNS)
+                    .map(|chunk| {
+                        let mut cells: Vec<Element<'_, Message>> = chunk
+                            .iter()
+                            .map(|(id, state)| background_tile(*id, state))
+                            .collect();
+                        while cells.len() < BACKGROUND_PAGE_COLUMNS {
+                            cells.push(widget::space::horizontal().width(Length::Fill).into());
+                        }
+                        widget::row::with_children(cells)
+                            .spacing(spacing.space_xs)
+                            .into()
+                    })
+                    .collect();
+                body.push(
+                    widget::container(
+                        widget::column::with_children(rows).spacing(spacing.space_xs),
+                    )
+                    .padding([spacing.space_xs, spacing.space_m, spacing.space_m, spacing.space_m])
+                    .into(),
+                );
+            }
+        } else {
+            if apps.is_empty() {
+                body.push(note(tx.no_background_apps));
+            } else {
+                let total = apps.len();
+                for (index, (id, state)) in apps.into_iter().enumerate() {
+                    let name = state.identity.label().unwrap_or(tx.background_apps).to_owned();
+                    let has_key = self.background.key_of(id).is_some();
+                    let visible = self.background.is_visible(id);
+                    let status = if visible { tx.on_bar } else { tx.hidden };
+                    let move_btn = |icon_name: &str, msg: Option<Message>| -> Element<'_, Message> {
+                        button::icon(icon(icon_name))
+                            .icon_size(14)
+                            .padding(5)
+                            .class(theme::Button::Text)
+                            .on_press_maybe(msg)
+                            .into()
+                    };
+                    let up = move_btn(
+                        "go-up-symbolic",
+                        (has_key && index > 0)
+                            .then_some(Message::Tray(BackgroundMsg::Move(id, true))),
+                    );
+                    let down = move_btn(
+                        "go-down-symbolic",
+                        (has_key && index + 1 < total)
+                            .then_some(Message::Tray(BackgroundMsg::Move(id, false))),
+                    );
+                    let mut toggle = widget::toggler(visible);
+                    if has_key {
+                        toggle = toggle.on_toggle(move |_| Message::Tray(BackgroundMsg::Toggle(id)));
+                    }
+                    let info = widget::column::with_children(vec![
+                        widget::text::body(name).ellipsize(one_line()).into(),
+                        widget::text::caption(status)
+                            .class(theme::Text::Custom(dimmed))
+                            .into(),
+                    ])
+                    .width(Length::Fill);
+                    body.push(
+                        padded_control(
+                            widget::row::with_children(vec![
+                                widget::icon::icon(state.icon_handle().clone()).size(20).into(),
+                                info.into(),
+                                up,
+                                down,
+                                toggle.into(),
+                            ])
+                            .spacing(spacing.space_xs)
+                            .align_y(Alignment::Center),
+                        )
+                        .into(),
+                    );
+                }
+            }
+
+            // System icons shown on the bar: unified in the same edit panel.
+            body.push(padded_control(widget::divider::horizontal::default()).into());
+            body.push(section(tx.system_bar_icons));
+            let mut bar_items: Vec<BarItem> = vec![
+                BarItem::Network,
+                BarItem::Volume,
+                BarItem::Notifications,
+                BarItem::Privacy,
+                BarItem::Peripherals,
+            ];
+            if self.battery.is_some() {
+                bar_items.push(BarItem::Battery);
+            }
+            bar_items.push(BarItem::Clock);
+            for tile in Tile::ALL {
+                if tile != Tile::Wifi && self.tile_state(tile).is_some() {
+                    bar_items.push(BarItem::Tile(tile));
+                }
+            }
+            for item in bar_items {
+                let current = self.panel_icons.get(item);
+                let choices = widget::row::with_children(
+                    item.choices()
+                        .iter()
+                        .map(|&show| -> Element<'_, Message> {
+                            button::custom(widget::text::caption(show.name()))
+                                .padding([4, 8])
+                                .class(chip_class(show == current))
+                                .on_press(Message::SetBarIcon(item, show))
+                                .into()
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .spacing(4)
+                .align_y(Alignment::Center);
+                body.push(
+                    padded_control(
+                        widget::row::with_children(vec![
+                            widget::icon::icon(icon(item.icon())).size(16).into(),
+                            widget::text::body(item.name())
+                                .ellipsize(one_line())
+                                .width(Length::Fill)
+                                .into(),
+                            choices.into(),
+                        ])
+                        .spacing(spacing.space_xs)
+                        .align_y(Alignment::Center),
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        widget::column::with_children(vec![
+            padded_control(header).into(),
+            padded_control(widget::divider::horizontal::default()).into(),
+            widget::scrollable(widget::column::with_children(body))
+                .height(Length::Shrink)
+                .into(),
+        ])
+        .into()
+    }
+
     /// A background app's own menu, a page of the panel: its items, and
     /// whether it shows on the bar.
     pub fn tray_menu_page(&self) -> Element<'_, Message> {
         let tx = crate::central::texts::texts();
         let t = strings();
+        let back = self.tray_menu_return.unwrap_or(Page::Main);
         let found = self
             .background
             .open
             .and_then(|id| Some((id, self.background.menu_state(id)?)));
         let Some((id, state)) = found else {
-            return self.page(tx.background_apps, None, vec![note(t.loading)], None);
+            return self.page_back(tx.background_apps, back, None, vec![note(t.loading)], None);
         };
         let show = padded_control(
             widget::row::with_children(vec![
@@ -2169,6 +2431,6 @@ impl App {
             show.into(),
         ];
         let title = state.identity.label().unwrap_or(tx.background_apps);
-        self.page(title, None, body, None)
+        self.page_back(title, back, None, body, None)
     }
 }

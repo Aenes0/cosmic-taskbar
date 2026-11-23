@@ -101,8 +101,8 @@ pub struct Panels {
     shown: Option<Shown>,
     /// Asked before the screens were known.
     pending: Option<Request>,
-    /// The panel that closed last, where, and when.
-    closed: Option<(Which, String, Instant)>,
+    /// The panel that closed last, where, its page (for the Central), and when.
+    closed: Option<(Which, String, Option<&'static str>, Instant)>,
     /// When a panel last opened.
     opened_at: Option<Instant>,
     /// The bar's edge, read once: moving the bar restarts its applets, not this.
@@ -170,11 +170,24 @@ impl Panels {
             return Task::none();
         }
         let shown = self.shown.as_ref().map(|s| (s.which, s.output.as_str()));
-        let just_closed = self
+        let recent_closed = self
             .closed
             .as_ref()
-            .filter(|(_, _, at)| at.elapsed() < JUST_CLOSED)
-            .map(|(which, output, _)| (*which, output.as_str()));
+            .filter(|(_, _, _, at)| at.elapsed() < JUST_CLOSED);
+        // Clicking the `^` shortcut while the Background page is open closes it
+        // on focus loss just before the D-Bus Open("background") arrives: do not reopen.
+        if shown.is_none()
+            && request.which == Which::Central
+            && request.page.as_deref() == Some(central::Page::Background.name())
+            && recent_closed.is_some_and(|(which, output, page, _)| {
+                *which == Which::Central
+                    && output.as_str() == request.output.as_str()
+                    && *page == Some(central::Page::Background.name())
+            })
+        {
+            return Task::none();
+        }
+        let just_closed = recent_closed.map(|(which, output, _, _)| (*which, output.as_str()));
         match place::step(shown, just_closed, &request) {
             Step::Open => self.show(request),
             Step::Close => self.hide(),
@@ -184,10 +197,12 @@ impl Panels {
             }
             Step::Page => {
                 let page = request.page.as_deref().unwrap_or_default();
-                match request.which {
+                let task = match request.which {
                     Which::Central => lift(self.central.turn_to(page), Message::Central),
                     Which::Monitor => lift(self.monitor.turn_to(page), Message::Monitor),
-                }
+                };
+                self.follow_child();
+                task
             }
             Step::Ignore => Task::none(),
         }
@@ -261,7 +276,11 @@ impl Panels {
             return Task::none();
         };
         tracing::debug!("hiding the {}: {:?}", shown.which.name(), shown.id);
-        self.closed = Some((shown.which, shown.output, Instant::now()));
+        let page = match shown.which {
+            Which::Central => self.central.page_name(),
+            Which::Monitor => None,
+        };
+        self.closed = Some((shown.which, shown.output, page, Instant::now()));
         match shown.which {
             Which::Central => lift(self.central.close_hosted(), Message::Central),
             Which::Monitor => lift(self.monitor.close_hosted(), Message::Monitor),
@@ -280,7 +299,11 @@ impl Panels {
         if surface != Some(shown.id)
             && let Some(shown) = self.shown.take()
         {
-            self.closed = Some((shown.which, shown.output, Instant::now()));
+            let page = match shown.which {
+                Which::Central => self.central.last_page_name(),
+                Which::Monitor => None,
+            };
+            self.closed = Some((shown.which, shown.output, page, Instant::now()));
         }
     }
 }

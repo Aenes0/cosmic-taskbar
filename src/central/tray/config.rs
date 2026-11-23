@@ -11,7 +11,10 @@ pub const CONFIG_ID: &str = super::APP_ID;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, CosmicConfigEntry)]
 #[version = 1]
 pub struct TrayConfig {
+    /// Preferred order of background apps on the bar (and legacy visible list).
     pub visible: Vec<String>,
+    /// Background apps explicitly hidden from the bar (new apps show on the bar by default).
+    pub hidden: Vec<String>,
 }
 
 #[cfg(test)]
@@ -25,8 +28,10 @@ mod tests {
         let cfg = Config::with_custom_path(CONFIG_ID, TrayConfig::VERSION, dir.clone()).unwrap();
         let missing = TrayConfig::get_entry(&cfg).unwrap_or_else(|(_, d)| d);
         assert!(missing.visible.is_empty());
+        assert!(missing.hidden.is_empty());
         let c = TrayConfig {
             visible: vec!["Σ".into(), "keyboard".into()],
+            hidden: vec!["slack".into()],
         };
         c.write_entry(&cfg).unwrap();
         assert_eq!(TrayConfig::get_entry(&cfg).unwrap(), c);

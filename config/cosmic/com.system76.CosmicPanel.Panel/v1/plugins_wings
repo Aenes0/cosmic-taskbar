@@ -1,6 +1,5 @@
 Some(([
     "io.github.Aenes0.CosmicCentral.Monitor",
 ], [
-    "com.system76.CosmicAppletStatusArea",
     "io.github.Aenes0.CosmicCentral.Corner",
 ]))

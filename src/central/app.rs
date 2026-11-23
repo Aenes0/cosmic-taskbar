@@ -61,13 +61,15 @@ pub enum Page {
     DoNotDisturb,
     Session,
     Camera,
+    /// Dedicated background apps & bar icons page (opened from the `^` shortcut).
+    Background,
     /// A background app's own menu.
     TrayMenu,
 }
 
 impl Page {
     #[cfg(test)]
-    pub const ALL: [Page; 13] = [
+    pub const ALL: [Page; 14] = [
         Page::Main,
         Page::Edit,
         Page::Wifi,
@@ -80,6 +82,7 @@ impl Page {
         Page::DoNotDisturb,
         Page::Session,
         Page::Camera,
+        Page::Background,
         Page::TrayMenu,
     ];
 
@@ -98,6 +101,7 @@ impl Page {
             Page::DoNotDisturb => "dnd",
             Page::Session => "session",
             Page::Camera => "camera",
+            Page::Background => "background",
             Page::TrayMenu => "tray",
         }
     }
@@ -116,6 +120,7 @@ impl Page {
             "dnd" => Page::DoNotDisturb,
             "session" => Page::Session,
             "camera" => Page::Camera,
+            "background" => Page::Background,
             "tray" => Page::TrayMenu,
             _ => return None,
         })
@@ -407,7 +412,13 @@ pub struct App {
     /// The background apps: their icons on the bar and in the panel, and
     /// their menus as a page of it.
     pub(crate) background: Background,
-    /// When an icon of a background app was last pressed on the bar.
+    /// Whether the dedicated `Page::Background` is currently in edit mode.
+    pub(crate) background_editing: bool,
+    /// Where the back button in `Page::TrayMenu` returns to (`Main` by default).
+    pub(crate) tray_menu_return: Option<Page>,
+    /// The page that was open right before closing (so the host can toggle `^`).
+    last_closed_page: Option<Page>,
+    /// When an icon of a background app (or the `^` arrow) was last pressed on the bar.
     tray_pressed: Option<std::time::Instant>,
 }
 
@@ -470,6 +481,32 @@ impl App {
         let at = |content: Element<'static, Message>, page: Page| -> Element<'static, Message> {
             widget::mouse_area(content).on_right_press(Message::OpenAt(page)).into()
         };
+        // Discreet arrow shortcut (`^`) to open the dedicated background apps
+        // and bar icons page in `central --panels` (zero xdg_popup).
+        let arrow_icon = match applet.anchor {
+            cosmic::applet::cosmic_panel_config::PanelAnchor::Bottom => "go-up-symbolic",
+            cosmic::applet::cosmic_panel_config::PanelAnchor::Top => "go-down-symbolic",
+            cosmic::applet::cosmic_panel_config::PanelAnchor::Left => "go-next-symbolic",
+            cosmic::applet::cosmic_panel_config::PanelAnchor::Right => "go-previous-symbolic",
+        };
+        let arrow = widget::mouse_area(
+            widget::container(
+                widget::icon::icon(icon(arrow_icon))
+                    .size((size * 3 / 4).max(12))
+                    .class(theme::Svg::Custom(std::rc::Rc::new(|theme| {
+                        iced::widget::svg::Style {
+                            color: Some(theme.cosmic().background(theme.transparent).on.into()),
+                        }
+                    }))),
+            )
+            .center(Length::Fixed(f32::from(size))),
+        )
+        .on_press(Message::Tray(background::Msg::BarArrow))
+        .on_right_press(Message::Tray(background::Msg::BarArrow));
+        icons.push(tip(
+            arrow.into(),
+            crate::central::texts::texts().background_apps.to_owned(),
+        ));
         // The background apps picked for the bar, first: a click does what
         // the app's icon does, a right click opens its menu in the panel.
         for (id, handle, name) in self.background.on_bar() {
@@ -784,12 +821,25 @@ impl App {
         let seen = self.mark_seen();
         self.leave_edit(false);
         self.background.close();
+        self.last_closed_page = self.page;
+        self.background_editing = false;
+        self.tray_menu_return = None;
         self.page = None;
         let destroy = match self.popup.take() {
             Some(id) => destroy_layer_surface(id),
             None => Task::none(),
         };
         Task::batch([seen, destroy])
+    }
+
+    /// The page currently shown, by its wire name.
+    pub(crate) fn page_name(&self) -> Option<&'static str> {
+        self.page.map(Page::name)
+    }
+
+    /// The page that was shown right before the panel closed.
+    pub(crate) fn last_page_name(&self) -> Option<&'static str> {
+        self.last_closed_page.map(Page::name)
     }
 
     /// The panel, for the panels' host: never on the bar, never opening by
@@ -813,6 +863,8 @@ impl App {
             self.screen_height_known = true;
         }
         self.popup = Some(id);
+        self.background_editing = false;
+        self.tray_menu_return = None;
         let opened = self.opened();
         // On an app's menu, as a click on its icon on the bar: by the app's
         // key, the ids here being each process's own.
@@ -874,6 +926,9 @@ impl App {
 
     /// An app's menu, a page of the panel that shows.
     fn open_tray_menu(&mut self, app: usize) -> app::Task<Message> {
+        if self.page != Some(Page::TrayMenu) {
+            self.tray_menu_return = self.page;
+        }
         self.background.open_menu(app);
         cosmic::Application::update(self, Message::ShowPage(Page::TrayMenu))
     }
@@ -886,7 +941,7 @@ impl App {
                 let task = self.background.event(event);
                 // The app whose menu shows went.
                 if self.page == Some(Page::TrayMenu) && self.background.open.is_none() {
-                    self.page = Some(Page::Main);
+                    self.page = Some(self.tray_menu_return.unwrap_or(Page::Main));
                 }
                 task
             }
@@ -904,6 +959,32 @@ impl App {
             Msg::BarPress(id) => {
                 self.tray_pressed = Some(std::time::Instant::now());
                 self.tray(Msg::Activate(id))
+            }
+            Msg::BarArrow => {
+                self.tray_pressed = Some(std::time::Instant::now());
+                if !self.hosted {
+                    return ask_host(crate::central::panels::service::open(
+                        Which::Central,
+                        panel_output(),
+                        Page::Background.name().to_owned(),
+                    ));
+                }
+                if self.popup.is_some() {
+                    if self.page == Some(Page::Background) {
+                        return self.close_popup();
+                    }
+                    return cosmic::Application::update(self, Message::ShowPage(Page::Background));
+                }
+                Task::none()
+            }
+            Msg::OpenEdit => {
+                let task = cosmic::Application::update(self, Message::ShowPage(Page::Background));
+                self.background_editing = true;
+                task
+            }
+            Msg::ToggleEdit => {
+                self.background_editing = !self.background_editing;
+                Task::none()
             }
             Msg::Activate(id) => match self.background.is_menu(id) {
                 None => Task::none(),
@@ -938,6 +1019,10 @@ impl App {
                 self.background.toggle(id);
                 Task::none()
             }
+            Msg::Move(id, up) => {
+                self.background.move_item(id, up);
+                Task::none()
+            }
         }
     }
 
@@ -950,6 +1035,9 @@ impl App {
 
     /// Turns to a page while it shows.
     pub(crate) fn turn_to(&mut self, page: &str) -> app::Task<Message> {
+        if page == Page::Background.name() && self.page == Some(Page::Background) {
+            return self.close_popup();
+        }
         if let Some(key) = page.strip_prefix("tray:") {
             return match self.background.id_of(key) {
                 Some(app) => self.open_tray_menu(app),
@@ -1512,6 +1600,9 @@ impl cosmic::Application for App {
                     let seen = self.mark_seen();
                     self.leave_edit(false);
                     self.background.close();
+                    self.last_closed_page = self.page;
+                    self.background_editing = false;
+                    self.tray_menu_return = None;
                     self.popup = None;
                     self.page = None;
                     return seen;
@@ -1525,6 +1616,9 @@ impl cosmic::Application for App {
                 } else if page != Page::Edit && self.page == Some(Page::Edit) {
                     // Away from editing without saving: as it was.
                     self.leave_edit(false);
+                }
+                if page != Page::Background {
+                    self.background_editing = false;
                 }
                 // Away from an app's menu: it's told it closed.
                 if page != Page::TrayMenu {
@@ -2477,10 +2571,11 @@ impl cosmic::Application for App {
             Page::DoNotDisturb => pages::panel(self.dnd_page()),
             Page::Session => pages::panel(self.session_page()),
             Page::Camera => pages::panel(self.camera_page()),
+            Page::Background => pages::panel(self.background_page()),
             Page::TrayMenu => pages::panel(self.tray_menu_page()),
         };
         // Editing is the main page in place: it fades, the others slide.
-        let depth = if matches!(page, Page::Main | Page::Edit) { 0 } else { 1 };
+        let depth = if matches!(page, Page::Main | Page::Edit | Page::Background) { 0 } else { 1 };
         let content: Element<'_, Message> = if page == Page::Edit {
             content
         } else {
