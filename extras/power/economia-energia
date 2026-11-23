@@ -1,7 +1,9 @@
 #!/bin/sh
 # Acoes extras por perfil do power-profiles-daemon, adaptadas automaticamente
-# ao hardware da maquina:
+# ao hardware da maquina e 100% configuraveis via:
+#   ~/.config/cosmic-taskbar/power-profiles.conf  (ou /etc/economia-energia.conf)
 #
+# Padroes internos quando nao ha arquivo de configuracao:
 # 1) Desktop AMD Ryzen (ex: R9 + NVIDIA + CoolerControl + monitor DP-3):
 #    - power-saver: CPU sem boost (teto 2,4 GHz), GPU NVIDIA no power limit
 #      minimo e clocks travados (1000/810 MHz), DP-3 em 60 Hz, PCIe ASPM
@@ -13,25 +15,15 @@
 #
 # 2) Notebook Intel Core Ultra (Meteor Lake — ex: Core Ultra 7 155H,
 #    Lenovo Yoga 7i 14 2024):
-#    - power-saver (Economia maxima):
-#      * intel_pstate no_turbo=1, max_perf_pct=55, EPP=power (prioriza LP-E/E cores)
-#      * Intel RAPL PL1=12 W / PL2=18 W
-#      * Intel Arc iGPU limitada a 800 MHz (i915/xe)
-#      * PCIe ASPM powersupersave, NVMe/SATA med_power_with_dipm, audio power_save=1,
-#        Wi-Fi power_save on, NMI watchdog 0, dirty_writeback_centisecs=1500
-#      * Tela interna (eDP) em 60 Hz se houver modo >60 Hz
-#    - balanced (Equilibrado):
-#      * intel_pstate no_turbo=0, max_perf_pct=85, EPP=balance_power
-#      * Intel RAPL PL1=28 W / PL2=45 W
-#      * Intel Arc iGPU ate 1500 MHz
-#      * PCIe ASPM powersave, SATA ALPM med_power_with_dipm, audio power_save=1,
-#        Wi-Fi power_save on, dirty_writeback_centisecs=500
-#    - performance (Desempenho):
-#      * intel_pstate no_turbo=0, max_perf_pct=100, EPP=performance
-#      * Intel RAPL PL1/PL2 no maximo do hardware (ou 45/65 W)
-#      * Intel Arc iGPU no clock maximo (RP0)
-#      * PCIe ASPM default, SATA ALPM max_performance, audio power_save=0,
-#        Wi-Fi power_save off
+#    - power-saver: no_turbo=1, max_perf_pct=55, EPP=power, RAPL 12/18 W,
+#      Arc 800 MHz, ASPM powersupersave, SATA DIPM, audio+Wi-Fi economia.
+#    - balanced: turbo on, max_perf_pct=85, EPP=balance_power, RAPL 28/45 W,
+#      Arc 1500 MHz, ASPM powersave, SATA DIPM, audio+Wi-Fi economia.
+#    - performance: turbo on, max_perf_pct=100, EPP=performance, RAPL 45/65 W,
+#      Arc max, ASPM default, SATA max_performance, audio/Wi-Fi sem economia.
+#
+# Tambem atualiza os tempos do CosmicIdle (desligar video, bloquear / tela de
+# login e suspender em AC/bateria) para o usuario da sessao ativa.
 #
 # Chamado automaticamente pelo economia-energia-daemon.
 # Uso: economia-energia power-saver | balanced | performance | off
@@ -46,67 +38,454 @@ for bat in /sys/class/power_supply/BAT*; do
     [ -d "$bat" ] && is_laptop=1 && break
 done
 
-# --- Parametros Desktop AMD R9 ---
-saver_gpu_clock=1000
-saver_memory_clock=810
-saver_cpu_khz=2400000
-balanced_gpu_watts=200
-balanced_cpu_khz=4400000
+# --- Parametros de display padrao (Desktop DP-3) ---
+DISPLAY_OUTPUT="DP-3"
+DISPLAY_WIDTH=3440
+DISPLAY_HEIGHT=1440
 
-display_output="DP-3"
-display_w=3440
-display_h=1440
-display_hz_saver="59.987"
-display_hz_full="159.962"
+# --- Padroes por hardware (podem ser sobrescritos por power-profiles.conf) ---
+if [ "$is_intel" -eq 1 ] && [ "$is_laptop" -eq 1 ]; then
+    POWER_SAVER_BOOST=0
+    POWER_SAVER_CPU_MAX_MHZ=0
+    POWER_SAVER_EPP=power
+    POWER_SAVER_INTEL_MAX_PERF_PCT=55
+    POWER_SAVER_RAPL_PL1_W=12
+    POWER_SAVER_RAPL_PL2_W=18
+    POWER_SAVER_DISABLE_CCD1=0
+    POWER_SAVER_MAX_ONLINE_CORES=0
+    POWER_SAVER_NVIDIA_POWER_LIMIT_W=0
+    POWER_SAVER_NVIDIA_GPU_CLOCK_MHZ=0
+    POWER_SAVER_NVIDIA_MEM_CLOCK_MHZ=0
+    POWER_SAVER_NVIDIA_PERSISTENCE=0
+    POWER_SAVER_INTEL_IGPU_MAX_MHZ=800
+    POWER_SAVER_DISPLAY_HZ=""
+    POWER_SAVER_PCIE_ASPM=powersupersave
+    POWER_SAVER_SATA_ALPM=med_power_with_dipm
+    POWER_SAVER_AUDIO_POWER_SAVE=1
+    POWER_SAVER_WIFI_POWER_SAVE=1
+    POWER_SAVER_SCREEN_OFF_MINS=5
+    POWER_SAVER_LOCK_MINS=5
+    POWER_SAVER_SUSPEND_AC_MINS=30
+    POWER_SAVER_SUSPEND_BATTERY_MINS=15
 
-# --- Parametros Intel Core Ultra 7 155H (Meteor Lake) ---
-intel_saver_pl1_uw=12000000     # 12 W sustentado
-intel_saver_pl2_uw=18000000     # 18 W turbo curto
-intel_balanced_pl1_uw=28000000  # 28 W sustentado
-intel_balanced_pl2_uw=45000000  # 45 W turbo curto
-intel_perf_pl1_uw=45000000      # 45 W sustentado
-intel_perf_pl2_uw=65000000      # 65 W turbo curto
-intel_igpu_saver_mhz=800
-intel_igpu_balanced_mhz=1500
+    BALANCED_BOOST=1
+    BALANCED_CPU_MAX_MHZ=0
+    BALANCED_EPP=balance_power
+    BALANCED_INTEL_MAX_PERF_PCT=85
+    BALANCED_RAPL_PL1_W=28
+    BALANCED_RAPL_PL2_W=45
+    BALANCED_DISABLE_CCD1=0
+    BALANCED_MAX_ONLINE_CORES=0
+    BALANCED_NVIDIA_POWER_LIMIT_W=0
+    BALANCED_NVIDIA_GPU_CLOCK_MHZ=0
+    BALANCED_NVIDIA_MEM_CLOCK_MHZ=0
+    BALANCED_NVIDIA_PERSISTENCE=0
+    BALANCED_INTEL_IGPU_MAX_MHZ=1500
+    BALANCED_DISPLAY_HZ=""
+    BALANCED_PCIE_ASPM=powersave
+    BALANCED_SATA_ALPM=med_power_with_dipm
+    BALANCED_AUDIO_POWER_SAVE=1
+    BALANCED_WIFI_POWER_SAVE=1
+    BALANCED_SCREEN_OFF_MINS=10
+    BALANCED_LOCK_MINS=10
+    BALANCED_SUSPEND_AC_MINS=60
+    BALANCED_SUSPEND_BATTERY_MINS=30
 
-nvidia() {
-    command -v nvidia-smi >/dev/null || return 0
-    nvidia-smi --query-gpu=index,power.min_limit,power.default_limit --format=csv,noheader,nounits |
-        while IFS=', ' read -r index min default; do
-            case "$1" in
-                power-saver)
-                    nvidia-smi -i "$index" -pm 1
-                    nvidia-smi -i "$index" -pl "$min"
-                    low=$(nvidia-smi -i "$index" --query-supported-clocks=gr --format=csv,noheader,nounits | sort -n | head -1)
-                    nvidia-smi -i "$index" -lgc "${low:-0},$saver_gpu_clock"
-                    low=$(nvidia-smi -i "$index" --query-supported-clocks=mem --format=csv,noheader,nounits | sort -n | head -1)
-                    nvidia-smi -i "$index" -lmc "${low:-0},$saver_memory_clock"
+    PERFORMANCE_BOOST=1
+    PERFORMANCE_CPU_MAX_MHZ=0
+    PERFORMANCE_EPP=performance
+    PERFORMANCE_INTEL_MAX_PERF_PCT=100
+    PERFORMANCE_RAPL_PL1_W=45
+    PERFORMANCE_RAPL_PL2_W=65
+    PERFORMANCE_DISABLE_CCD1=0
+    PERFORMANCE_MAX_ONLINE_CORES=0
+    PERFORMANCE_NVIDIA_POWER_LIMIT_W=0
+    PERFORMANCE_NVIDIA_GPU_CLOCK_MHZ=0
+    PERFORMANCE_NVIDIA_MEM_CLOCK_MHZ=0
+    PERFORMANCE_NVIDIA_PERSISTENCE=0
+    PERFORMANCE_INTEL_IGPU_MAX_MHZ=0
+    PERFORMANCE_DISPLAY_HZ=""
+    PERFORMANCE_PCIE_ASPM=default
+    PERFORMANCE_SATA_ALPM=max_performance
+    PERFORMANCE_AUDIO_POWER_SAVE=0
+    PERFORMANCE_WIFI_POWER_SAVE=0
+    PERFORMANCE_SCREEN_OFF_MINS=15
+    PERFORMANCE_LOCK_MINS=15
+    PERFORMANCE_SUSPEND_AC_MINS=0
+    PERFORMANCE_SUSPEND_BATTERY_MINS=60
+else
+    POWER_SAVER_BOOST=0
+    POWER_SAVER_CPU_MAX_MHZ=2400
+    POWER_SAVER_EPP=power
+    POWER_SAVER_INTEL_MAX_PERF_PCT=100
+    POWER_SAVER_RAPL_PL1_W=0
+    POWER_SAVER_RAPL_PL2_W=0
+    POWER_SAVER_DISABLE_CCD1=0
+    POWER_SAVER_MAX_ONLINE_CORES=0
+    POWER_SAVER_NVIDIA_POWER_LIMIT_W=0
+    POWER_SAVER_NVIDIA_GPU_CLOCK_MHZ=1000
+    POWER_SAVER_NVIDIA_MEM_CLOCK_MHZ=810
+    POWER_SAVER_NVIDIA_PERSISTENCE=1
+    POWER_SAVER_INTEL_IGPU_MAX_MHZ=0
+    POWER_SAVER_DISPLAY_HZ="59.987"
+    POWER_SAVER_PCIE_ASPM=powersave
+    POWER_SAVER_SATA_ALPM=med_power_with_dipm
+    POWER_SAVER_AUDIO_POWER_SAVE=1
+    POWER_SAVER_WIFI_POWER_SAVE=0
+    POWER_SAVER_SCREEN_OFF_MINS=5
+    POWER_SAVER_LOCK_MINS=5
+    POWER_SAVER_SUSPEND_AC_MINS=30
+    POWER_SAVER_SUSPEND_BATTERY_MINS=0
+
+    BALANCED_BOOST=1
+    BALANCED_CPU_MAX_MHZ=4400
+    BALANCED_EPP=balance_power
+    BALANCED_INTEL_MAX_PERF_PCT=100
+    BALANCED_RAPL_PL1_W=0
+    BALANCED_RAPL_PL2_W=0
+    BALANCED_DISABLE_CCD1=0
+    BALANCED_MAX_ONLINE_CORES=0
+    BALANCED_NVIDIA_POWER_LIMIT_W=200
+    BALANCED_NVIDIA_GPU_CLOCK_MHZ=0
+    BALANCED_NVIDIA_MEM_CLOCK_MHZ=0
+    BALANCED_NVIDIA_PERSISTENCE=1
+    BALANCED_INTEL_IGPU_MAX_MHZ=0
+    BALANCED_DISPLAY_HZ="159.962"
+    BALANCED_PCIE_ASPM=powersave
+    BALANCED_SATA_ALPM=med_power_with_dipm
+    BALANCED_AUDIO_POWER_SAVE=1
+    BALANCED_WIFI_POWER_SAVE=0
+    BALANCED_SCREEN_OFF_MINS=10
+    BALANCED_LOCK_MINS=10
+    BALANCED_SUSPEND_AC_MINS=60
+    BALANCED_SUSPEND_BATTERY_MINS=0
+
+    PERFORMANCE_BOOST=1
+    PERFORMANCE_CPU_MAX_MHZ=0
+    PERFORMANCE_EPP=performance
+    PERFORMANCE_INTEL_MAX_PERF_PCT=100
+    PERFORMANCE_RAPL_PL1_W=0
+    PERFORMANCE_RAPL_PL2_W=0
+    PERFORMANCE_DISABLE_CCD1=0
+    PERFORMANCE_MAX_ONLINE_CORES=0
+    PERFORMANCE_NVIDIA_POWER_LIMIT_W=0
+    PERFORMANCE_NVIDIA_GPU_CLOCK_MHZ=0
+    PERFORMANCE_NVIDIA_MEM_CLOCK_MHZ=0
+    PERFORMANCE_NVIDIA_PERSISTENCE=0
+    PERFORMANCE_INTEL_IGPU_MAX_MHZ=0
+    PERFORMANCE_DISPLAY_HZ="159.962"
+    PERFORMANCE_PCIE_ASPM=default
+    PERFORMANCE_SATA_ALPM=max_performance
+    PERFORMANCE_AUDIO_POWER_SAVE=0
+    PERFORMANCE_WIFI_POWER_SAVE=0
+    PERFORMANCE_SCREEN_OFF_MINS=0
+    PERFORMANCE_LOCK_MINS=0
+    PERFORMANCE_SUSPEND_AC_MINS=0
+    PERFORMANCE_SUSPEND_BATTERY_MINS=0
+fi
+
+# --- Descoberta de usuario da sessao ativa e carregamento seguro da config ---
+SESSION_USER=""
+SESSION_HOME=""
+
+user_home_for() {
+    getent passwd "$1" 2>/dev/null | awk -F: 'NR==1 {print $6}'
+}
+
+detect_session_user() {
+    if [ "$(id -u)" -ne 0 ]; then
+        SESSION_USER=$(id -un 2>/dev/null || true)
+        SESSION_HOME="${HOME:-$(user_home_for "$SESSION_USER")}"
+        return 0
+    fi
+    # 1) Sessao Wayland ativa em /run/user/*/wayland-*
+    for sock in /run/user/*/wayland-[0-9]*; do
+        [ -S "$sock" ] || continue
+        rdir=$(dirname "$sock")
+        u=$(stat -c %U "$rdir" 2>/dev/null) || continue
+        h=$(user_home_for "$u")
+        if [ -n "$u" ] && [ -n "$h" ] && [ -d "$h" ]; then
+            SESSION_USER="$u"
+            SESSION_HOME="$h"
+            return 0
+        fi
+    done
+    # 2) Usuario logado com /run/user/<uid>=1000+
+    for rdir in /run/user/*; do
+        [ -d "$rdir" ] || continue
+        uid=$(basename "$rdir")
+        case "$uid" in *[!0-9]* | "") continue ;; esac
+        [ "$uid" -ge 1000 ] || continue
+        u=$(stat -c %U "$rdir" 2>/dev/null) || continue
+        h=$(user_home_for "$u")
+        if [ -n "$u" ] && [ -n "$h" ] && [ -d "$h" ]; then
+            SESSION_USER="$u"
+            SESSION_HOME="$h"
+            return 0
+        fi
+    done
+    # 3) Fallback: usuario dono de /home/*/.config/cosmic-taskbar/power-profiles.conf
+    for cfg in /home/*/.config/cosmic-taskbar/power-profiles.conf; do
+        [ -f "$cfg" ] || continue
+        u=$(stat -c %U "$cfg" 2>/dev/null) || continue
+        h=$(user_home_for "$u")
+        if [ -n "$u" ] && [ -n "$h" ] && [ -d "$h" ]; then
+            SESSION_USER="$u"
+            SESSION_HOME="$h"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# Carrega KEY=VALUE com validacao estrita (sem executar comandos arbitrarios como root).
+load_config_file() {
+    cfg="$1"
+    [ -f "$cfg" ] && [ -r "$cfg" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            "" | \#*) continue ;;
+            *=*) ;;
+            *) continue ;;
+        esac
+        key=${line%%=*}
+        val=${line#*=}
+        case "$val" in
+            \"*\") val=${val#\"}; val=${val%\"} ;;
+            \'*\') val=${val#\'}; val=${val%\'} ;;
+        esac
+        case "$key" in
+            "" | *[!A-Z0-9_]*) continue ;;
+        esac
+        case "$val" in
+            *[!A-Za-z0-9._-]*) continue ;;
+        esac
+        case "$key" in
+            POWER_SAVER_* | BALANCED_* | PERFORMANCE_* | DISPLAY_OUTPUT | DISPLAY_WIDTH | DISPLAY_HEIGHT)
+                eval "$key=\$val"
+                ;;
+        esac
+    done < "$cfg"
+    return 0
+}
+
+load_user_config() {
+    detect_session_user
+    if [ -n "$SESSION_HOME" ] && [ -f "$SESSION_HOME/.config/cosmic-taskbar/power-profiles.conf" ]; then
+        load_config_file "$SESSION_HOME/.config/cosmic-taskbar/power-profiles.conf"
+        return 0
+    fi
+    for cfg in /home/*/.config/cosmic-taskbar/power-profiles.conf; do
+        if [ -f "$cfg" ]; then
+            load_config_file "$cfg"
+            return 0
+        fi
+    done
+    if [ -f /etc/economia-energia.conf ]; then
+        load_config_file /etc/economia-energia.conf
+    fi
+    return 0
+}
+
+is_uint() {
+    case "${1:-}" in
+        "" | *[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# --- Controle de CCD1 (AMD dual-CCD) e limite de nucleos fisicos online ---
+apply_ccd_and_cores() {
+    # $1: disable_ccd1 (0|1), $2: max_online_cores (0=todos, >0=N nucleos fisicos)
+    disable_ccd1="${1:-0}"
+    max_cores="${2:-0}"
+    is_uint "$disable_ccd1" || disable_ccd1=0
+    is_uint "$max_cores" || max_cores=0
+
+    # 1) Sempre reativa todos os CPUs primeiro para ler topologia/L3 completa
+    #    e garantir restauracao total quando disable_ccd1=0 e max_online_cores=0.
+    for online_file in /sys/devices/system/cpu/cpu[0-9]*/online; do
+        [ -w "$online_file" ] || continue
+        cpu_name=$(basename "$(dirname "$online_file")")
+        [ "$cpu_name" = "cpu0" ] && continue
+        cur=$(cat "$online_file" 2>/dev/null || echo 1)
+        if [ "$cur" = "0" ]; then
+            echo 1 > "$online_file" 2>/dev/null || true
+        fi
+    done
+
+    if [ "$disable_ccd1" -eq 0 ] && [ "$max_cores" -eq 0 ]; then
+        return 0
+    fi
+
+    # 2) Ordena os indices numericos de CPU (cpu0, cpu1, cpu2, ...)
+    cpus=$(for d in /sys/devices/system/cpu/cpu[0-9]*; do
+        [ -d "$d" ] || continue
+        n=${d##*/cpu}
+        is_uint "$n" || continue
+        printf '%s\n' "$n"
+    done | sort -n)
+
+    # 3) Detecta dual-CCD em CPUs AMD via cache/index3/id (dominio L3)
+    ccd0_pkg=$(cat /sys/devices/system/cpu/cpu0/topology/physical_package_id 2>/dev/null || echo 0)
+    ccd0_l3=$(cat /sys/devices/system/cpu/cpu0/cache/index3/id 2>/dev/null || true)
+    is_dual_ccd=0
+    if [ "$cpu_vendor" = "AuthenticAMD" ] && [ -n "$ccd0_l3" ]; then
+        for n in $cpus; do
+            dir="/sys/devices/system/cpu/cpu$n"
+            pkg=$(cat "$dir/topology/physical_package_id" 2>/dev/null || echo 0)
+            l3=$(cat "$dir/cache/index3/id" 2>/dev/null || true)
+            if [ "$pkg" = "$ccd0_pkg" ] && [ -n "$l3" ] && [ "$l3" != "$ccd0_l3" ]; then
+                is_dual_ccd=1
+                break
+            fi
+        done
+    fi
+
+    # 4) Seleciona quais CPUs manter online (sempre mantendo cpu0 e irmaos SMT dos nucleos escolhidos)
+    seen_cores=" "
+    core_count=0
+    for n in $cpus; do
+        dir="/sys/devices/system/cpu/cpu$n"
+        pkg=$(cat "$dir/topology/physical_package_id" 2>/dev/null || echo 0)
+        cid=$(cat "$dir/topology/core_id" 2>/dev/null || echo "$n")
+        l3=$(cat "$dir/cache/index3/id" 2>/dev/null || true)
+        core_key="${pkg}:${cid}"
+
+        if [ "$n" = "0" ]; then
+            seen_cores="${seen_cores}${core_key} "
+            core_count=1
+            continue
+        fi
+
+        keep=1
+        if [ "$disable_ccd1" -eq 1 ] && [ "$is_dual_ccd" -eq 1 ] && [ -n "$l3" ] && [ "$l3" != "$ccd0_l3" ]; then
+            keep=0
+        fi
+
+        if [ "$keep" -eq 1 ] && [ "$max_cores" -gt 0 ]; then
+            case "$seen_cores" in
+                *" ${core_key} "*)
+                    # Irmao SMT de um nucleo fisico ja mantido online
+                    keep=1
                     ;;
-                balanced)
-                    target=$(awk -v t="$balanced_gpu_watts" -v mn="$min" -v df="$default" 'BEGIN {
-                        if (t < mn) t = mn;
-                        if (t > df) t = df;
-                        printf "%.0f", t;
-                    }')
-                    nvidia-smi -i "$index" -pm 1
-                    nvidia-smi -i "$index" -rgc
-                    nvidia-smi -i "$index" -rmc
-                    nvidia-smi -i "$index" -pl "$target"
-                    ;;
-                performance)
-                    nvidia-smi -i "$index" -rgc
-                    nvidia-smi -i "$index" -rmc
-                    nvidia-smi -i "$index" -pl "$default"
-                    nvidia-smi -i "$index" -pm 0
+                *)
+                    if [ "$core_count" -lt "$max_cores" ]; then
+                        seen_cores="${seen_cores}${core_key} "
+                        core_count=$((core_count + 1))
+                    else
+                        keep=0
+                    fi
                     ;;
             esac
+        fi
+
+        if [ "$keep" -eq 0 ] && [ -w "$dir/online" ]; then
+            echo 0 > "$dir/online" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
+# --- Tempos de inatividade do COSMIC (tela, senha/bloqueio, suspensao) ---
+format_idle_ron() {
+    mins="${1:-0}"
+    if ! is_uint "$mins" || [ "$mins" -eq 0 ]; then
+        printf 'None'
+    else
+        printf 'Some(%s)' "$((mins * 60000))"
+    fi
+}
+
+apply_cosmic_idle() {
+    # $1: screen_off_mins, $2: lock_mins, $3: suspend_ac_mins, $4: suspend_bat_mins
+    screen_ron=$(format_idle_ron "${1:-0}")
+    lock_ron=$(format_idle_ron "${2:-0}")
+    ac_ron=$(format_idle_ron "${3:-0}")
+    bat_ron=$(format_idle_ron "${4:-0}")
+
+    [ -n "$SESSION_HOME" ] && [ -d "$SESSION_HOME" ] || return 0
+    idle_dir="$SESSION_HOME/.config/cosmic/com.system76.CosmicIdle/v1"
+
+    write_cmd='
+        dir="$1"; s="$2"; l="$3"; a="$4"; b="$5"
+        mkdir -p "$dir" || exit 0
+        for pair in "screen_off_time:$s" "lock_time:$l" "suspend_on_ac_time:$a" "suspend_on_battery_time:$b"; do
+            f="${pair%%:*}"
+            v="${pair#*:}"
+            tmp="$dir/.$f.tmp.$$"
+            printf "%s" "$v" > "$tmp" && mv -f "$tmp" "$dir/$f"
+        done
+    '
+
+    if [ "$(id -u)" -eq 0 ] && [ -n "$SESSION_USER" ] && command -v runuser >/dev/null 2>&1; then
+        runuser -u "$SESSION_USER" -- sh -c "$write_cmd" _ "$idle_dir" "$screen_ron" "$lock_ron" "$ac_ron" "$bat_ron" >/dev/null 2>&1 || true
+    else
+        sh -c "$write_cmd" _ "$idle_dir" "$screen_ron" "$lock_ron" "$ac_ron" "$bat_ron" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+nvidia_apply() {
+    # $1: profile (power-saver|balanced|performance), $2: power_limit_w (0=auto),
+    # $3: gpu_clk_mhz (0=livre), $4: mem_clk_mhz (0=livre), $5: persistence (0|1)
+    command -v nvidia-smi >/dev/null || return 0
+    mode="$1"
+    pl_w="${2:-0}"
+    gpu_clk="${3:-0}"
+    mem_clk="${4:-0}"
+    pm="${5:-0}"
+    is_uint "$pl_w" || pl_w=0
+    is_uint "$gpu_clk" || gpu_clk=0
+    is_uint "$mem_clk" || mem_clk=0
+    is_uint "$pm" || pm=0
+
+    nvidia-smi --query-gpu=index,power.min_limit,power.default_limit --format=csv,noheader,nounits |
+        while IFS=', ' read -r index min default; do
+            [ -n "$index" ] || continue
+            if [ "$pm" -eq 1 ]; then
+                nvidia-smi -i "$index" -pm 1
+            fi
+
+            if [ "$pl_w" -gt 0 ]; then
+                target=$(awk -v t="$pl_w" -v mn="$min" -v df="$default" 'BEGIN {
+                    if (t < mn) t = mn;
+                    if (t > df) t = df;
+                    printf "%.0f", t;
+                }')
+                nvidia-smi -i "$index" -pl "$target"
+            elif [ "$mode" = "power-saver" ]; then
+                nvidia-smi -i "$index" -pl "$min"
+            else
+                nvidia-smi -i "$index" -pl "$default"
+            fi
+
+            if [ "$gpu_clk" -gt 0 ]; then
+                low=$(nvidia-smi -i "$index" --query-supported-clocks=gr --format=csv,noheader,nounits | sort -n | head -1)
+                nvidia-smi -i "$index" -lgc "${low:-0},$gpu_clk"
+            else
+                nvidia-smi -i "$index" -rgc
+            fi
+
+            if [ "$mem_clk" -gt 0 ]; then
+                low=$(nvidia-smi -i "$index" --query-supported-clocks=mem --format=csv,noheader,nounits | sort -n | head -1)
+                nvidia-smi -i "$index" -lmc "${low:-0},$mem_clk"
+            else
+                nvidia-smi -i "$index" -rmc
+            fi
+
+            if [ "$pm" -eq 0 ]; then
+                nvidia-smi -i "$index" -pm 0
+            fi
         done >/dev/null
+    return 0
 }
 
 amdgpu() {
     for level in /sys/class/drm/card*/device/power_dpm_force_performance_level; do
         [ -w "$level" ] && echo "$1" > "$level" 2>/dev/null || true
     done
+    return 0
 }
 
 intel_igpu() {
@@ -154,7 +533,7 @@ intel_rapl() {
     rapl="/sys/class/powercap/intel-rapl:0"
     [ -d "$rapl" ] || return 0
     if [ -w "$rapl/constraint_0_power_limit_uw" ]; then
-        max0=$(cat "$rapl/constraint_0_max_power_uw" 2>/dev/null || echo "$intel_perf_pl1_uw")
+        max0=$(cat "$rapl/constraint_0_max_power_uw" 2>/dev/null || echo 45000000)
         if [ "$1" = max ] || [ "$1" -gt "$max0" ]; then
             echo "$max0" > "$rapl/constraint_0_power_limit_uw" 2>/dev/null || true
         else
@@ -162,7 +541,7 @@ intel_rapl() {
         fi
     fi
     if [ -w "$rapl/constraint_1_power_limit_uw" ]; then
-        max1=$(cat "$rapl/constraint_1_max_power_uw" 2>/dev/null || echo "$intel_perf_pl2_uw")
+        max1=$(cat "$rapl/constraint_1_max_power_uw" 2>/dev/null || echo 65000000)
         if [ "$2" = max ] || [ "$2" -gt "$max1" ]; then
             echo "$max1" > "$rapl/constraint_1_power_limit_uw" 2>/dev/null || true
         else
@@ -184,12 +563,12 @@ boost() {
     if [ -w /sys/devices/system/cpu/cpufreq/policy0/boost ]; then
         [ -w /sys/devices/system/cpu/cpufreq/boost ] && echo 1 > /sys/devices/system/cpu/cpufreq/boost
         for b in /sys/devices/system/cpu/cpufreq/policy*/boost; do
-            [ -w "$b" ] && echo "$1" > "$b"
+            [ -w "$b" ] && echo "$1" > "$b" 2>/dev/null || true
         done
     else
-        [ -w /sys/devices/system/cpu/cpufreq/boost ] && echo "$1" > /sys/devices/system/cpu/cpufreq/boost
+        [ -w /sys/devices/system/cpu/cpufreq/boost ] && echo "$1" > /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || true
     fi
-    [ -w /sys/devices/system/cpu/intel_pstate/no_turbo ] && echo $((1 - $1)) > /sys/devices/system/cpu/intel_pstate/no_turbo
+    [ -w /sys/devices/system/cpu/intel_pstate/no_turbo ] && echo $((1 - $1)) > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || true
     return 0
 }
 
@@ -198,15 +577,16 @@ cpu_max_freq() {
         [ -w "$policy/scaling_max_freq" ] || continue
         hw_max=$(cat "$policy/cpuinfo_max_freq" 2>/dev/null) || continue
         if [ "$1" = max ] || [ "$1" -ge "$hw_max" ]; then
-            echo "$hw_max" > "$policy/scaling_max_freq"
+            echo "$hw_max" > "$policy/scaling_max_freq" 2>/dev/null || true
         else
-            echo "$1" > "$policy/scaling_max_freq"
+            echo "$1" > "$policy/scaling_max_freq" 2>/dev/null || true
         fi
     done
     return 0
 }
 
 epp() {
+    [ -n "${1:-}" ] || return 0
     for pref in /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference; do
         [ -w "$pref" ] && echo "$1" > "$pref" 2>/dev/null || true
     done
@@ -215,13 +595,15 @@ epp() {
 
 platform_pm() {
     # $1: aspm policy, $2: sata alpm policy, $3: snd_hda_intel power_save (0|1)
-    if [ -w /sys/module/pcie_aspm/parameters/policy ]; then
+    if [ -n "${1:-}" ] && [ -w /sys/module/pcie_aspm/parameters/policy ]; then
         echo "$1" > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || \
             echo powersave > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true
     fi
-    for host in /sys/class/scsi_host/host*/link_power_management_policy; do
-        [ -w "$host" ] && echo "$2" > "$host" 2>/dev/null || true
-    done
+    if [ -n "${2:-}" ]; then
+        for host in /sys/class/scsi_host/host*/link_power_management_policy; do
+            [ -w "$host" ] && echo "$2" > "$host" 2>/dev/null || true
+        done
+    fi
     if [ -w /sys/module/snd_hda_intel/parameters/power_save ]; then
         echo "$3" > /sys/module/snd_hda_intel/parameters/power_save 2>/dev/null || true
     fi
@@ -235,32 +617,39 @@ platform_pm() {
     return 0
 }
 
-laptop_pm() {
-    # $1: wifi_ps (on|off), $2: dirty_writeback_centisecs, $3: nmi_watchdog (0|1)
-    if command -v iw >/dev/null 2>&1; then
-        for iface in /sys/class/net/*/wireless; do
-            [ -d "$iface" ] || continue
-            dev=$(basename "$(dirname "$iface")")
-            iw dev "$dev" set power_save "$1" >/dev/null 2>&1 || true
-        done
-    fi
+wifi_pm() {
+    # $1: 1 (on) | 0 (off)
+    command -v iw >/dev/null 2>&1 || return 0
+    mode="off"
+    [ "${1:-0}" = "1" ] && mode="on"
+    for iface in /sys/class/net/*/wireless; do
+        [ -d "$iface" ] || continue
+        dev=$(basename "$(dirname "$iface")")
+        iw dev "$dev" set power_save "$mode" >/dev/null 2>&1 || true
+    done
+    return 0
+}
+
+laptop_vm_pm() {
+    # $1: dirty_writeback_centisecs, $2: nmi_watchdog (0|1)
     [ -w /proc/sys/vm/dirty_writeback_centisecs ] && \
-        echo "$2" > /proc/sys/vm/dirty_writeback_centisecs 2>/dev/null || true
+        echo "$1" > /proc/sys/vm/dirty_writeback_centisecs 2>/dev/null || true
     [ -w /proc/sys/kernel/nmi_watchdog ] && \
-        echo "$3" > /proc/sys/kernel/nmi_watchdog 2>/dev/null || true
+        echo "$2" > /proc/sys/kernel/nmi_watchdog 2>/dev/null || true
     return 0
 }
 
 display_refresh() {
+    hz="${1:-}"
+    [ -n "$hz" ] || return 0
     command -v cosmic-randr >/dev/null || return 0
-    hz="$1"
     for sock in /run/user/*/wayland-[0-9]*; do
         [ -S "$sock" ] || continue
         rdir=$(dirname "$sock")
         wdisp=$(basename "$sock")
         user=$(stat -c %U "$rdir" 2>/dev/null) || continue
         runuser -u "$user" -- env XDG_RUNTIME_DIR="$rdir" WAYLAND_DISPLAY="$wdisp" \
-            cosmic-randr mode "$display_output" "$display_w" "$display_h" --refresh "$hz" >/dev/null 2>&1 || true
+            cosmic-randr mode "$DISPLAY_OUTPUT" "$DISPLAY_WIDTH" "$DISPLAY_HEIGHT" --refresh "$hz" >/dev/null 2>&1 || true
     done
     return 0
 }
@@ -272,91 +661,125 @@ fans() {
     return 0
 }
 
-apply_intel_laptop() {
-    case "$1" in
-        power-saver | on)
-            boost 0
-            intel_perf_pct 55
-            epp power
-            intel_rapl "$intel_saver_pl1_uw" "$intel_saver_pl2_uw"
-            intel_igpu "$intel_igpu_saver_mhz"
-            platform_pm powersupersave med_power_with_dipm 1
-            laptop_pm on 1500 0
-            ;;
-        balanced)
-            boost 1
-            intel_perf_pct 85
-            epp balance_power
-            intel_rapl "$intel_balanced_pl1_uw" "$intel_balanced_pl2_uw"
-            intel_igpu "$intel_igpu_balanced_mhz"
-            platform_pm powersave med_power_with_dipm 1
-            laptop_pm on 500 0
-            ;;
-        performance | off)
-            boost 1
-            intel_perf_pct 100
-            epp performance
-            intel_rapl "$intel_perf_pl1_uw" "$intel_perf_pl2_uw"
-            intel_igpu max
-            platform_pm default max_performance 0
-            laptop_pm off 500 0
-            ;;
-        *)
-            echo "uso: $0 power-saver | balanced | performance | off" >&2
-            exit 2
-            ;;
-    esac
-}
+# --- Carrega configuracao do usuario e resolve o perfil solicitado ---
+load_user_config
 
-apply_amd_desktop() {
-    case "$1" in
-        power-saver | on)
-            boost 0
-            cpu_max_freq "$saver_cpu_khz"
-            platform_pm powersave med_power_with_dipm 1
-            nvidia power-saver
-            amdgpu low
-            display_refresh "$display_hz_saver"
-            fans power-saver
-            ;;
-        balanced)
-            boost 1
-            cpu_max_freq "$balanced_cpu_khz"
-            epp balance_power
-            platform_pm powersave med_power_with_dipm 1
-            nvidia balanced
-            amdgpu auto
-            display_refresh "$display_hz_full"
-            fans balanced
-            ;;
-        performance)
-            boost 1
-            cpu_max_freq max
-            platform_pm default max_performance 0
-            nvidia performance
-            amdgpu auto
-            display_refresh "$display_hz_full"
-            fans performance
-            ;;
-        off)
-            boost 1
-            cpu_max_freq max
-            platform_pm default max_performance 0
-            nvidia performance
-            amdgpu auto
-            display_refresh "$display_hz_full"
-            fans off
-            ;;
-        *)
-            echo "uso: $0 power-saver | balanced | performance | off" >&2
-            exit 2
-            ;;
-    esac
-}
+action="${1:-}"
+case "$action" in
+    power-saver | on)
+        prefix="POWER_SAVER"
+        profile_mode="power-saver"
+        fan_mode="power-saver"
+        amdgpu_mode="low"
+        dirty_wb=1500
+        ;;
+    balanced)
+        prefix="BALANCED"
+        profile_mode="balanced"
+        fan_mode="balanced"
+        amdgpu_mode="auto"
+        dirty_wb=500
+        ;;
+    performance)
+        prefix="PERFORMANCE"
+        profile_mode="performance"
+        fan_mode="performance"
+        amdgpu_mode="auto"
+        dirty_wb=500
+        ;;
+    off)
+        prefix="PERFORMANCE"
+        profile_mode="performance"
+        fan_mode="off"
+        amdgpu_mode="auto"
+        dirty_wb=500
+        ;;
+    *)
+        echo "uso: $0 power-saver | balanced | performance | off" >&2
+        exit 2
+        ;;
+esac
 
-if [ "$is_intel" -eq 1 ] && [ "$is_laptop" -eq 1 ]; then
-    apply_intel_laptop "${1:-}"
+# Extrai os parametros do perfil ativo (prefixo validado acima)
+eval "p_boost=\${${prefix}_BOOST:-1}"
+eval "p_cpu_max_mhz=\${${prefix}_CPU_MAX_MHZ:-0}"
+eval "p_epp=\${${prefix}_EPP:-}"
+eval "p_intel_max_perf_pct=\${${prefix}_INTEL_MAX_PERF_PCT:-100}"
+eval "p_rapl_pl1_w=\${${prefix}_RAPL_PL1_W:-0}"
+eval "p_rapl_pl2_w=\${${prefix}_RAPL_PL2_W:-0}"
+eval "p_disable_ccd1=\${${prefix}_DISABLE_CCD1:-0}"
+eval "p_max_online_cores=\${${prefix}_MAX_ONLINE_CORES:-0}"
+eval "p_nvidia_pl_w=\${${prefix}_NVIDIA_POWER_LIMIT_W:-0}"
+eval "p_nvidia_gpu_clk=\${${prefix}_NVIDIA_GPU_CLOCK_MHZ:-0}"
+eval "p_nvidia_mem_clk=\${${prefix}_NVIDIA_MEM_CLOCK_MHZ:-0}"
+eval "p_nvidia_pm=\${${prefix}_NVIDIA_PERSISTENCE:-0}"
+eval "p_intel_igpu_mhz=\${${prefix}_INTEL_IGPU_MAX_MHZ:-0}"
+eval "p_display_hz=\${${prefix}_DISPLAY_HZ:-}"
+eval "p_pcie_aspm=\${${prefix}_PCIE_ASPM:-default}"
+eval "p_sata_alpm=\${${prefix}_SATA_ALPM:-max_performance}"
+eval "p_audio_ps=\${${prefix}_AUDIO_POWER_SAVE:-0}"
+eval "p_wifi_ps=\${${prefix}_WIFI_POWER_SAVE:-0}"
+eval "p_screen_off_mins=\${${prefix}_SCREEN_OFF_MINS:-0}"
+eval "p_lock_mins=\${${prefix}_LOCK_MINS:-0}"
+eval "p_suspend_ac_mins=\${${prefix}_SUSPEND_AC_MINS:-0}"
+eval "p_suspend_bat_mins=\${${prefix}_SUSPEND_BATTERY_MINS:-0}"
+
+# 1) Nucleos online / AMD CCD1 (antes de boost/freq/epp para afetar todas as policies ativas)
+if [ "$action" = "off" ]; then
+    apply_ccd_and_cores 0 0
 else
-    apply_amd_desktop "${1:-}"
+    apply_ccd_and_cores "$p_disable_ccd1" "$p_max_online_cores"
 fi
+
+# 2) CPU: boost, teto de frequencia, EPP, Intel P-State e RAPL
+is_uint "$p_boost" || p_boost=1
+boost "$p_boost"
+
+if is_uint "$p_cpu_max_mhz" && [ "$p_cpu_max_mhz" -gt 0 ]; then
+    cpu_max_freq "$((p_cpu_max_mhz * 1000))"
+else
+    cpu_max_freq max
+fi
+
+epp "$p_epp"
+
+if [ "$is_intel" -eq 1 ] && is_uint "$p_intel_max_perf_pct"; then
+    [ "$p_intel_max_perf_pct" -lt 10 ] && p_intel_max_perf_pct=10
+    [ "$p_intel_max_perf_pct" -gt 100 ] && p_intel_max_perf_pct=100
+    intel_perf_pct "$p_intel_max_perf_pct"
+fi
+
+is_uint "$p_rapl_pl1_w" || p_rapl_pl1_w=0
+is_uint "$p_rapl_pl2_w" || p_rapl_pl2_w=0
+if [ "$is_intel" -eq 1 ] || [ "$p_rapl_pl1_w" -gt 0 ] || [ "$p_rapl_pl2_w" -gt 0 ]; then
+    pl1="max"
+    pl2="max"
+    [ "$p_rapl_pl1_w" -gt 0 ] && pl1="$((p_rapl_pl1_w * 1000000))"
+    [ "$p_rapl_pl2_w" -gt 0 ] && pl2="$((p_rapl_pl2_w * 1000000))"
+    intel_rapl "$pl1" "$pl2"
+fi
+
+# 3) GPUs (NVIDIA, AMD e Intel Arc/i915/xe)
+nvidia_apply "$profile_mode" "$p_nvidia_pl_w" "$p_nvidia_gpu_clk" "$p_nvidia_mem_clk" "$p_nvidia_pm"
+amdgpu "$amdgpu_mode"
+if is_uint "$p_intel_igpu_mhz" && [ "$p_intel_igpu_mhz" -gt 0 ]; then
+    intel_igpu "$p_intel_igpu_mhz"
+elif [ "$is_intel" -eq 1 ]; then
+    intel_igpu max
+fi
+
+# 4) Plataforma (PCIe ASPM, SATA ALPM, Audio, Wi-Fi, VM de notebook)
+is_uint "$p_audio_ps" || p_audio_ps=0
+is_uint "$p_wifi_ps" || p_wifi_ps=0
+platform_pm "$p_pcie_aspm" "$p_sata_alpm" "$p_audio_ps"
+wifi_pm "$p_wifi_ps"
+if [ "$is_laptop" -eq 1 ]; then
+    laptop_vm_pm "$dirty_wb" 0
+fi
+
+# 5) Taxa de atualizacao do monitor, ventoinhas CoolerControl e CosmicIdle
+display_refresh "$p_display_hz"
+fans "$fan_mode"
+apply_cosmic_idle "$p_screen_off_mins" "$p_lock_mins" "$p_suspend_ac_mins" "$p_suspend_bat_mins"
+
 exit 0

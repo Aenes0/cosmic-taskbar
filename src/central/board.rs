@@ -255,6 +255,9 @@ impl App {
 
     /// The notifications' cards: an app's newest, or all of its when shown.
     fn notification_cards(&self) -> usize {
+        if !self.notif_config.group_by_app {
+            return self.notifications.len();
+        }
         let mut apps: Vec<&str> = Vec::new();
         let mut cards = 0;
         for notification in &self.notifications {

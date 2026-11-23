@@ -16,7 +16,7 @@ use super::{
     Day, Hour, Sky, Weather,
     scene::{Icon, Light, Scene, Time, moon_phase},
 };
-use crate::central::monitor::{Message, Monitor, texts::texts};
+use crate::central::monitor::{Message, Monitor, config::CardMode, texts::texts};
 
 const RADIUS: f32 = 16.0;
 const PADDING: u16 = 14;
@@ -161,18 +161,63 @@ impl Monitor {
     pub(crate) fn weather_block(&self) -> Element<'_, Message> {
         let now = Utc::now().timestamp();
         let (sky, light) = sky_and_light(self.weather.as_ref(), now);
+        let minimal = !self.place_editing && self.settings.weather_mode == CardMode::Minimal;
         let content: Element<'_, Message> = if self.place_editing {
             self.place_view()
+        } else if minimal {
+            self.weather_minimal(now)
         } else {
             match &self.weather {
                 Some(weather) => self.weather_view(weather, now),
                 None => self.weather_waiting(),
             }
         };
-        iced::widget::stack(vec![widget::container(content).padding(PADDING).width(Length::Fill).into()])
+        let container = widget::container(content).width(Length::Fill);
+        let container = if minimal { container.padding([8, 12]) } else { container.padding(PADDING) };
+        iced::widget::stack(vec![container.into()])
             .push_under(Scene { sky, light, radius: RADIUS }.view())
             .clip(true)
             .into()
+    }
+
+    fn weather_minimal(&self, now: i64) -> Element<'_, Message> {
+        let t = texts();
+        let (summary, sky_icon): (String, Option<Element<'_, Message>>) = match &self.weather {
+            Some(weather) => {
+                let (sky, light) = sky_and_light(Some(weather), now);
+                let icon = Icon {
+                    sky,
+                    day: light.time != Time::Night,
+                    size: 20.0,
+                    moving: false,
+                    on_panel: false,
+                    moon: light.moon,
+                    south: light.south,
+                }
+                .view();
+                (
+                    format!("{} · {} · {}", t.weather, degrees(weather.now.temp), sky_name(sky)),
+                    Some(icon),
+                )
+            }
+            None => (
+                format!(
+                    "{} · {}",
+                    t.weather,
+                    if self.weather_fetching { t.weather_loading } else { t.weather_offline }
+                ),
+                None,
+            ),
+        };
+        let mut row = widget::row::with_capacity(4).spacing(6).align_y(Alignment::Center);
+        if let Some(icon) = sky_icon {
+            row = row.push(icon);
+        }
+        row = row
+            .push(text(summary, 13.0, 0.95).wrapping(iced::widget::text::Wrapping::None).width(Length::Fill))
+            .push(glass_tip("mark-location-symbolic", t.change_place, Message::EditPlace(true)))
+            .push(glass_tip("go-down-symbolic", t.more_weather, Message::CycleWeatherMode));
+        row.into()
     }
 
     fn weather_waiting(&self) -> Element<'_, Message> {
@@ -190,6 +235,7 @@ impl Monitor {
         let t = texts();
         let today = weather.today(now);
         let (sky, light) = sky_and_light(Some(weather), now);
+        let expanded = self.settings.weather_mode == CardMode::Full;
         // The place, a pin before it; the controls at the end.
         let place = widget::row::with_children(vec![
             widget::icon::icon(crate::central::tiles::icon("mark-location-symbolic"))
@@ -203,7 +249,7 @@ impl Monitor {
         .spacing(4)
         .align_y(Alignment::Center)
         .width(Length::Fill);
-        let (expand, expand_tip) = if self.settings.weather_expanded {
+        let (expand, expand_tip) = if expanded {
             ("go-up-symbolic", t.less_weather)
         } else {
             ("go-down-symbolic", t.more_weather)
@@ -211,7 +257,7 @@ impl Monitor {
         let top = widget::row::with_children(vec![
             place.into(),
             glass_tip("mark-location-symbolic", t.change_place, Message::EditPlace(true)),
-            glass_tip(expand, expand_tip, Message::ToggleWeatherExpanded),
+            glass_tip(expand, expand_tip, Message::CycleWeatherMode),
         ])
         .spacing(2)
         .align_y(Alignment::Center);
@@ -254,7 +300,7 @@ impl Monitor {
             .push(now_row)
             .push(self.hours_strip(weather, now))
             .spacing(10);
-        if self.settings.weather_expanded {
+        if expanded {
             let sources: Vec<&str> = weather
                 .sources
                 .iter()

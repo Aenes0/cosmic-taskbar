@@ -111,6 +111,14 @@ pub struct Texts {
     pub weekdays: [&'static str; 7],
     pub skies: [&'static str; 9],
     pub uv_levels: [&'static str; 5],
+    pub mode_full: &'static str,
+    pub mode_compact: &'static str,
+    pub mode_minimal: &'static str,
+    pub mode_hidden: &'static str,
+    pub name_col: &'static str,
+    pub ram_col: &'static str,
+    pub procs_top: &'static str,
+    pub weather: &'static str,
 }
 
 const PT: Texts = Texts {
@@ -221,6 +229,14 @@ const PT: Texts = Texts {
     weekdays: ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"],
     skies: ["Céu limpo", "Parcialmente nublado", "Nublado", "Neblina", "Garoa", "Pancadas de chuva", "Chuva", "Trovoadas", "Neve"],
     uv_levels: ["Baixo", "Moderado", "Alto", "Muito alto", "Extremo"],
+    mode_full: "Expandido",
+    mode_compact: "Compacto",
+    mode_minimal: "Reduzido",
+    mode_hidden: "Oculto",
+    name_col: "Nome",
+    ram_col: "RAM",
+    procs_top: "top",
+    weather: "Clima",
 };
 
 const EN: Texts = Texts {
@@ -331,6 +347,14 @@ const EN: Texts = Texts {
     weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
     skies: ["Clear", "Partly cloudy", "Cloudy", "Fog", "Drizzle", "Showers", "Rain", "Thunderstorms", "Snow"],
     uv_levels: ["Low", "Moderate", "High", "Very high", "Extreme"],
+    mode_full: "Expanded",
+    mode_compact: "Compact",
+    mode_minimal: "Minimal",
+    mode_hidden: "Hidden",
+    name_col: "Name",
+    ram_col: "RAM",
+    procs_top: "top",
+    weather: "Weather",
 };
 
 pub fn texts() -> &'static Texts {

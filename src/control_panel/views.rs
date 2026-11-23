@@ -12,13 +12,24 @@ use cosmic::{
 use crate::central::{
     bar_spacing::BarSpacing,
     layout::Section as CentralSection,
-    monitor::config::{BarItem as MonitorBarItem, BarMode as MonitorBarMode},
+    monitor::config::{
+        BarItem as MonitorBarItem, BarMode as MonitorBarMode, CardMode as MonitorCardMode,
+        POLL_SECS_OPTIONS, PROCS_COUNT_OPTIONS, PollComponent as MonitorPollComponent,
+        ProcSort as MonitorProcSort, WEATHER_MINS_OPTIONS,
+    },
+    notifications::config::{
+        self as notif_cfg, NotifFormat, NotifPosition, TIMEOUT_OPTIONS, parse_hex_color,
+    },
     services::{self, CameraState, PcWindow, Touchpad},
     tiles::{chip_class, icon, symbolic},
     widgets::card,
 };
+use crate::logi::config as osd_config;
 
-use super::{ControlPanel, Message, Section, data};
+use super::{
+    ControlPanel, Message, Section, data,
+    power_config::{self, PowerProfileKind, ProfileTuning},
+};
 
 fn dimmed(theme: &cosmic::Theme) -> iced::widget::text::Style {
     let mut color = theme.cosmic().background(theme.transparent).on;
@@ -238,6 +249,8 @@ pub fn view(app: &ControlPanel) -> Element<'_, Message> {
         Section::Bar => bar_view(app),
         Section::Monitor => monitor_view(app),
         Section::Central => central_view(app),
+        Section::Notifications => notifications_view(app),
+        Section::DevicesOsd => devices_osd_view(app),
         Section::Camera => camera_view(app),
         Section::Network => network_view(app),
         Section::Displays => displays_view(app),
@@ -263,11 +276,23 @@ pub fn view(app: &ControlPanel) -> Element<'_, Message> {
 
 fn power_view(app: &ControlPanel) -> Element<'_, Message> {
     let spacing = theme::spacing();
+    let hw = &app.snapshot.hardware;
+    let topo = &app.cpu_topology;
+    let editing = app.editing_profile;
+    let t = app.power_config.get(editing);
+
     let mut items: Vec<Element<'_, Message>> = vec![
-        widget::text::title3("Energia & Bateria").into(),
+        widget::row::with_children(vec![
+            widget::text::title3("Energia & Bateria").width(Length::Fill).into(),
+            action_btn("Restaurar padrões do hardware", Message::PowerResetDefaults, false),
+            action_btn("Salvar e aplicar plano", Message::PowerSaveAndApply, true),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
     ];
 
-    // Power profiles selector
+    // Active power profile selector (power-profiles-daemon)
     if let Some(power) = &app.power {
         let profile_defs = [
             (
@@ -317,42 +342,497 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
         }
         items.push(card_box(
             widget::column::with_children(vec![
-                widget::text::heading("Plano de energia ativo").into(),
+                widget::row::with_children(vec![
+                    widget::text::heading("Plano de energia ativo").width(Length::Fill).into(),
+                    status_badge(app.snapshot.economia_energia_active, "Daemon ativo", "Daemon inativo"),
+                ])
+                .align_y(Alignment::Center)
+                .into(),
                 widget::row::with_children(buttons).spacing(spacing.space_xs).into(),
             ])
             .spacing(spacing.space_s),
         ));
     }
 
-    // Hardware & economia-energia daemon summary
-    let hw = &app.snapshot.hardware;
-    let profile_summary = if hw.is_intel && hw.is_laptop {
-        "Notebook Intel Core Ultra: Economia (sem Turbo, 55%, PL1 12W/PL2 18W, Arc 800 MHz) · Equilibrado (85%, 28/45W, Arc 1500 MHz) · Desempenho (100%, 45/65W)"
-    } else {
-        "Desktop AMD Ryzen: Economia (2,4 GHz, GPU min/1000 MHz, 60 Hz, CoolerControl silencioso) · Equilibrado (4,4 GHz, GPU 200 W, 160 Hz) · Desempenho (máximo)"
-    };
+    // Profile editor selector tabs
+    let tab_buttons: Vec<Element<'_, Message>> = PowerProfileKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let selected = editing == kind;
+            let is_live = app.power.as_ref().is_some_and(|p| p.active == kind.id());
+            let lbl = if is_live {
+                format!("{} (ativo)", kind.label())
+            } else {
+                kind.label().to_owned()
+            };
+            button::custom(widget::container(widget::text::body(lbl)).center_x(Length::Fill))
+                .padding([8, 12])
+                .width(Length::Fill)
+                .class(chip_class(selected))
+                .on_press(Message::PowerEditProfile(kind))
+                .into()
+        })
+        .collect();
+    let topo_summary = format!(
+        "{} · {} núcleos físicos / {} threads{}",
+        hw.cpu_model,
+        topo.physical_cores,
+        topo.logical_cpus,
+        if topo.is_amd_dual_ccd { " · AMD Dual-CCD" } else { "" }
+    );
     items.push(card_box(
         widget::column::with_children(vec![
             widget::row::with_children(vec![
-                widget::text::heading("Motor de economia (economia-energia)")
-                    .width(Length::Fill)
-                    .into(),
-                status_badge(app.snapshot.economia_energia_active, "Ativo", "Inativo"),
+                widget::text::heading("Configurar plano de energia").width(Length::Fill).into(),
+                action_btn("Salvar sem aplicar", Message::PowerSaveOnly, false),
             ])
             .align_y(Alignment::Center)
             .into(),
-            kv_row("Processador", hw.cpu_model.clone()),
-            kv_row(
-                "Perfil detectado",
-                if hw.is_intel && hw.is_laptop {
-                    "Notebook Intel Core Ultra (Meteor Lake)".to_owned()
-                } else {
-                    "Desktop AMD Ryzen".to_owned()
-                },
-            ),
-            widget::text::caption(profile_summary)
+            widget::text::caption(topo_summary)
                 .class(theme::Text::Custom(dimmed))
                 .into(),
+            widget::row::with_children(tab_buttons).spacing(spacing.space_xs).into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // --- 1. CPU card ---
+    let hw_max = topo.hw_max_mhz.max(5500).max(t.cpu_max_mhz);
+    let freq_label = if t.cpu_max_mhz == 0 {
+        "Máximo do hardware".to_owned()
+    } else {
+        format!("{} MHz ({:.2} GHz)", t.cpu_max_mhz, t.cpu_max_mhz as f32 / 1000.0)
+    };
+    let freq_presets: Vec<Element<'_, Message>> = [
+        (0u32, "Máx."),
+        (2000, "2.0 GHz"),
+        (2400, "2.4 GHz"),
+        (3200, "3.2 GHz"),
+        (4000, "4.0 GHz"),
+        (4400, "4.4 GHz"),
+    ]
+    .into_iter()
+    .map(|(mhz, lbl)| small_chip(lbl, t.cpu_max_mhz == mhz, Message::PowerCpuMaxMhz(mhz)))
+    .collect();
+
+    let epp_chips: Vec<Element<'_, Message>> = power_config::EPP_OPTIONS
+        .iter()
+        .map(|&(val, lbl)| small_chip(lbl, t.epp == val, Message::PowerEpp(val.to_owned())))
+        .collect();
+
+    let max_cores_cap = topo.physical_cores.max(16).max(t.max_online_cores);
+    let cores_label = if t.max_online_cores == 0 {
+        format!("Todos ({} núcleos)", topo.physical_cores.max(1))
+    } else {
+        format!("{} núcleo(s)", t.max_online_cores)
+    };
+
+    let mut cpu_rows: Vec<Element<'_, Message>> = vec![
+        widget::text::heading(format!("CPU — {}", editing.label())).into(),
+        toggle_row(
+            "Boost / Turbo da CPU (Precision Boost / Intel Turbo)",
+            t.boost,
+            Message::PowerToggleBoost,
+        ),
+        widget::row::with_children(vec![
+            widget::text::body("Teto de frequência").width(Length::Fill).into(),
+            widget::text::caption(freq_label)
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+        ])
+        .align_y(Alignment::Center)
+        .into(),
+        widget::slider(0.0..=hw_max as f32, t.cpu_max_mhz as f32, |v| {
+            let rounded = ((v / 100.0).round() as u32) * 100;
+            Message::PowerCpuMaxMhz(if rounded < 800 { 0 } else { rounded })
+        })
+        .step(100.0)
+        .width(Length::Fill)
+        .into(),
+        widget::row::with_children(freq_presets).spacing(4).into(),
+        widget::row::with_children(vec![
+            widget::text::body("Preferência de eficiência (EPP)")
+                .width(Length::Fill)
+                .into(),
+            widget::row::with_children(epp_chips).spacing(4).into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    ];
+
+    if hw.is_intel {
+        cpu_rows.push(widget::divider::horizontal::default().into());
+        cpu_rows.push(
+            widget::row::with_children(vec![
+                widget::text::caption(format!("Intel max_perf_pct: {}%", t.intel_max_perf_pct))
+                    .width(Length::Fixed(190.0))
+                    .into(),
+                widget::slider(10.0..=100.0, t.intel_max_perf_pct as f32, |v| {
+                    Message::PowerIntelMaxPerf(v.round() as u32)
+                })
+                .step(5.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+        let pl1_txt = if t.rapl_pl1_w == 0 {
+            "RAPL PL1: Padrão HW".to_owned()
+        } else {
+            format!("RAPL PL1 (sustentado): {} W", t.rapl_pl1_w)
+        };
+        cpu_rows.push(
+            widget::row::with_children(vec![
+                widget::text::caption(pl1_txt).width(Length::Fixed(190.0)).into(),
+                widget::slider(0.0..=100.0, t.rapl_pl1_w.min(100) as f32, |v| {
+                    Message::PowerRaplPl1(v.round() as u32)
+                })
+                .step(1.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+        let pl2_txt = if t.rapl_pl2_w == 0 {
+            "RAPL PL2: Padrão HW".to_owned()
+        } else {
+            format!("RAPL PL2 (pico curto): {} W", t.rapl_pl2_w)
+        };
+        cpu_rows.push(
+            widget::row::with_children(vec![
+                widget::text::caption(pl2_txt).width(Length::Fixed(190.0)).into(),
+                widget::slider(0.0..=120.0, t.rapl_pl2_w.min(120) as f32, |v| {
+                    Message::PowerRaplPl2(v.round() as u32)
+                })
+                .step(1.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+    }
+
+    cpu_rows.push(widget::divider::horizontal::default().into());
+    cpu_rows.push(toggle_row(
+        if topo.is_amd_dual_ccd {
+            "Desativar CCD1 (AMD dual-CCD — detectado)"
+        } else {
+            "Desativar CCD1 (AMD dual-CCD)"
+        },
+        t.disable_ccd1,
+        Message::PowerToggleDisableCcd1,
+    ));
+    cpu_rows.push(
+        widget::row::with_children(vec![
+            widget::text::caption(format!("Limite de núcleos online: {cores_label}"))
+                .width(Length::Fixed(230.0))
+                .into(),
+            widget::slider(0.0..=max_cores_cap as f32, t.max_online_cores as f32, |v| {
+                Message::PowerMaxOnlineCores(v.round() as u32)
+            })
+            .step(1.0)
+            .width(Length::Fill)
+            .into(),
+        ])
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into(),
+    );
+    items.push(card_box(widget::column::with_children(cpu_rows).spacing(spacing.space_xs)));
+
+    // --- 2. GPU card (NVIDIA dedicated + Intel Arc iGPU) ---
+    let mut gpu_rows: Vec<Element<'_, Message>> = vec![
+        widget::text::heading(format!("GPU — {}", editing.label())).into(),
+    ];
+    if hw.has_nvidia || !hw.is_intel {
+        let pl_lbl = if t.nvidia_power_limit_w == 0 {
+            "NVIDIA Power Limit: Padrão/Mín.".to_owned()
+        } else {
+            format!("NVIDIA Power Limit: {} W", t.nvidia_power_limit_w)
+        };
+        let gpu_clk_lbl = if t.nvidia_gpu_clock_mhz == 0 {
+            "Travar clock GPU: Livre".to_owned()
+        } else {
+            format!("Travar clock GPU: {} MHz", t.nvidia_gpu_clock_mhz)
+        };
+        let mem_clk_lbl = if t.nvidia_mem_clock_mhz == 0 {
+            "Travar clock Memória: Livre".to_owned()
+        } else {
+            format!("Travar clock Memória: {} MHz", t.nvidia_mem_clock_mhz)
+        };
+        gpu_rows.push(
+            widget::row::with_children(vec![
+                widget::text::caption(pl_lbl).width(Length::Fixed(220.0)).into(),
+                widget::slider(0.0..=450.0, t.nvidia_power_limit_w.min(450) as f32, |v| {
+                    let w = ((v / 5.0).round() as u32) * 5;
+                    Message::PowerNvidiaPowerLimit(if w < 50 { 0 } else { w })
+                })
+                .step(5.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+        gpu_rows.push(
+            widget::row::with_children(vec![
+                widget::text::caption(gpu_clk_lbl).width(Length::Fixed(220.0)).into(),
+                widget::slider(0.0..=3000.0, t.nvidia_gpu_clock_mhz.min(3000) as f32, |v| {
+                    let m = ((v / 50.0).round() as u32) * 50;
+                    Message::PowerNvidiaGpuClock(if m < 300 { 0 } else { m })
+                })
+                .step(50.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+        gpu_rows.push(
+            widget::row::with_children(vec![
+                widget::text::caption(mem_clk_lbl).width(Length::Fixed(220.0)).into(),
+                widget::slider(0.0..=12000.0, t.nvidia_mem_clock_mhz.min(12000) as f32, |v| {
+                    let m = ((v / 100.0).round() as u32) * 100;
+                    Message::PowerNvidiaMemClock(if m < 400 { 0 } else { m })
+                })
+                .step(100.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+        gpu_rows.push(toggle_row(
+            "NVIDIA Persistence Mode (nvidia-smi -pm)",
+            t.nvidia_persistence,
+            Message::PowerToggleNvidiaPersistence,
+        ));
+    }
+    if hw.is_intel {
+        if hw.has_nvidia {
+            gpu_rows.push(widget::divider::horizontal::default().into());
+        }
+        let arc_lbl = if t.intel_igpu_max_mhz == 0 {
+            "iGPU Intel Arc máx.: Padrão HW".to_owned()
+        } else {
+            format!("iGPU Intel Arc máx.: {} MHz", t.intel_igpu_max_mhz)
+        };
+        gpu_rows.push(
+            widget::row::with_children(vec![
+                widget::text::caption(arc_lbl).width(Length::Fixed(220.0)).into(),
+                widget::slider(0.0..=2400.0, t.intel_igpu_max_mhz.min(2400) as f32, |v| {
+                    let m = ((v / 50.0).round() as u32) * 50;
+                    Message::PowerIntelIgpuMaxMhz(if m < 300 { 0 } else { m })
+                })
+                .step(50.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+    }
+    items.push(card_box(widget::column::with_children(gpu_rows).spacing(spacing.space_xs)));
+
+    // --- 3. Screen, Login Lock & Suspend per profile ---
+    let idle_chips = |current: u32, presets: &[u32], make: fn(u32) -> Message| {
+        widget::row::with_children(
+            presets
+                .iter()
+                .map(|&m| {
+                    let lbl = if m == 0 {
+                        "Nunca".to_owned()
+                    } else if m < 60 {
+                        format!("{m}m")
+                    } else {
+                        format!("{}h", m / 60)
+                    };
+                    button::custom(widget::text::caption(lbl))
+                        .padding([4, 8])
+                        .class(chip_class(current == m))
+                        .on_press(make(m))
+                        .into()
+                })
+                .collect::<Vec<_>>(),
+        )
+        .spacing(4)
+    };
+    let hz_chips = widget::row::with_children(
+        [
+            ("", "Manter"),
+            ("59.987", "60 Hz"),
+            ("120", "120 Hz"),
+            ("144", "144 Hz"),
+            ("159.962", "160 Hz"),
+        ]
+        .into_iter()
+        .map(|(val, lbl)| small_chip(lbl, t.display_hz == val, Message::PowerDisplayHz(val.to_owned())))
+        .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+
+    let idle_rows: Vec<Element<'_, Message>> = vec![
+        widget::text::heading(format!("Tela & Tela de Login — {}", editing.label())).into(),
+        widget::text::caption(
+            "Estes tempos são aplicados automaticamente no COSMIC Idle ao trocar para este plano de energia.",
+        )
+        .class(theme::Text::Custom(dimmed))
+        .into(),
+        widget::row::with_children(vec![
+            widget::text::body(format!(
+                "Desligar vídeo ({})",
+                ProfileTuning::format_mins(t.screen_off_mins)
+            ))
+            .width(Length::Fill)
+            .into(),
+            idle_chips(
+                t.screen_off_mins,
+                &[0, 2, 5, 10, 15, 30, 60],
+                Message::PowerScreenOffMins,
+            )
+            .into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+        widget::row::with_children(vec![
+            widget::text::body(format!(
+                "Pedir senha / Tela de Login ({})",
+                ProfileTuning::format_mins(t.lock_mins)
+            ))
+            .width(Length::Fill)
+            .into(),
+            idle_chips(
+                t.lock_mins,
+                &[0, 1, 3, 5, 10, 15, 30, 60],
+                Message::PowerLockMins,
+            )
+            .into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+        widget::row::with_children(vec![
+            widget::text::body(format!(
+                "Suspender na tomada ({})",
+                ProfileTuning::format_mins(t.suspend_ac_mins)
+            ))
+            .width(Length::Fill)
+            .into(),
+            idle_chips(
+                t.suspend_ac_mins,
+                &[0, 15, 30, 45, 60, 120],
+                Message::PowerSuspendAcMins,
+            )
+            .into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+        widget::row::with_children(vec![
+            widget::text::body(format!(
+                "Suspender na bateria ({})",
+                ProfileTuning::format_mins(t.suspend_battery_mins)
+            ))
+            .width(Length::Fill)
+            .into(),
+            idle_chips(
+                t.suspend_battery_mins,
+                &[0, 5, 10, 15, 30, 60],
+                Message::PowerSuspendBatteryMins,
+            )
+            .into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+        widget::divider::horizontal::default().into(),
+        widget::row::with_children(vec![
+            widget::text::body("Taxa de atualização (Hz)")
+                .width(Length::Fill)
+                .into(),
+            hz_chips.into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+        widget::row::with_children(vec![
+            widget::text::caption("Valor exato (vazio = não alterar)")
+                .class(theme::Text::Custom(dimmed))
+                .width(Length::Fill)
+                .into(),
+            widget::text_input("Ex: 59.987 ou 159.962".to_owned(), t.display_hz.clone())
+                .on_input(Message::PowerDisplayHz)
+                .width(Length::Fixed(180.0))
+                .into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    ];
+    items.push(card_box(widget::column::with_children(idle_rows).spacing(spacing.space_xs)));
+
+    // --- 4. Platform power controls ---
+    let aspm_chips = widget::row::with_children(
+        power_config::ASPM_OPTIONS
+            .iter()
+            .map(|&(val, lbl)| {
+                small_chip(lbl, t.pcie_aspm == val, Message::PowerPcieAspm(val.to_owned()))
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    let sata_chips = widget::row::with_children(
+        power_config::SATA_ALPM_OPTIONS
+            .iter()
+            .map(|&(val, lbl)| {
+                small_chip(lbl, t.sata_alpm == val, Message::PowerSataAlpm(val.to_owned()))
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading(format!("Plataforma — {}", editing.label())).into(),
+            widget::row::with_children(vec![
+                widget::text::body("PCIe ASPM").width(Length::Fill).into(),
+                aspm_chips.into(),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("SATA ALPM").width(Length::Fill).into(),
+                sata_chips.into(),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            toggle_row(
+                "Economia de energia do áudio (snd_hda_intel power_save)",
+                t.audio_power_save,
+                Message::PowerToggleAudioSave,
+            ),
+            toggle_row(
+                "Economia de energia do Wi-Fi (iw power_save)",
+                t.wifi_power_save,
+                Message::PowerToggleWifiSave,
+            ),
+            kv_row(
+                "Arquivo de perfis",
+                power_config::PowerProfilesConfig::config_path()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         ])
         .spacing(spacing.space_xs),
     ));
@@ -676,55 +1156,205 @@ fn monitor_view(app: &ControlPanel) -> Element<'_, Message> {
     );
     items.push(card_box(widget::column::with_children(bar_rows).spacing(spacing.space_xs)));
 
-    // 2. Cards order, visibility, and folding in left popup
+    // 2. Cards order (drag-and-drop with 9-dot handle) & 4 display modes
+    let dragging = app.dragging_monitor_card;
     let mut panel_rows: Vec<Element<'_, Message>> = vec![
-        widget::text::heading("Cartões do painel da esquerda").into(),
-        widget::text::caption("Reordene, recolha por padrão ou oculte cada cartão do Monitor.")
-            .class(theme::Text::Custom(dimmed))
-            .into(),
+        widget::text::heading(
+            "Cartões do painel da esquerda (arraste pelos 9 pontos para reordenar)",
+        )
+        .into(),
+        widget::text::caption(
+            "Escolha o modo de visualização de cada cartão: Expandido (completo), Compacto (resumo com barra), Reduzido (linha inline) ou Oculto.",
+        )
+        .class(theme::Text::Custom(dimmed))
+        .into(),
     ];
-    let last = app.monitor_settings.order.len().saturating_sub(1);
-    for (idx, panel) in app.monitor_settings.order.iter().copied().enumerate() {
-        let shown = !app.monitor_settings.hidden.contains(&panel);
-        let folded = app.monitor_settings.is_folded(panel);
-        let up_btn = button::icon(icon("go-up-symbolic"))
-            .icon_size(14)
-            .padding(4)
-            .class(theme::Button::Text)
-            .on_press_maybe((idx > 0).then_some(Message::MonitorShiftPanel(panel, false)));
-        let down_btn = button::icon(icon("go-down-symbolic"))
-            .icon_size(14)
-            .padding(4)
-            .class(theme::Button::Text)
-            .on_press_maybe((idx < last).then_some(Message::MonitorShiftPanel(panel, true)));
-        panel_rows.push(
+    for panel in app.monitor_settings.order.iter().copied() {
+        let current = app.monitor_settings.card_mode(panel);
+        let active_drag = dragging == Some(panel);
+        let grip = widget::mouse_area(
+            widget::container(widget::icon::icon(icon("view-app-grid-symbolic")).size(14))
+                .padding([4, 4]),
+        )
+        .on_press(Message::MonitorDragStart(panel))
+        .interaction(if active_drag {
+            iced::mouse::Interaction::Grabbing
+        } else {
+            iced::mouse::Interaction::Grab
+        });
+        let mode_chips = widget::row::with_children(
+            MonitorCardMode::ALL
+                .into_iter()
+                .map(|mode| {
+                    small_chip(
+                        mode.name(),
+                        current == mode,
+                        Message::MonitorCardMode(panel, mode),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .spacing(4);
+        let row = widget::row::with_children(vec![
+            grip.into(),
+            widget::text::body(panel.name()).width(Length::Fill).into(),
+            mode_chips.into(),
+        ])
+        .spacing(10)
+        .align_y(Alignment::Center);
+        let styled: Element<'_, Message> = if active_drag {
+            widget::container(row)
+                .padding([4, 6])
+                .width(Length::Fill)
+                .class(theme::Container::custom(|theme| {
+                    let c = card(theme.cosmic());
+                    widget::container::Style {
+                        background: Some(Background::Color(c.hover.into())),
+                        border: iced::Border {
+                            radius: theme.cosmic().corner_radii.radius_s.into(),
+                            width: 1.0,
+                            color: theme.cosmic().accent_color().into(),
+                        },
+                        ..Default::default()
+                    }
+                }))
+                .into()
+        } else {
+            widget::container(row).padding([4, 6]).width(Length::Fill).into()
+        };
+        let mut area = widget::mouse_area(styled).on_enter(Message::MonitorDragOver(panel));
+        if dragging.is_some() {
+            area = area.interaction(iced::mouse::Interaction::Grabbing);
+        }
+        panel_rows.push(area.into());
+    }
+    items.push(card_box(widget::column::with_children(panel_rows).spacing(4)));
+
+    // 3. Individual component refresh intervals
+    let mut comp_rows: Vec<Element<'_, Message>> = vec![
+        widget::text::heading("Tempos de atualização por componente").into(),
+        widget::text::caption(
+            "Controle individualmente o intervalo de coleta de cada sensor quando o painel está aberto.",
+        )
+        .class(theme::Text::Custom(dimmed))
+        .into(),
+    ];
+    for comp in MonitorPollComponent::ALL {
+        let current = app.monitor_settings.component_poll(comp);
+        let chips: Vec<Element<'_, Message>> = if comp == MonitorPollComponent::Weather {
+            WEATHER_MINS_OPTIONS
+                .into_iter()
+                .map(|mins| {
+                    button::custom(widget::text::caption(format!("{mins} min")))
+                        .padding([4, 9])
+                        .class(chip_class(current == mins))
+                        .on_press(Message::MonitorComponentPoll(comp, mins))
+                        .into()
+                })
+                .collect()
+        } else {
+            POLL_SECS_OPTIONS
+                .into_iter()
+                .map(|secs| {
+                    button::custom(widget::text::caption(format!("{secs} s")))
+                        .padding([4, 9])
+                        .class(chip_class(current == secs))
+                        .on_press(Message::MonitorComponentPoll(comp, secs))
+                        .into()
+                })
+                .collect()
+        };
+        comp_rows.push(
             widget::row::with_children(vec![
-                widget::text::body(panel.name()).width(Length::Fill).into(),
-                small_chip(
-                    if folded { "Recolhido" } else { "Expandido" },
-                    !folded,
-                    Message::MonitorToggleFold(panel),
-                ),
-                up_btn.into(),
-                down_btn.into(),
-                widget::toggler(shown)
-                    .on_toggle(move |_| Message::MonitorToggleHidden(panel))
-                    .into(),
+                widget::text::body(comp.name()).width(Length::Fill).into(),
+                widget::row::with_children(chips).spacing(4).into(),
             ])
-            .spacing(8)
+            .spacing(10)
             .align_y(Alignment::Center)
             .into(),
         );
     }
-    items.push(card_box(widget::column::with_children(panel_rows).spacing(6)));
+    items.push(card_box(widget::column::with_children(comp_rows).spacing(spacing.space_xs)));
 
-    // 3. Weather location & display
+    // 4. Processes count & sort column
+    let count_chips = widget::row::with_children(
+        PROCS_COUNT_OPTIONS
+            .into_iter()
+            .map(|n| {
+                button::custom(widget::text::caption(n.to_string()))
+                    .padding([5, 10])
+                    .class(chip_class(app.monitor_settings.procs_count == n))
+                    .on_press(Message::MonitorProcsCount(n))
+                    .into()
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    let sort_chips = widget::row::with_children(
+        MonitorProcSort::ALL
+            .into_iter()
+            .map(|sort| {
+                let active = app.monitor_settings.proc_sort == sort;
+                let lbl = if active {
+                    let arrow = if app.monitor_settings.proc_sort_asc { "▲" } else { "▼" };
+                    format!("{} {arrow}", sort.name())
+                } else {
+                    sort.name().to_owned()
+                };
+                button::custom(widget::text::caption(lbl))
+                    .padding([5, 10])
+                    .class(chip_class(active))
+                    .on_press(Message::MonitorProcSort(sort))
+                    .into()
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Processos").into(),
+            widget::row::with_children(vec![
+                widget::text::body("Quantidade de processos exibidos")
+                    .width(Length::Fill)
+                    .into(),
+                count_chips.into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Ordenar tabela por (clique novamente para inverter)")
+                    .width(Length::Fill)
+                    .into(),
+                sort_chips.into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 5. Weather location & card display mode
     let place = &app.weather_place;
     let current_place = if place.detail.is_empty() {
         format!("{} ({:.3}, {:.3})", place.name, place.lat, place.lon)
     } else {
         format!("{} — {} ({:.3}, {:.3})", place.name, place.detail, place.lat, place.lon)
     };
+    let weather_mode_chips = widget::row::with_children(
+        MonitorCardMode::ALL
+            .into_iter()
+            .map(|mode| {
+                small_chip(
+                    mode.name(),
+                    app.monitor_settings.weather_mode() == mode,
+                    Message::MonitorWeatherMode(mode),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
     let mut weather_rows: Vec<Element<'_, Message>> = vec![
         widget::text::heading("Clima").into(),
         kv_row("Local configurado", current_place),
@@ -774,11 +1404,17 @@ fn monitor_view(app: &ControlPanel) -> Element<'_, Message> {
             }
         }
     }
-    weather_rows.push(toggle_row(
-        "Expandir detalhes e previsão de 7 dias por padrão",
-        app.monitor_settings.weather_expanded,
-        Message::MonitorToggleWeatherExpanded,
-    ));
+    weather_rows.push(
+        widget::row::with_children(vec![
+            widget::text::body("Modo do cartão de clima")
+                .width(Length::Fill)
+                .into(),
+            weather_mode_chips.into(),
+        ])
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into(),
+    );
     items.push(card_box(widget::column::with_children(weather_rows).spacing(spacing.space_xs)));
 
     // 4. Energy tariff & base rest watts
@@ -991,6 +1627,470 @@ fn central_view(app: &ControlPanel) -> Element<'_, Message> {
                 Message::CentralResetTiles,
                 false,
             )])
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    widget::column::with_children(items).spacing(spacing.space_m).into()
+}
+
+fn color_swatch<'a>(hex: &str, fallback_accent: bool) -> Element<'a, Message> {
+    let parsed = parse_hex_color(hex);
+    widget::container(widget::space::horizontal())
+        .width(Length::Fixed(24.0))
+        .height(Length::Fixed(24.0))
+        .class(theme::Container::custom(move |theme| {
+            let color = match parsed {
+                Some([r, g, b]) => Color::from_rgb(r, g, b),
+                None if fallback_accent => theme.cosmic().accent_color().into(),
+                None => card(theme.cosmic()).base.into(),
+            };
+            widget::container::Style {
+                background: Some(Background::Color(color)),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    width: 1.0,
+                    color: theme.cosmic().background(theme.transparent).divider.into(),
+                },
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
+fn notifications_view(app: &ControlPanel) -> Element<'_, Message> {
+    let spacing = theme::spacing();
+    let cfg = &app.notif_config;
+
+    let mut items: Vec<Element<'_, Message>> = vec![
+        widget::row::with_children(vec![
+            widget::text::title3("Notificações").width(Length::Fill).into(),
+            action_btn("Restaurar padrão", Message::NotifReset, false),
+            action_btn("Enviar notificação de teste", Message::NotifSendTest, true),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    ];
+
+    // 1. Duration, Format & Position
+    let timeout_chips = widget::row::with_children(
+        TIMEOUT_OPTIONS
+            .into_iter()
+            .map(|secs| {
+                let lbl = if secs == 0 {
+                    "Persistente".to_owned()
+                } else {
+                    format!("{secs}s")
+                };
+                button::custom(widget::text::caption(lbl))
+                    .padding([5, 10])
+                    .class(chip_class(cfg.timeout_secs == secs))
+                    .on_press(Message::NotifTimeout(secs))
+                    .into()
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+
+    let format_chips = widget::row::with_children(
+        NotifFormat::ALL
+            .into_iter()
+            .map(|fmt| small_chip(fmt.label(), cfg.format == fmt, Message::NotifFormat(fmt)))
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+
+    let position_chips = widget::row::with_children(
+        NotifPosition::ALL
+            .into_iter()
+            .map(|pos| small_chip(pos.label(), cfg.position == pos, Message::NotifPosition(pos)))
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Comportamento & Posição").into(),
+            widget::row::with_children(vec![
+                widget::text::body("Tempo exibido").width(Length::Fill).into(),
+                timeout_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Formato dos cartões").width(Length::Fill).into(),
+                format_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Posição na tela").width(Length::Fill).into(),
+                position_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "A posição e o tempo limite são sincronizados com o daemon de notificações do COSMIC e aplicados imediatamente na Central.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 2. Transparency, Corner radius, Body lines & Content toggles
+    let lines_chips = widget::row::with_children(
+        (notif_cfg::MIN_BODY_LINES..=notif_cfg::MAX_BODY_LINES)
+            .map(|n| {
+                button::custom(widget::text::caption(n.to_string()))
+                    .padding([5, 10])
+                    .class(chip_class(cfg.max_body_lines == n))
+                    .on_press(Message::NotifMaxBodyLines(n))
+                    .into()
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Aparência & Conteúdo").into(),
+            widget::row::with_children(vec![
+                widget::text::caption(format!("Transparência (opacidade): {:.0}%", cfg.opacity * 100.0))
+                    .width(Length::Fixed(210.0))
+                    .into(),
+                widget::slider(40.0..=100.0, (cfg.opacity * 100.0).round(), |v| {
+                    Message::NotifOpacity(v / 100.0)
+                })
+                .step(1.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::caption(format!("Raio da borda: {:.0} px", cfg.corner_radius))
+                    .width(Length::Fixed(210.0))
+                    .into(),
+                widget::slider(
+                    notif_cfg::MIN_CORNER_RADIUS..=notif_cfg::MAX_CORNER_RADIUS,
+                    cfg.corner_radius,
+                    Message::NotifCornerRadius,
+                )
+                .step(1.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Linhas máximas do corpo")
+                    .width(Length::Fill)
+                    .into(),
+                lines_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::divider::horizontal::default().into(),
+            toggle_row(
+                "Mostrar corpo da mensagem",
+                cfg.show_body,
+                Message::NotifToggleShowBody,
+            ),
+            toggle_row(
+                "Mostrar botões de ação",
+                cfg.show_actions,
+                Message::NotifToggleShowActions,
+            ),
+            toggle_row(
+                "Agrupar notificações por aplicativo",
+                cfg.group_by_app,
+                Message::NotifToggleGroupByApp,
+            ),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 3. Colors (Accent + Background: presets + hex + system theme)
+    let accent_presets = [
+        ("", "Tema do sistema"),
+        ("#3584E4", "Azul"),
+        ("#2EC27E", "Verde"),
+        ("#00BCD4", "Ciano"),
+        ("#FF7800", "Laranja"),
+        ("#9141AC", "Roxo"),
+        ("#E01B24", "Vermelho"),
+    ];
+    let bg_presets = [
+        ("", "Tema do sistema"),
+        ("#111318", "Preto"),
+        ("#1E2028", "Grafite"),
+        ("#141C2B", "Azul noite"),
+        ("#221C2A", "Roxo escuro"),
+        ("#F3F4F6", "Claro"),
+    ];
+    let accent_chips = widget::row::with_children(
+        accent_presets
+            .into_iter()
+            .map(|(hex, lbl)| {
+                small_chip(
+                    lbl,
+                    cfg.accent_hex.eq_ignore_ascii_case(hex),
+                    Message::NotifAccentHex(hex.to_owned()),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    let bg_chips = widget::row::with_children(
+        bg_presets
+            .into_iter()
+            .map(|(hex, lbl)| {
+                small_chip(
+                    lbl,
+                    cfg.bg_hex.eq_ignore_ascii_case(hex),
+                    Message::NotifBgHex(hex.to_owned()),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Cores personalizadas").into(),
+            widget::text::body("Cor de destaque").into(),
+            accent_chips.into(),
+            widget::row::with_children(vec![
+                color_swatch(&cfg.accent_hex, true),
+                widget::text_input(
+                    "Vazio = tema do sistema, ou #RRGGBB".to_owned(),
+                    cfg.accent_hex.clone(),
+                )
+                .on_input(Message::NotifAccentHex)
+                .width(Length::Fill)
+                .into(),
+                small_chip(
+                    "Usar tema do sistema",
+                    cfg.accent_hex.is_empty(),
+                    Message::NotifAccentHex(String::new()),
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::divider::horizontal::default().into(),
+            widget::text::body("Cor de fundo dos cartões").into(),
+            bg_chips.into(),
+            widget::row::with_children(vec![
+                color_swatch(&cfg.bg_hex, false),
+                widget::text_input(
+                    "Vazio = tema do sistema, ou #RRGGBB".to_owned(),
+                    cfg.bg_hex.clone(),
+                )
+                .on_input(Message::NotifBgHex)
+                .width(Length::Fill)
+                .into(),
+                small_chip(
+                    "Usar tema do sistema",
+                    cfg.bg_hex.is_empty(),
+                    Message::NotifBgHex(String::new()),
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    widget::column::with_children(items).spacing(spacing.space_m).into()
+}
+
+fn devices_osd_view(app: &ControlPanel) -> Element<'_, Message> {
+    let spacing = theme::spacing();
+    let cfg = &app.osd_config;
+    let service_active = app
+        .snapshot
+        .units
+        .iter()
+        .find(|u| u.unit == "logi-osd.service")
+        .is_some_and(|u| u.active);
+    let dur_ms = cfg.duration.as_millis() as u64;
+    let interval_mins = (cfg.legacy_battery_interval.as_secs() / 60).max(1);
+
+    let mut items: Vec<Element<'_, Message>> = vec![
+        widget::row::with_children(vec![
+            widget::text::title3("OSD de Dispositivos").width(Length::Fill).into(),
+            action_btn("Testar OSD", Message::OsdRunDemo, false),
+            action_btn("Salvar e reiniciar", Message::OsdSaveAndRestart, true),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    ];
+
+    // Service status card
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Serviço de OSD (entrada/saída e periféricos)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(service_active, "Ativo", "Inativo"),
+                action_btn("Reiniciar serviço", Message::RestartUserUnit("logi-osd.service"), false),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "Exibe avisos instantâneos para Caps/Num/Scroll Lock, troca de host/DPI, bateria de periféricos e atalhos de teclado/mouse.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            kv_row("Unidade systemd", "logi-osd.service".to_owned()),
+            kv_row(
+                "Arquivo de configuração",
+                osd_config::config_path().to_string_lossy().into_owned(),
+            ),
+            widget::row::with_children(vec![
+                widget::text::caption("Posição e estilo visual das pílulas seguem a aba Notificações.")
+                    .class(theme::Text::Custom(dimmed))
+                    .width(Length::Fill)
+                    .into(),
+                small_chip(
+                    "Abrir Notificações",
+                    false,
+                    Message::SelectSection(Section::Notifications),
+                ),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // OSD Duration & Battery alerts
+    let dur_presets = widget::row::with_children(
+        [(800u64, "0.8s"), (1500, "1.5s"), (2500, "2.5s"), (4000, "4s"), (6000, "6s")]
+            .into_iter()
+            .map(|(ms, lbl)| small_chip(lbl, dur_ms == ms, Message::OsdDurationMs(ms)))
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    let interval_presets = widget::row::with_children(
+        [(5u64, "5 min"), (15, "15 min"), (30, "30 min"), (60, "1 h")]
+            .into_iter()
+            .map(|(m, lbl)| small_chip(lbl, interval_mins == m, Message::OsdBatteryIntervalMins(m)))
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Duração & Alertas de Bateria").into(),
+            widget::row::with_children(vec![
+                widget::text::caption(format!("Duração da pílula OSD: {dur_ms} ms"))
+                    .width(Length::Fixed(220.0))
+                    .into(),
+                widget::slider(200.0..=10000.0, dur_ms.min(10000) as f32, |v| {
+                    Message::OsdDurationMs(((v / 100.0).round() as u64) * 100)
+                })
+                .step(100.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::caption("Atalhos de duração")
+                    .class(theme::Text::Custom(dimmed))
+                    .width(Length::Fill)
+                    .into(),
+                dur_presets.into(),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::divider::horizontal::default().into(),
+            widget::row::with_children(vec![
+                widget::text::caption(format!("Alerta de bateria baixa: {}%", cfg.battery_low))
+                    .width(Length::Fixed(220.0))
+                    .into(),
+                widget::slider(5.0..=50.0, cfg.battery_low.clamp(5, 50) as f32, |v| {
+                    Message::OsdBatteryLow(v.round() as u8)
+                })
+                .step(1.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::caption(format!("Alerta de bateria crítica: {}%", cfg.battery_critical))
+                    .width(Length::Fixed(220.0))
+                    .into(),
+                widget::slider(
+                    1.0..=cfg.battery_low.saturating_sub(1).max(1) as f32,
+                    cfg.battery_critical as f32,
+                    |v| Message::OsdBatteryCritical(v.round() as u8),
+                )
+                .step(1.0)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body(format!(
+                    "Intervalo de verificação de bateria ({interval_mins} min)"
+                ))
+                .width(Length::Fill)
+                .into(),
+                interval_presets.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // Emoji key command & Save/Reset
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Tecla de Emoji & Ações").into(),
+            widget::column::with_children(vec![
+                widget::text::caption(
+                    "Comando ao pressionar a tecla Emoji de periféricos suportados (vazio = padrão)",
+                )
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+                widget::text_input(
+                    "Ex: smile ou cosmic-launcher".to_owned(),
+                    cfg.emoji_command.clone().unwrap_or_default(),
+                )
+                .on_input(Message::OsdEmojiCommand)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(4)
+            .into(),
+            widget::row::with_children(vec![
+                action_btn("Salvar rascunho", Message::OsdSaveOnly, false),
+                action_btn("Restaurar padrão", Message::OsdReset, false),
+            ])
+            .spacing(8)
             .into(),
         ])
         .spacing(spacing.space_xs),
@@ -1515,6 +2615,51 @@ fn login_view(app: &ControlPanel) -> Element<'_, Message> {
             ),
         ])
         .spacing(spacing.space_xs),
+    ));
+
+    // Per-power-profile screen-off & lock screen timeouts summary card
+    let mut idle_summary_rows: Vec<Element<'_, Message>> = vec![
+        widget::row::with_children(vec![
+            widget::text::heading("Tempo até Tela de Login & Desligar vídeo (por plano)")
+                .width(Length::Fill)
+                .into(),
+            action_btn(
+                "Configurar em Energia & Bateria",
+                Message::SelectSection(Section::Power),
+                false,
+            ),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+        widget::text::caption(
+            "Os tempos até desligar o vídeo e pedir senha são ajustados individualmente em cada plano de energia.",
+        )
+        .class(theme::Text::Custom(dimmed))
+        .into(),
+    ];
+    for kind in PowerProfileKind::ALL {
+        let tuning = app.power_config.get(kind);
+        let summary = if app.snapshot.hardware.is_laptop {
+            format!(
+                "Vídeo: {} · Login/senha: {} · Susp. AC: {} · Bat: {}",
+                ProfileTuning::format_mins(tuning.screen_off_mins),
+                ProfileTuning::format_mins(tuning.lock_mins),
+                ProfileTuning::format_mins(tuning.suspend_ac_mins),
+                ProfileTuning::format_mins(tuning.suspend_battery_mins),
+            )
+        } else {
+            format!(
+                "Desligar vídeo: {} · Pedir senha: {} · Suspender: {}",
+                ProfileTuning::format_mins(tuning.screen_off_mins),
+                ProfileTuning::format_mins(tuning.lock_mins),
+                ProfileTuning::format_mins(tuning.suspend_ac_mins),
+            )
+        };
+        idle_summary_rows.push(kv_row(kind.label(), summary));
+    }
+    items.push(card_box(
+        widget::column::with_children(idle_summary_rows).spacing(spacing.space_xs),
     ));
 
     widget::column::with_children(items).spacing(spacing.space_m).into()

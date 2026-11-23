@@ -559,7 +559,7 @@ pub async fn load_snapshot() -> SystemSnapshot {
         ("central-clipboard.service", "Histórico da área de transferência", false),
         ("central-notifications.service", "Histórico de notificações", false),
         ("cosmic-switcher.service", "Alternador Alt+Tab / Win+Tab isolado", false),
-        ("logi-osd.service", "OSD de dispositivos Logitech", false),
+        ("logi-osd.service", "OSD de Dispositivos (entrada/saída e periféricos)", false),
         ("cosmic-taskbar-update.timer", "Atualizador automático por boot", false),
         ("economia-energia.service", "Daemon de economia de energia", true),
         ("power-profiles-daemon.service", "Power Profiles Daemon", true),

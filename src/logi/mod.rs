@@ -1,6 +1,6 @@
 mod app;
 mod battery;
-mod config;
+pub(crate) mod config;
 mod devices;
 mod emoji;
 mod hidpp;
@@ -36,7 +36,8 @@ type BoxError = Box<dyn std::error::Error>;
 #[derive(Clone, Copy, PartialEq)]
 enum RunMode { Daemon, Demo }
 
-/// The Logitech devices' service: `args` are its own (`--demo`, `--listar-nos` or none).
+/// Serviço do OSD de Dispositivos (entrada, saída e periféricos; compatível com `logi-osd`):
+/// `args` são suas opções (`--demo`, `--listar-nos` ou nenhuma).
 pub fn run_service(args: &[String]) -> ExitCode {
     let result = match args.first().map(String::as_str) {
         None => run(RunMode::Daemon),

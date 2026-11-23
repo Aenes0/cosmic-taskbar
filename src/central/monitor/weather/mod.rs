@@ -219,7 +219,11 @@ impl Weather {
     }
 
     pub fn is_stale(&self, now: i64) -> bool {
-        now - self.fetched_at >= STALE_AFTER_SECS
+        self.is_stale_after(now, STALE_AFTER_SECS)
+    }
+
+    pub fn is_stale_after(&self, now: i64, max_age_secs: i64) -> bool {
+        now - self.fetched_at >= max_age_secs.max(60)
     }
 
     /// The hours from the one under way.

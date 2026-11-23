@@ -1,5 +1,5 @@
 [Unit]
-Description=logi-osd: avisos na tela para dispositivos Logitech
+Description=OSD de Dispositivos (logi-osd): avisos na tela para entrada, saída e periféricos
 PartOf=graphical-session.target
 After=graphical-session.target
 ConditionEnvironment=WAYLAND_DISPLAY

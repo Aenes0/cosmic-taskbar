@@ -26,7 +26,7 @@ use crate::central::{
     tiles::{Fit, Kind},
     workspaces,
     media::{self, Control, Media},
-    notifications::{self, Notification},
+    notifications::{self, Notification, config::NotifConfig},
     services::{
         self, Battery, Bluetooth, DARK_MODE, DO_NOT_DISTURB, Joined, Network, PowerProfiles,
         SHOW_PERCENTAGE,
@@ -374,6 +374,7 @@ pub struct App {
     pub(crate) seeking: Option<f32>,
     /// Newest first.
     pub(crate) notifications: Vec<Notification>,
+    pub(crate) notif_config: NotifConfig,
     pub(crate) brightness: Option<(i32, i32)>,
     pub(crate) power: Option<PowerProfiles>,
     pub(crate) do_not_disturb: bool,
@@ -1519,6 +1520,45 @@ fn spawn(program: &str, args: &[&str]) {
     crate::central::host::spawn(program, args);
 }
 
+fn resolve_self_exe() -> std::path::PathBuf {
+    if let Some(arg0) = std::env::args_os().next() {
+        let p = std::path::PathBuf::from(&arg0);
+        if p.is_absolute() && p.exists() {
+            return p;
+        }
+    }
+    std::env::current_exe()
+        .map(|exe| {
+            let path = exe.to_string_lossy();
+            std::path::PathBuf::from(path.strip_suffix(" (deleted)").unwrap_or(&path))
+        })
+        .unwrap_or_else(|_| std::path::PathBuf::from("cosmic-taskbar"))
+}
+
+fn spawn_control_panel() {
+    let exe = resolve_self_exe();
+    let mut command = std::process::Command::new(&exe);
+    command.arg("control-panel");
+    command.env_remove("ICED_BACKEND");
+    command.env_remove("TOKIO_WORKER_THREADS");
+    for (key, _) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        if name == "WAYLAND_SOCKET"
+            || name == "X_PRIVILEGED_WAYLAND_SOCKET"
+            || name.starts_with("COSMIC_PANEL_")
+        {
+            command.env_remove(&key);
+        }
+    }
+    command.stdin(std::process::Stdio::null());
+    match command.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || child.wait());
+        }
+        Err(err) => tracing::error!("cannot run control-panel ({}): {err}", exe.display()),
+    }
+}
+
 /// How the camera is, off the UI's thread: systemctl and a file.
 fn read_camera() -> app::Task<Message> {
     if !Tile::Camera.available() {
@@ -1615,6 +1655,7 @@ fn init_with(mut core: app::Core, corner: bool) -> (App, app::Task<Message>) {
         tiling_config: services::tiling_config(),
         show_percentage: SHOW_PERCENTAGE.get(),
         notifications: notifications::load(),
+        notif_config: NotifConfig::load(),
         dnd_until: services::dnd_until(),
         touchpad: services::touchpad(),
         hot_edge: services::hot_edge(),
@@ -2192,6 +2233,7 @@ impl cosmic::Application for App {
                 self.layout = Layout::load();
                 self.bar_spacing = BarSpacing::load();
                 self.primary_display = layout::primary_display();
+                self.notif_config = NotifConfig::load();
                 self.do_not_disturb = DO_NOT_DISTURB.get();
                 // Turned off elsewhere: no timer left.
                 if !self.do_not_disturb && self.dnd_until.is_some() {
@@ -2527,7 +2569,10 @@ impl cosmic::Application for App {
                 spacing.save();
             }
             Message::Settings(page) => {
-                spawn("cosmic-settings", page.as_slice());
+                match page {
+                    Some(subpage) => spawn("cosmic-settings", &[subpage]),
+                    None => spawn_control_panel(),
+                }
                 return self.close_popup();
             }
             Message::Screenshot => {

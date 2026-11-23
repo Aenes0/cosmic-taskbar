@@ -8,7 +8,10 @@
 //! auto-updater/services.
 
 mod data;
+mod power_config;
 mod views;
+
+use power_config::{CpuTopologyInfo, PowerProfileKind, PowerProfilesConfig};
 
 use cosmic::{
     Element, Task, app,
@@ -22,11 +25,13 @@ use crate::central::{
     monitor::{
         self,
         config::{
-            BarItem as MonitorBarItem, BarMode as MonitorBarMode, Panel as MonitorPanel,
-            Settings as MonitorSettings,
+            BarItem as MonitorBarItem, BarMode as MonitorBarMode, CardMode as MonitorCardMode,
+            Panel as MonitorPanel, PollComponent as MonitorPollComponent,
+            ProcSort as MonitorProcSort, Settings as MonitorSettings,
         },
         weather::Place,
     },
+    notifications::config::{NotifConfig, NotifFormat, NotifPosition},
     services::{
         self, Battery, Camera, DARK_MODE, DO_NOT_DISTURB, Display, Network, Peripheral,
         PowerProfiles, TilingConfig, Touchpad, Update,
@@ -34,6 +39,7 @@ use crate::central::{
     tiles::Tile,
     tray::config::TrayConfig,
 };
+use crate::logi::config as osd_config;
 
 pub const APP_ID: &str = "io.github.Aenes0.CosmicControlPanel";
 
@@ -43,6 +49,8 @@ pub enum Section {
     Bar,
     Monitor,
     Central,
+    Notifications,
+    DevicesOsd,
     Camera,
     Network,
     Displays,
@@ -52,11 +60,13 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 10] = [
+    pub const ALL: [Section; 12] = [
         Section::Power,
         Section::Bar,
         Section::Monitor,
         Section::Central,
+        Section::Notifications,
+        Section::DevicesOsd,
         Section::Camera,
         Section::Network,
         Section::Displays,
@@ -71,6 +81,8 @@ impl Section {
             Section::Bar => "Barra & Tray",
             Section::Monitor => "Monitor (Esquerda)",
             Section::Central => "Central (Direita)",
+            Section::Notifications => "Notificações",
+            Section::DevicesOsd => "OSD de Dispositivos",
             Section::Camera => "Câmeras & Privacidade",
             Section::Network => "Rede & Segurança",
             Section::Displays => "Monitores & Visuais",
@@ -86,6 +98,8 @@ impl Section {
             Section::Bar => "view-app-grid-symbolic",
             Section::Monitor => "utilities-system-monitor-symbolic",
             Section::Central => "view-list-symbolic",
+            Section::Notifications => "preferences-system-notifications-symbolic",
+            Section::DevicesOsd => "input-keyboard-symbolic",
             Section::Camera => "camera-web-symbolic",
             Section::Network => "network-wired-symbolic",
             Section::Displays => "video-display-symbolic",
@@ -110,6 +124,32 @@ pub enum Message {
     SetPowerProfile(String),
     ToggleConservationMode,
     ToggleShowPercentage,
+    PowerEditProfile(PowerProfileKind),
+    PowerToggleBoost,
+    PowerCpuMaxMhz(u32),
+    PowerEpp(String),
+    PowerIntelMaxPerf(u32),
+    PowerRaplPl1(u32),
+    PowerRaplPl2(u32),
+    PowerToggleDisableCcd1,
+    PowerMaxOnlineCores(u32),
+    PowerNvidiaPowerLimit(u32),
+    PowerNvidiaGpuClock(u32),
+    PowerNvidiaMemClock(u32),
+    PowerToggleNvidiaPersistence,
+    PowerIntelIgpuMaxMhz(u32),
+    PowerDisplayHz(String),
+    PowerScreenOffMins(u32),
+    PowerLockMins(u32),
+    PowerSuspendAcMins(u32),
+    PowerSuspendBatteryMins(u32),
+    PowerPcieAspm(String),
+    PowerSataAlpm(String),
+    PowerToggleAudioSave,
+    PowerToggleWifiSave,
+    PowerSaveOnly,
+    PowerSaveAndApply,
+    PowerResetDefaults,
     // Bar & Tray
     SetBarSpacing(BarSpacing),
     SetBarIcon(BarItem, Show),
@@ -123,10 +163,14 @@ pub enum Message {
     MonitorBarMode(MonitorBarItem, MonitorBarMode),
     MonitorThermometer(MonitorBarMode),
     MonitorPollSecs(u64),
-    MonitorShiftPanel(MonitorPanel, bool),
-    MonitorToggleHidden(MonitorPanel),
-    MonitorToggleFold(MonitorPanel),
-    MonitorToggleWeatherExpanded,
+    MonitorCardMode(MonitorPanel, MonitorCardMode),
+    MonitorWeatherMode(MonitorCardMode),
+    MonitorDragStart(MonitorPanel),
+    MonitorDragOver(MonitorPanel),
+    MonitorDragEnd,
+    MonitorComponentPoll(MonitorPollComponent, u64),
+    MonitorProcsCount(usize),
+    MonitorProcSort(MonitorProcSort),
     MonitorTariffInput(String),
     MonitorRestWattsInput(String),
     MonitorReset,
@@ -144,6 +188,30 @@ pub enum Message {
     CentralToggleHotEdge,
     CentralOpenHotEdge,
     CentralResetTiles,
+    // Notifications
+    NotifTimeout(u32),
+    NotifFormat(NotifFormat),
+    NotifPosition(NotifPosition),
+    NotifOpacity(f32),
+    NotifCornerRadius(f32),
+    NotifMaxBodyLines(u32),
+    NotifToggleShowBody,
+    NotifToggleShowActions,
+    NotifToggleGroupByApp,
+    NotifAccentHex(String),
+    NotifBgHex(String),
+    NotifReset,
+    NotifSendTest,
+    // Devices OSD
+    OsdDurationMs(u64),
+    OsdBatteryLow(u8),
+    OsdBatteryCritical(u8),
+    OsdBatteryIntervalMins(u64),
+    OsdEmojiCommand(String),
+    OsdSaveOnly,
+    OsdSaveAndRestart,
+    OsdReset,
+    OsdRunDemo,
     // Camera
     ToggleMicrophone,
     ToggleCamera,
@@ -211,6 +279,7 @@ pub struct ControlPanel {
     dragging_bar: Option<BarItem>,
     // Monitor (left panel)
     monitor_settings: MonitorSettings,
+    dragging_monitor_card: Option<MonitorPanel>,
     weather_place: Place,
     weather_query: String,
     weather_results: Option<Vec<Place>>,
@@ -224,6 +293,13 @@ pub struct ControlPanel {
     tiling_config: TilingConfig,
     touchpad: Option<Touchpad>,
     hot_edge: bool,
+    // Power profiles tuning
+    power_config: PowerProfilesConfig,
+    editing_profile: PowerProfileKind,
+    cpu_topology: CpuTopologyInfo,
+    // Notifications & Devices OSD
+    notif_config: NotifConfig,
+    osd_config: osd_config::Config,
     // Login (Greeter)
     greeter: data::GreeterConfig,
     busy: bool,
@@ -297,11 +373,14 @@ impl cosmic::Application for ControlPanel {
         } else {
             String::new()
         };
+        let hardware = data::read_hardware();
+        let power_config = PowerProfilesConfig::load(hardware.is_intel, hardware.is_laptop);
+        let cpu_topology = power_config::detect_cpu_topology();
         let app = Self {
             core,
             section: Section::Power,
             snapshot: data::SystemSnapshot {
-                hardware: data::read_hardware(),
+                hardware,
                 ..data::SystemSnapshot::default()
             },
             network: Network::default(),
@@ -320,6 +399,7 @@ impl cosmic::Application for ControlPanel {
             tray_config: data::load_tray_config(),
             dragging_bar: None,
             monitor_settings,
+            dragging_monitor_card: None,
             weather_place: monitor::config::weather_place(),
             weather_query: String::new(),
             weather_results: None,
@@ -332,6 +412,11 @@ impl cosmic::Application for ControlPanel {
             tiling_config: services::tiling_config(),
             touchpad: services::touchpad(),
             hot_edge: services::hot_edge(),
+            power_config,
+            editing_profile: PowerProfileKind::Balanced,
+            cpu_topology,
+            notif_config: NotifConfig::load(),
+            osd_config: osd_config::load_or_default(),
             greeter: data::load_greeter_config(),
             busy: false,
             notice: None,
@@ -380,6 +465,12 @@ impl cosmic::Application for ControlPanel {
                     self.touchpad = services::touchpad();
                     self.hot_edge = services::hot_edge();
                 }
+                if sec == Section::Notifications {
+                    self.notif_config = NotifConfig::load();
+                }
+                if sec == Section::DevicesOsd {
+                    self.osd_config = osd_config::load_or_default();
+                }
                 if sec == Section::Login {
                     self.greeter = data::load_greeter_config();
                 }
@@ -397,7 +488,14 @@ impl cosmic::Application for ControlPanel {
                 Update::Network(net) => self.network = net,
                 Update::Battery(bat) => self.battery = bat,
                 Update::Peripherals(p) => self.peripherals = p,
-                Update::PowerProfiles(p) => self.power = p,
+                Update::PowerProfiles(p) => {
+                    if self.power.is_none()
+                        && let Some(active) = p.as_ref().and_then(|pp| PowerProfileKind::from_id(&pp.active))
+                    {
+                        self.editing_profile = active;
+                    }
+                    self.power = p;
+                }
                 Update::Microphone(m) => self.microphone = m,
                 Update::Brightness(b) => self.brightness = b,
                 _ => {}
@@ -424,6 +522,7 @@ impl cosmic::Application for ControlPanel {
                 self.hot_edge = services::hot_edge();
                 self.monitor_settings = MonitorSettings::load();
                 self.weather_place = monitor::config::weather_place();
+                self.notif_config = NotifConfig::load();
             }
             // Power
             Message::SetPowerProfile(profile) => {
@@ -459,6 +558,123 @@ impl cosmic::Application for ControlPanel {
             Message::ToggleShowPercentage => {
                 self.show_percentage = !self.show_percentage;
                 services::SHOW_PERCENTAGE.set(self.show_percentage);
+            }
+            Message::PowerEditProfile(kind) => {
+                self.editing_profile = kind;
+            }
+            Message::PowerToggleBoost => {
+                let t = self.power_config.get_mut(self.editing_profile);
+                t.boost = !t.boost;
+            }
+            Message::PowerCpuMaxMhz(mhz) => {
+                self.power_config.get_mut(self.editing_profile).cpu_max_mhz = mhz;
+            }
+            Message::PowerEpp(epp) => {
+                self.power_config.get_mut(self.editing_profile).epp = epp;
+            }
+            Message::PowerIntelMaxPerf(pct) => {
+                self.power_config.get_mut(self.editing_profile).intel_max_perf_pct =
+                    pct.clamp(10, 100);
+            }
+            Message::PowerRaplPl1(w) => {
+                self.power_config.get_mut(self.editing_profile).rapl_pl1_w = w;
+            }
+            Message::PowerRaplPl2(w) => {
+                self.power_config.get_mut(self.editing_profile).rapl_pl2_w = w;
+            }
+            Message::PowerToggleDisableCcd1 => {
+                let t = self.power_config.get_mut(self.editing_profile);
+                t.disable_ccd1 = !t.disable_ccd1;
+            }
+            Message::PowerMaxOnlineCores(cores) => {
+                self.power_config.get_mut(self.editing_profile).max_online_cores = cores;
+            }
+            Message::PowerNvidiaPowerLimit(w) => {
+                self.power_config.get_mut(self.editing_profile).nvidia_power_limit_w = w;
+            }
+            Message::PowerNvidiaGpuClock(mhz) => {
+                self.power_config.get_mut(self.editing_profile).nvidia_gpu_clock_mhz = mhz;
+            }
+            Message::PowerNvidiaMemClock(mhz) => {
+                self.power_config.get_mut(self.editing_profile).nvidia_mem_clock_mhz = mhz;
+            }
+            Message::PowerToggleNvidiaPersistence => {
+                let t = self.power_config.get_mut(self.editing_profile);
+                t.nvidia_persistence = !t.nvidia_persistence;
+            }
+            Message::PowerIntelIgpuMaxMhz(mhz) => {
+                self.power_config.get_mut(self.editing_profile).intel_igpu_max_mhz = mhz;
+            }
+            Message::PowerDisplayHz(hz) => {
+                self.power_config.get_mut(self.editing_profile).display_hz = hz;
+            }
+            Message::PowerScreenOffMins(mins) => {
+                self.power_config.get_mut(self.editing_profile).screen_off_mins = mins;
+            }
+            Message::PowerLockMins(mins) => {
+                self.power_config.get_mut(self.editing_profile).lock_mins = mins;
+            }
+            Message::PowerSuspendAcMins(mins) => {
+                self.power_config.get_mut(self.editing_profile).suspend_ac_mins = mins;
+            }
+            Message::PowerSuspendBatteryMins(mins) => {
+                self.power_config.get_mut(self.editing_profile).suspend_battery_mins = mins;
+            }
+            Message::PowerPcieAspm(aspm) => {
+                self.power_config.get_mut(self.editing_profile).pcie_aspm = aspm;
+            }
+            Message::PowerSataAlpm(alpm) => {
+                self.power_config.get_mut(self.editing_profile).sata_alpm = alpm;
+            }
+            Message::PowerToggleAudioSave => {
+                let t = self.power_config.get_mut(self.editing_profile);
+                t.audio_power_save = !t.audio_power_save;
+            }
+            Message::PowerToggleWifiSave => {
+                let t = self.power_config.get_mut(self.editing_profile);
+                t.wifi_power_save = !t.wifi_power_save;
+            }
+            Message::PowerSaveOnly => match self.power_config.save() {
+                Ok(()) => {
+                    self.notice = Some(format!(
+                        "Perfis de energia salvos em {}.",
+                        PowerProfilesConfig::config_path().display()
+                    ));
+                }
+                Err(err) => {
+                    self.notice = Some(format!("Falha ao salvar perfis de energia: {err}"));
+                }
+            },
+            Message::PowerSaveAndApply => {
+                if let Err(err) = self.power_config.save() {
+                    self.notice = Some(format!("Falha ao salvar perfis de energia: {err}"));
+                    return Task::none();
+                }
+                let kind = self.editing_profile;
+                let profile_id = kind.id().to_owned();
+                let tuning = self.power_config.get(kind).clone();
+                self.busy = true;
+                self.notice = Some(format!("Aplicando plano {}...", kind.label()));
+                return Task::future(async move {
+                    _ = services::set_power_profile(profile_id.clone()).await;
+                    let msg = power_config::apply_profile_now(&profile_id, &tuning).await;
+                    cosmic::action::app(Message::ActionDone(msg))
+                });
+            }
+            Message::PowerResetDefaults => {
+                let hw = &self.snapshot.hardware;
+                self.power_config = PowerProfilesConfig::defaults_for(hw.is_intel, hw.is_laptop);
+                match self.power_config.save() {
+                    Ok(()) => {
+                        self.notice = Some(
+                            "Padrões do hardware restaurados e salvos. Clique em \"Salvar e aplicar plano\" para aplicar agora."
+                                .to_owned(),
+                        );
+                    }
+                    Err(err) => {
+                        self.notice = Some(format!("Padrões restaurados, mas falhou ao salvar: {err}"));
+                    }
+                }
             }
             // Bar & Tray
             Message::SetBarSpacing(spacing) => {
@@ -513,17 +729,33 @@ impl cosmic::Application for ControlPanel {
             Message::MonitorPollSecs(secs) => {
                 self.monitor_settings.set_poll_secs(secs);
             }
-            Message::MonitorShiftPanel(panel, down) => {
-                self.monitor_settings.shift(panel, down);
+            Message::MonitorCardMode(panel, mode) => {
+                self.monitor_settings.set_card_mode(panel, mode);
             }
-            Message::MonitorToggleHidden(panel) => {
-                self.monitor_settings.toggle_hidden(panel);
+            Message::MonitorWeatherMode(mode) => {
+                self.monitor_settings.set_weather_mode(mode);
             }
-            Message::MonitorToggleFold(panel) => {
-                self.monitor_settings.toggle_fold(panel);
+            Message::MonitorDragStart(panel) => {
+                self.dragging_monitor_card = Some(panel);
             }
-            Message::MonitorToggleWeatherExpanded => {
-                self.monitor_settings.toggle_weather_expanded();
+            Message::MonitorDragOver(target) => {
+                if let Some(from) = self.dragging_monitor_card
+                    && from != target
+                {
+                    self.monitor_settings.move_card_to(from, target);
+                }
+            }
+            Message::MonitorDragEnd => {
+                self.dragging_monitor_card = None;
+            }
+            Message::MonitorComponentPoll(comp, val) => {
+                self.monitor_settings.set_component_poll(comp, val);
+            }
+            Message::MonitorProcsCount(count) => {
+                self.monitor_settings.set_procs_count(count);
+            }
+            Message::MonitorProcSort(sort) => {
+                self.monitor_settings.click_proc_sort(sort);
             }
             Message::MonitorTariffInput(text) => {
                 let value = text.trim().replace(',', ".").parse::<f64>().ok();
@@ -609,6 +841,185 @@ impl cosmic::Application for ControlPanel {
                 data::reset_central_tiles();
                 self.notice =
                     Some("Grade de tiles da Central restaurada para o padrão.".to_owned());
+            }
+            // Notifications
+            Message::NotifTimeout(secs) => {
+                self.notif_config.timeout_secs = secs;
+                if let Err(err) = self.notif_config.save() {
+                    self.notice = Some(err);
+                }
+            }
+            Message::NotifFormat(fmt) => {
+                self.notif_config.format = fmt;
+                if let Err(err) = self.notif_config.save() {
+                    self.notice = Some(err);
+                }
+            }
+            Message::NotifPosition(pos) => {
+                self.notif_config.position = pos;
+                if let Err(err) = self.notif_config.save() {
+                    self.notice = Some(err);
+                }
+            }
+            Message::NotifOpacity(val) => {
+                self.notif_config.opacity = ((val * 100.0).round() / 100.0).clamp(
+                    crate::central::notifications::config::MIN_OPACITY,
+                    crate::central::notifications::config::MAX_OPACITY,
+                );
+                if let Err(err) = self.notif_config.save() {
+                    self.notice = Some(err);
+                }
+            }
+            Message::NotifCornerRadius(r) => {
+                self.notif_config.corner_radius = r.round().clamp(
+                    crate::central::notifications::config::MIN_CORNER_RADIUS,
+                    crate::central::notifications::config::MAX_CORNER_RADIUS,
+                );
+                if let Err(err) = self.notif_config.save() {
+                    self.notice = Some(err);
+                }
+            }
+            Message::NotifMaxBodyLines(lines) => {
+                self.notif_config.max_body_lines = lines.clamp(
+                    crate::central::notifications::config::MIN_BODY_LINES,
+                    crate::central::notifications::config::MAX_BODY_LINES,
+                );
+                if let Err(err) = self.notif_config.save() {
+                    self.notice = Some(err);
+                }
+            }
+            Message::NotifToggleShowBody => {
+                self.notif_config.show_body = !self.notif_config.show_body;
+                if let Err(err) = self.notif_config.save() {
+                    self.notice = Some(err);
+                }
+            }
+            Message::NotifToggleShowActions => {
+                self.notif_config.show_actions = !self.notif_config.show_actions;
+                if let Err(err) = self.notif_config.save() {
+                    self.notice = Some(err);
+                }
+            }
+            Message::NotifToggleGroupByApp => {
+                self.notif_config.group_by_app = !self.notif_config.group_by_app;
+                if let Err(err) = self.notif_config.save() {
+                    self.notice = Some(err);
+                }
+            }
+            Message::NotifAccentHex(hex) => {
+                let valid = hex.trim().is_empty()
+                    || crate::central::notifications::config::parse_hex_color(&hex).is_some();
+                self.notif_config.accent_hex = hex;
+                if valid && let Err(err) = self.notif_config.save() {
+                    self.notice = Some(err);
+                }
+            }
+            Message::NotifBgHex(hex) => {
+                let valid = hex.trim().is_empty()
+                    || crate::central::notifications::config::parse_hex_color(&hex).is_some();
+                self.notif_config.bg_hex = hex;
+                if valid && let Err(err) = self.notif_config.save() {
+                    self.notice = Some(err);
+                }
+            }
+            Message::NotifReset => {
+                self.notif_config = NotifConfig::default();
+                self.notice = Some(match self.notif_config.save() {
+                    Ok(()) => "Configurações de notificações restauradas para o padrão.".to_owned(),
+                    Err(err) => err,
+                });
+            }
+            Message::NotifSendTest => {
+                let timeout_ms = if self.notif_config.timeout_secs == 0 {
+                    "0".to_owned()
+                } else {
+                    (self.notif_config.timeout_secs * 1000).to_string()
+                };
+                self.notice = Some(data::spawn_app(
+                    "notify-send",
+                    &[
+                        "-a",
+                        "Painel de Controle",
+                        "-i",
+                        "preferences-system-notifications-symbolic",
+                        "-t",
+                        &timeout_ms,
+                        "Notificação de teste",
+                        "Pré-visualização do formato, transparência, cores e duração configurados.",
+                    ],
+                    "Notificação de teste",
+                ));
+            }
+            // Devices OSD
+            Message::OsdDurationMs(ms) => {
+                self.osd_config.duration =
+                    std::time::Duration::from_millis(ms.clamp(200, 20_000));
+            }
+            Message::OsdBatteryLow(pct) => {
+                self.osd_config.battery_low = pct.clamp(2, 99);
+                if self.osd_config.battery_critical >= self.osd_config.battery_low {
+                    self.osd_config.battery_critical = self.osd_config.battery_low - 1;
+                }
+            }
+            Message::OsdBatteryCritical(pct) => {
+                let max_crit = self.osd_config.battery_low.saturating_sub(1).max(1);
+                self.osd_config.battery_critical = pct.clamp(1, max_crit);
+            }
+            Message::OsdBatteryIntervalMins(mins) => {
+                self.osd_config.legacy_battery_interval =
+                    std::time::Duration::from_secs(mins.clamp(1, 1440) * 60);
+            }
+            Message::OsdEmojiCommand(cmd) => {
+                let trimmed = cmd.trim();
+                self.osd_config.emoji_command = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(cmd)
+                };
+            }
+            Message::OsdSaveOnly => {
+                self.osd_config = self.osd_config.normalized();
+                self.notice = Some(match self.osd_config.save() {
+                    Ok(path) => format!(
+                        "Configuração do OSD salva em {}. Reinicie o serviço para aplicar.",
+                        path.display()
+                    ),
+                    Err(err) => err,
+                });
+            }
+            Message::OsdSaveAndRestart => {
+                self.osd_config = self.osd_config.normalized();
+                if let Err(err) = self.osd_config.save() {
+                    self.notice = Some(err);
+                    return Task::none();
+                }
+                self.busy = true;
+                return Task::future(async {
+                    let msg = data::restart_user_unit("logi-osd.service").await;
+                    cosmic::action::app(Message::ActionDone(format!(
+                        "Configuração salva. {msg}"
+                    )))
+                });
+            }
+            Message::OsdReset => {
+                self.osd_config = osd_config::Config::default();
+                self.notice = Some(match self.osd_config.save() {
+                    Ok(_) => "Configuração do OSD restaurada para o padrão.".to_owned(),
+                    Err(err) => err,
+                });
+            }
+            Message::OsdRunDemo => {
+                let exe = std::env::current_exe()
+                    .map(|p| {
+                        let s = p.to_string_lossy();
+                        s.strip_suffix(" (deleted)").unwrap_or(&s).to_owned()
+                    })
+                    .unwrap_or_else(|_| "cosmic-taskbar".to_owned());
+                self.notice = Some(data::spawn_app(
+                    &exe,
+                    &["logi", "--demo"],
+                    "Demonstração do OSD de Dispositivos",
+                ));
             }
             // Camera
             Message::ToggleMicrophone => {
@@ -849,7 +1260,14 @@ impl cosmic::Application for ControlPanel {
                 self.monitor_settings = MonitorSettings::load();
                 self.weather_place = monitor::config::weather_place();
                 self.central_layout = Layout::load();
+                self.notif_config = NotifConfig::load();
+                self.osd_config = osd_config::load_or_default();
                 self.greeter = data::load_greeter_config();
+                self.power_config = PowerProfilesConfig::load(
+                    self.snapshot.hardware.is_intel,
+                    self.snapshot.hardware.is_laptop,
+                );
+                self.cpu_topology = power_config::detect_cpu_topology();
                 return self.reload_all();
             }
             Message::ActionDone(msg) => {
@@ -878,6 +1296,14 @@ impl cosmic::Application for ControlPanel {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
                 )) => Some(Message::DragBarEnd),
+                _ => None,
+            }));
+        }
+        if self.dragging_monitor_card.is_some() {
+            subs.push(event::listen_with(|ev, _, _| match ev {
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::MonitorDragEnd),
                 _ => None,
             }));
         }

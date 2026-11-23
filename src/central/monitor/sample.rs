@@ -81,7 +81,7 @@ pub struct Mount {
     pub used: u64,
 }
 
-/// A process, as /proc has it.
+/// A process, as /proc has it, enriched with optional per-PID GPU stats.
 #[derive(Clone, Debug)]
 pub struct Proc {
     /// Its program, which its helpers share: a browser and its tabs.
@@ -89,7 +89,35 @@ pub struct Proc {
     pub ticks: u64,
     /// Its own memory, not shared with others.
     pub memory: u64,
+    /// GPU compute/graphics utilization percentage (0.0 when unavailable).
+    pub gpu_pct: f32,
+    /// Dedicated GPU memory used by this process in MiB (0 when unavailable).
+    pub gpu_mem_mb: u64,
     pub mine: bool,
+}
+
+/// Which components were actually read in a [`Reading`].
+#[derive(Clone, Copy, Debug)]
+pub struct Sampled {
+    pub cpu: bool,
+    pub gpu: bool,
+    pub ram: bool,
+    pub disk: bool,
+    pub net: bool,
+    pub procs: bool,
+}
+
+impl Default for Sampled {
+    fn default() -> Self {
+        Self {
+            cpu: true,
+            gpu: true,
+            ram: true,
+            disk: true,
+            net: true,
+            procs: true,
+        }
+    }
 }
 
 /// What doesn't change while running.
@@ -105,10 +133,12 @@ pub struct Info {
     pub kernel: String,
 }
 
-/// A reading of everything.
+/// A reading of everything (or the subset due in this tick).
 #[derive(Clone, Debug)]
 pub struct Reading {
     pub at: Instant,
+    /// Which components were freshly sampled in this reading.
+    pub sampled: Sampled,
     /// All CPUs first, then each.
     pub cpu: Vec<CpuTimes>,
     /// MHz: the average and the highest.
@@ -131,6 +161,9 @@ pub struct Reading {
     pub tasks: usize,
     /// Each process by pid; only while it's being looked at.
     pub procs: Option<HashMap<u32, Proc>>,
+    /// Total CPU ticks captured alongside `procs` so process CPU % stays
+    /// exact even when `procs_secs != cpu_secs`.
+    pub procs_cpu_total: Option<u64>,
 }
 
 fn read(path: impl AsRef<Path>) -> Option<String> {
@@ -187,6 +220,16 @@ pub struct Depth {
     /// drives' temperatures alone took ~18 ms a reading, asking the drives
     /// themselves, maybe out of their power saving.
     pub full: bool,
+    /// Sample CPU counters, frequency, RAPL, load and CPU sensors.
+    pub cpu: bool,
+    /// Sample GPU metrics (NVML / amdgpu).
+    pub gpu_sample: bool,
+    /// Sample memory, cache, swap and zram.
+    pub ram: bool,
+    /// Sample disk I/O, mounts and drive sensors (only when `full`).
+    pub disk: bool,
+    /// Sample network counters and route.
+    pub net: bool,
     /// The processes too.
     pub procs: bool,
     /// The GPU's energy counter, ~10 ms to ask NVIDIA's driver.
@@ -236,43 +279,92 @@ pub fn share_gpu(energy: bool) {
 
 /// Everything now, or less, by `depth`.
 pub fn reading(depth: Depth) -> Reading {
-    let Depth { full, procs, gpu_energy, gpu: source } = depth;
-    let loadavg = read("/proc/loadavg").unwrap_or_default();
-    let mut parts = loadavg.split_whitespace();
-    let mut load = [0.0; 3];
-    for value in &mut load {
-        *value = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    }
-    let tasks = parts
-        .next()
-        .and_then(|v| v.split_once('/'))
-        .and_then(|(_, all)| all.parse().ok())
-        .unwrap_or(0);
+    let Depth {
+        full,
+        cpu: sample_cpu,
+        gpu_sample,
+        ram: sample_ram,
+        disk: sample_disk,
+        net: sample_net,
+        procs: sample_procs,
+        gpu_energy,
+        gpu: source,
+    } = depth;
+    let (load, tasks, uptime) = if sample_cpu {
+        let loadavg = read("/proc/loadavg").unwrap_or_default();
+        let mut parts = loadavg.split_whitespace();
+        let mut load = [0.0; 3];
+        for value in &mut load {
+            *value = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        }
+        let tasks = parts
+            .next()
+            .and_then(|v| v.split_once('/'))
+            .and_then(|(_, all)| all.parse().ok())
+            .unwrap_or(0);
+        let uptime = read("/proc/uptime")
+            .and_then(|u| u.split_whitespace().next()?.parse().ok())
+            .unwrap_or(0.0);
+        (load, tasks, uptime)
+    } else {
+        ([0.0; 3], 0, 0.0)
+    };
+    let cpu = if sample_cpu { cpu_times() } else { Vec::new() };
+    let procs_cpu_total = if sample_procs {
+        cpu.first().map(|c| c.total).or_else(cpu_total_ticks)
+    } else {
+        None
+    };
+    let sample_full_disk = full && sample_disk;
+    let chips = if sample_full_disk {
+        chips(true)
+    } else if sample_cpu {
+        chips(false)
+    } else {
+        Vec::new()
+    };
     Reading {
         at: Instant::now(),
-        cpu: cpu_times(),
-        frequency: full.then(frequency).flatten(),
-        memory: memory(),
-        chips: chips(full),
-        gpu: pick_gpu(
-            source,
-            full,
-            super::gpu_share::latest,
-            || nvidia(full, gpu_energy).or_else(amd_gpu),
-            super::gpu_share::publish,
-        ),
-        disks: if full { disks() } else { Vec::new() },
-        mounts: if full { mounts() } else { Vec::new() },
-        net: net(),
-        route: full.then(route).flatten(),
-        rapl: rapl(),
+        sampled: Sampled {
+            cpu: sample_cpu,
+            gpu: gpu_sample,
+            ram: sample_ram,
+            disk: sample_full_disk,
+            net: sample_net,
+            procs: sample_procs,
+        },
+        cpu,
+        frequency: (full && sample_cpu).then(frequency).flatten(),
+        memory: if sample_ram { memory() } else { Memory::default() },
+        chips,
+        gpu: if gpu_sample {
+            pick_gpu(
+                source,
+                full,
+                super::gpu_share::latest,
+                || nvidia(full, gpu_energy).or_else(amd_gpu),
+                super::gpu_share::publish,
+            )
+        } else {
+            None
+        },
+        disks: if sample_full_disk { disks() } else { Vec::new() },
+        mounts: if sample_full_disk { mounts() } else { Vec::new() },
+        net: if sample_net { net() } else { (0, 0) },
+        route: (full && sample_net).then(route).flatten(),
+        rapl: if sample_cpu { rapl() } else { None },
         load,
-        uptime: read("/proc/uptime")
-            .and_then(|u| u.split_whitespace().next()?.parse().ok())
-            .unwrap_or(0.0),
+        uptime,
         tasks,
-        procs: procs.then(processes),
+        procs: sample_procs.then(processes),
+        procs_cpu_total,
     }
+}
+
+fn cpu_total_ticks() -> Option<u64> {
+    let stat = read("/proc/stat")?;
+    let line = stat.lines().find(|l| l.starts_with("cpu "))?;
+    Some(line.split_whitespace().skip(1).filter_map(|v| v.parse::<u64>().ok()).take(8).sum())
 }
 
 fn cpu_times() -> Vec<CpuTimes> {
@@ -541,6 +633,7 @@ static NAMES: LazyLock<Mutex<HashMap<u32, (u64, String)>>> = LazyLock::new(Defau
 fn processes() -> HashMap<u32, Proc> {
     let uid = unsafe { libc::getuid() };
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+    let gpu_usage = nvidia_process_usage();
     let mut procs = HashMap::new();
     let mut names = NAMES.lock().unwrap();
     let Ok(entries) = fs::read_dir("/proc") else { return procs };
@@ -578,7 +671,18 @@ fn processes() -> HashMap<u32, Proc> {
         };
         use std::os::unix::fs::MetadataExt;
         let mine = entry.metadata().is_ok_and(|m| m.uid() == uid);
-        procs.insert(pid, Proc { name, ticks, memory: resident.saturating_sub(shared) * page, mine });
+        let (gpu_pct, gpu_mem_mb) = gpu_usage.get(&pid).copied().unwrap_or((0.0, 0));
+        procs.insert(
+            pid,
+            Proc {
+                name,
+                ticks,
+                memory: resident.saturating_sub(shared) * page,
+                gpu_pct,
+                gpu_mem_mb,
+                mine,
+            },
+        );
     }
     names.retain(|pid, _| procs.contains_key(pid));
     procs
@@ -609,6 +713,26 @@ struct NvmlMemory {
     used: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct NvmlProcessUtilization {
+    pid: u32,
+    time_stamp: u64,
+    sm_util: u32,
+    mem_util: u32,
+    enc_util: u32,
+    dec_util: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct NvmlProcessInfoV2 {
+    pid: u32,
+    used_gpu_memory: u64,
+    gpu_instance_id: u32,
+    compute_instance_id: u32,
+}
+
 struct Nvml {
     device: Device,
     name: String,
@@ -620,6 +744,9 @@ struct Nvml {
     clock: unsafe extern "C" fn(Device, u32, *mut u32) -> i32,
     fan: unsafe extern "C" fn(Device, *mut u32) -> i32,
     energy: unsafe extern "C" fn(Device, *mut u64) -> i32,
+    process_util: Option<unsafe extern "C" fn(Device, *mut NvmlProcessUtilization, *mut u32, u64) -> i32>,
+    graphics_procs: Option<unsafe extern "C" fn(Device, *mut u32, *mut NvmlProcessInfoV2) -> i32>,
+    compute_procs: Option<unsafe extern "C" fn(Device, *mut u32, *mut NvmlProcessInfoV2) -> i32>,
 }
 
 // The library is safe to call from any thread.
@@ -644,6 +771,16 @@ unsafe fn load_nvml() -> Option<Nvml> {
                     return None;
                 }
                 std::mem::transmute::<*mut c_void, _>(pointer)
+            }};
+        }
+        macro_rules! opt_symbol {
+            ($name:literal) => {{
+                let pointer = libc::dlsym(lib, $name.as_ptr());
+                if pointer.is_null() {
+                    None
+                } else {
+                    Some(std::mem::transmute::<*mut c_void, _>(pointer))
+                }
             }};
         }
         let init: unsafe extern "C" fn() -> i32 = symbol!(c"nvmlInit_v2");
@@ -674,8 +811,157 @@ unsafe fn load_nvml() -> Option<Nvml> {
             clock: symbol!(c"nvmlDeviceGetClockInfo"),
             fan: symbol!(c"nvmlDeviceGetFanSpeed"),
             energy: symbol!(c"nvmlDeviceGetTotalEnergyConsumption"),
+            process_util: opt_symbol!(c"nvmlDeviceGetProcessUtilization"),
+            graphics_procs: opt_symbol!(c"nvmlDeviceGetGraphicsRunningProcesses_v2"),
+            compute_procs: opt_symbol!(c"nvmlDeviceGetComputeRunningProcesses_v2"),
         })
     }
+}
+
+/// Per-PID GPU utilization (%) and dedicated VRAM (MiB) on NVIDIA cards.
+/// Returns an empty map immediately on Intel/AMD or when NVIDIA is absent.
+fn nvidia_process_usage() -> HashMap<u32, (f32, u64)> {
+    if !Path::new("/proc/driver/nvidia").exists() {
+        return HashMap::new();
+    }
+    if let Some(nvml) = NVML.as_ref()
+        && (nvml.process_util.is_some()
+            || nvml.graphics_procs.is_some()
+            || nvml.compute_procs.is_some())
+    {
+        return nvml_process_usage(nvml);
+    }
+    // Fallback when libnvidia-ml lacks per-process symbols.
+    let Ok(output) = std::process::Command::new("nvidia-smi")
+        .args(["pmon", "-c", "1", "-s", "um"])
+        .output()
+    else {
+        return HashMap::new();
+    };
+    if !output.status.success() {
+        return HashMap::new();
+    }
+    parse_nvidia_pmon(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn nvml_process_usage(nvml: &Nvml) -> HashMap<u32, (f32, u64)> {
+    const NVML_ERROR_INSUFFICIENT_SIZE: i32 = 7;
+    let d = nvml.device;
+    let mut map: HashMap<u32, (f32, u64)> = HashMap::new();
+
+    if let Some(get_util) = nvml.process_util {
+        let mut buf = vec![NvmlProcessUtilization::default(); 64];
+        let mut count = buf.len() as u32;
+        let mut rc = unsafe { get_util(d, buf.as_mut_ptr(), &mut count, 0) };
+        if rc == NVML_ERROR_INSUFFICIENT_SIZE && count > 0 {
+            let cap = (count as usize).min(512);
+            buf.resize(cap, NvmlProcessUtilization::default());
+            count = cap as u32;
+            rc = unsafe { get_util(d, buf.as_mut_ptr(), &mut count, 0) };
+        }
+        if rc == 0 {
+            let slice = &buf[..(count as usize).min(buf.len())];
+            let max_ts = slice.iter().map(|s| s.time_stamp).max().unwrap_or(0);
+            let cutoff = max_ts.saturating_sub(2_000_000);
+            let mut latest: HashMap<u32, (u64, f32)> = HashMap::new();
+            for s in slice {
+                if s.time_stamp < cutoff {
+                    continue;
+                }
+                let pct = if s.sm_util <= 100 { s.sm_util as f32 } else { 0.0 };
+                match latest.get_mut(&s.pid) {
+                    Some((ts, val)) if s.time_stamp >= *ts => {
+                        *ts = s.time_stamp;
+                        *val = pct;
+                    }
+                    None => {
+                        latest.insert(s.pid, (s.time_stamp, pct));
+                    }
+                    _ => {}
+                }
+            }
+            for (pid, (_, pct)) in latest {
+                map.entry(pid).or_insert((0.0, 0)).0 = pct;
+            }
+        }
+    }
+
+    let collect_mem = |f: unsafe extern "C" fn(Device, *mut u32, *mut NvmlProcessInfoV2) -> i32,
+                       out: &mut HashMap<u32, (f32, u64)>| {
+        let mut buf = vec![NvmlProcessInfoV2::default(); 64];
+        let mut count = buf.len() as u32;
+        let mut rc = unsafe { f(d, &mut count, buf.as_mut_ptr()) };
+        if rc == NVML_ERROR_INSUFFICIENT_SIZE && count > 0 {
+            let cap = (count as usize).min(512);
+            buf.resize(cap, NvmlProcessInfoV2::default());
+            count = cap as u32;
+            rc = unsafe { f(d, &mut count, buf.as_mut_ptr()) };
+        }
+        if rc == 0 {
+            for info in &buf[..(count as usize).min(buf.len())] {
+                let mb = if info.used_gpu_memory != u64::MAX {
+                    info.used_gpu_memory / (1024 * 1024)
+                } else {
+                    0
+                };
+                let entry = out.entry(info.pid).or_insert((0.0, 0));
+                entry.1 = entry.1.max(mb);
+            }
+        }
+    };
+
+    if let Some(f) = nvml.graphics_procs {
+        collect_mem(f, &mut map);
+    }
+    if let Some(f) = nvml.compute_procs {
+        collect_mem(f, &mut map);
+    }
+    map
+}
+
+/// Parses `nvidia-smi pmon -c 1 -s um` output into `pid -> (gpu_pct, gpu_mem_mb)`.
+pub(crate) fn parse_nvidia_pmon(output: &str) -> HashMap<u32, (f32, u64)> {
+    let mut map: HashMap<u32, (f32, u64)> = HashMap::new();
+    let mut pid_col: usize = 1;
+    let mut sm_col: usize = 3;
+    let mut fb_col: Option<usize> = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(header) = trimmed.strip_prefix('#') {
+            let cols: Vec<&str> = header.split_whitespace().collect();
+            if cols.first() == Some(&"gpu") {
+                if let Some(i) = cols.iter().position(|&c| c == "pid") {
+                    pid_col = i;
+                }
+                if let Some(i) = cols.iter().position(|&c| c == "sm") {
+                    sm_col = i;
+                }
+                fb_col = cols.iter().position(|&c| c == "fb");
+            }
+            continue;
+        }
+        let cols: Vec<&str> = trimmed.split_whitespace().collect();
+        let Some(pid) = cols.get(pid_col).and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let sm = cols
+            .get(sm_col)
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(|v| v.clamp(0.0, 100.0))
+            .unwrap_or(0.0);
+        let fb = fb_col
+            .and_then(|i| cols.get(i))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let entry = map.entry(pid).or_insert((0.0, 0));
+        entry.0 = (entry.0 + sm).min(100.0);
+        entry.1 = entry.1.max(fb);
+    }
+    map
 }
 
 /// Use, temperature and watts take microseconds; the fan and the energy
@@ -783,5 +1069,29 @@ mod tests {
         assert_eq!(shared.get(), Some(55.0));
         // No GPU: nothing to share.
         assert!(pick_gpu(GpuSource::Publish, false, || None, || None, |_| panic!("nothing")).is_none());
+    }
+
+    #[test]
+    fn parse_nvidia_pmon_modern_and_legacy_formats() {
+        let modern = "\
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa     fb   ccpm    command
+# Idx           #    C/G      %      %      %      %      %      %     MB     MB    name
+    0        1234      G     12      5      0      0      -      -    450      0    Xorg
+    0        5678    C+G     35     20      -      -      -      -   2048      0    python3
+    0           -      -      -      -      -      -      -      -      -      -    -
+";
+        let parsed = parse_nvidia_pmon(modern);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[&1234], (12.0, 450));
+        assert_eq!(parsed[&5678], (35.0, 2048));
+
+        let legacy = "\
+# gpu        pid  type    sm   mem   enc   dec    fb   command
+# Idx          #   C/G     %     %     %     %    MB   name
+    0       4321     G     -     -     -     -   312   firefox
+";
+        let parsed_legacy = parse_nvidia_pmon(legacy);
+        assert_eq!(parsed_legacy.len(), 1);
+        assert_eq!(parsed_legacy[&4321], (0.0, 312));
     }
 }

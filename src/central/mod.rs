@@ -14,7 +14,7 @@ pub(crate) mod layout;
 mod latest;
 mod media;
 pub(crate) mod monitor;
-mod notifications;
+pub(crate) mod notifications;
 mod pages;
 mod panels;
 mod privileged;

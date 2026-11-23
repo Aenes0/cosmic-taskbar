@@ -16,7 +16,7 @@ use crate::central::{
     widgets::{Level, inherit_colors},
     app::{App, Dnd, Message, Page},
     media::Control,
-    notifications::Notification,
+    notifications::{Notification, config::NotifFormat},
     i18n::strings,
     tiles::{
         Tile, TileState, battery_icon, chip_class, grid, icon,
@@ -120,17 +120,52 @@ fn card_container<'a>(
         }))
 }
 
-fn card_class() -> theme::Button {
-    let style = |hovered: bool, theme: &cosmic::Theme| {
+fn notif_card_class(
+    opacity: f32,
+    corner_radius: f32,
+    bg_rgb: Option<[f32; 3]>,
+    accent_rgb: Option<[f32; 3]>,
+    is_new: bool,
+) -> theme::Button {
+    let style = move |hovered: bool, theme: &cosmic::Theme| {
         let cosmic = theme.cosmic();
         let component = &crate::central::widgets::card(cosmic);
+        let alpha = opacity.clamp(0.40, 1.00);
+        let radius = corner_radius.clamp(4.0, 24.0);
+        let (bg, fg) = if let Some([r, g, b]) = bg_rgb {
+            let base = iced::Color::from_rgb(r, g, b);
+            let fg = crate::central::widgets::readable(component.on, base);
+            let color = if hovered {
+                let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                let delta = if luma < 0.5 { 0.08 } else { -0.08 };
+                iced::Color::from_rgba(
+                    (r + delta).clamp(0.0, 1.0),
+                    (g + delta).clamp(0.0, 1.0),
+                    (b + delta).clamp(0.0, 1.0),
+                    (alpha + 0.05).min(1.0),
+                )
+            } else {
+                iced::Color::from_rgba(r, g, b, alpha)
+            };
+            (color, fg)
+        } else {
+            let mut color: iced::Color =
+                if hovered { component.hover } else { component.base }.into();
+            color.a = if hovered { (alpha + 0.05).min(1.0) } else { alpha };
+            (color, component.on.into())
+        };
+        let mut border_color: iced::Color = match accent_rgb {
+            Some([r, g, b]) => iced::Color::from_rgb(r, g, b),
+            None => cosmic.accent_color().into(),
+        };
+        border_color.a = 0.65;
         button::Style {
-            background: Some(Background::Color(
-                if hovered { component.hover } else { component.base }.into(),
-            )),
-            border_radius: cosmic.radius_l()[0].min(CARD_RADIUS).into(),
-            text_color: Some(component.on.into()),
-            icon_color: Some(component.on.into()),
+            background: Some(Background::Color(bg)),
+            border_radius: radius.into(),
+            border_width: if is_new { 1.0 } else { 0.0 },
+            border_color,
+            text_color: Some(fg),
+            icon_color: Some(fg),
             ..button::Style::new()
         }
     };
@@ -1820,43 +1855,53 @@ impl App {
             return widget::container(header).padding(spacing.space_s).into();
         }
 
-        // An app's notifications together, where its newest is; only that one,
-        // with how many more, until asked for the rest.
-        let mut groups: Vec<(&str, Vec<&Notification>)> = Vec::new();
-        for notification in &self.notifications {
-            match groups.iter_mut().find(|(app, _)| *app == notification.app) {
-                Some((_, group)) => group.push(notification),
-                None => groups.push((&notification.app, vec![notification])),
-            }
-        }
         let mut cards: Vec<Element<'_, Message>> = Vec::new();
-        for (app, group) in groups {
-            let expanded = group.len() > 1 && self.expanded.contains(app);
-            if expanded {
-                for notification in &group {
-                    cards.push(self.notification_card(notification, None));
+        if self.notif_config.group_by_app {
+            // An app's notifications together, where its newest is; only that one,
+            // with how many more, until asked for the rest.
+            let mut groups: Vec<(&str, Vec<&Notification>)> = Vec::new();
+            for notification in &self.notifications {
+                match groups.iter_mut().find(|(app, _)| *app == notification.app) {
+                    Some((_, group)) => group.push(notification),
+                    None => groups.push((&notification.app, vec![notification])),
                 }
-                cards.push(
-                    button::custom(
-                        widget::row::with_children(vec![
-                            widget::text::caption(t.show_less).into(),
-                            widget::icon::icon(icon("go-up-symbolic")).size(12).into(),
-                        ])
-                        .spacing(spacing.space_xxs)
-                        .align_y(Alignment::Center),
-                    )
-                    .padding([4, 12])
-                    .class(pill_class())
-                    .on_press(Message::ToggleGroup(app.to_owned()))
-                    .into(),
-                );
-            } else {
-                let more = (group.len() > 1).then(|| (group.len() - 1, app.to_owned()));
-                cards.push(self.notification_card(group[0], more));
+            }
+            for (app, group) in groups {
+                let expanded = group.len() > 1 && self.expanded.contains(app);
+                if expanded {
+                    for notification in &group {
+                        cards.push(self.notification_card(notification, None));
+                    }
+                    cards.push(
+                        button::custom(
+                            widget::row::with_children(vec![
+                                widget::text::caption(t.show_less).into(),
+                                widget::icon::icon(icon("go-up-symbolic")).size(12).into(),
+                            ])
+                            .spacing(spacing.space_xxs)
+                            .align_y(Alignment::Center),
+                        )
+                        .padding([4, 12])
+                        .class(pill_class())
+                        .on_press(Message::ToggleGroup(app.to_owned()))
+                        .into(),
+                    );
+                } else {
+                    let more = (group.len() > 1).then(|| (group.len() - 1, app.to_owned()));
+                    cards.push(self.notification_card(group[0], more));
+                }
+            }
+        } else {
+            for notification in &self.notifications {
+                cards.push(self.notification_card(notification, None));
             }
         }
+        let card_gap = match self.notif_config.format {
+            NotifFormat::Full => spacing.space_xs,
+            NotifFormat::Compact | NotifFormat::Minimal => spacing.space_xxs,
+        };
         // As many as the panel has room for; the others scroll.
-        let list = widget::scrollable(widget::column::with_children(cards).spacing(spacing.space_xs))
+        let list = widget::scrollable(widget::column::with_children(cards).spacing(card_gap))
             .height(Length::Fill);
         widget::column::with_children(vec![header, list.into()])
             .spacing(spacing.space_xs)
@@ -1874,6 +1919,10 @@ impl App {
     ) -> Element<'a, Message> {
         let t = strings();
         let spacing = theme::spacing();
+        let cfg = &self.notif_config;
+        let is_new = self.is_new(notification);
+        let accent_rgb = cfg.accent_rgb();
+        let bg_rgb = cfg.bg_rgb();
         let app_icon = if notification.icon.starts_with('/') {
             widget::icon::from_path(notification.icon.clone().into())
         } else if notification.icon.is_empty() {
@@ -1893,28 +1942,102 @@ impl App {
         } else {
             format!("{} · {ago}", notification.app)
         };
-        let mut source = widget::row::with_capacity(3)
-            .push(widget::text::caption(source_text).class(theme::Text::Custom(dimmed)))
-            .spacing(spacing.space_xxs)
-            .align_y(Alignment::Center);
-        // New since the popup was last open: an accent dot.
-        if self.is_new(notification) {
-            source = source.push(
-                widget::container(widget::space::horizontal().width(Length::Fixed(0.0)))
-                    .width(Length::Fixed(8.0))
-                    .height(Length::Fixed(8.0))
-                    .class(theme::Container::custom(|theme| widget::container::Style {
-                        background: Some(Background::Color(theme.cosmic().accent_color().into())),
+        let one_line =
+            || iced::core::text::Ellipsize::End(iced::core::text::EllipsizeHeightLimit::Lines(1));
+        let new_dot = || -> Element<'a, Message> {
+            widget::container(widget::space::horizontal().width(Length::Fixed(0.0)))
+                .width(Length::Fixed(8.0))
+                .height(Length::Fixed(8.0))
+                .class(theme::Container::custom(move |theme| {
+                    let color: iced::Color = match accent_rgb {
+                        Some([r, g, b]) => iced::Color::from_rgb(r, g, b),
+                        None => theme.cosmic().accent_color().into(),
+                    };
+                    widget::container::Style {
+                        background: Some(Background::Color(color)),
                         border: iced::Border {
                             radius: 4.0.into(),
                             ..Default::default()
                         },
                         ..Default::default()
-                    })),
+                    }
+                }))
+                .into()
+        };
+        let source_label: Element<'a, Message> = if bg_rgb.is_some() {
+            widget::text::caption(source_text).ellipsize(one_line()).into()
+        } else {
+            widget::text::caption(source_text)
+                .class(theme::Text::Custom(dimmed))
+                .ellipsize(one_line())
+                .into()
+        };
+        let key = (notification.id, notification.restored);
+        let card_style = notif_card_class(
+            cfg.opacity,
+            cfg.corner_radius,
+            bg_rgb,
+            accent_rgb,
+            is_new,
+        );
+
+        if cfg.format == NotifFormat::Minimal {
+            let mut title_row = widget::row::with_capacity(2)
+                .push(
+                    widget::text::body(notification.summary.clone())
+                        .font(cosmic::font::semibold())
+                        .ellipsize(one_line())
+                        .width(Length::Fill),
+                )
+                .spacing(spacing.space_xxs)
+                .align_y(Alignment::Center);
+            if is_new {
+                title_row = title_row.push(new_dot());
+            }
+            let text = widget::column::with_children(vec![title_row.into(), source_label])
+                .width(Length::Fill);
+            let mut row = widget::row::with_capacity(4)
+                .push(widget::icon::icon(app_icon).size(18))
+                .push(text)
+                .spacing(spacing.space_xs)
+                .align_y(Alignment::Center);
+            if let Some((count, app)) = more {
+                row = row.push(
+                    button::custom(
+                        widget::row::with_children(vec![
+                            widget::text::caption(format!("+{count}")).into(),
+                            widget::icon::icon(icon("go-down-symbolic")).size(12).into(),
+                        ])
+                        .spacing(2)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([2, 6])
+                    .class(on_card_class())
+                    .on_press(Message::ToggleGroup(app)),
+                );
+            }
+            row = row.push(
+                button::icon(icon("window-close-symbolic"))
+                    .icon_size(14)
+                    .padding(2)
+                    .on_press(Message::DismissNotification(key)),
             );
+            return button::custom(row)
+                .padding([6, 10])
+                .width(Length::Fill)
+                .class(card_style)
+                .on_press(Message::OpenNotification(key))
+                .into();
         }
-        let one_line =
-            || iced::core::text::Ellipsize::End(iced::core::text::EllipsizeHeightLimit::Lines(1));
+
+        let mut source = widget::row::with_capacity(3)
+            .push(source_label)
+            .spacing(spacing.space_xxs)
+            .align_y(Alignment::Center);
+        // New since the popup was last open: an accent dot.
+        if is_new {
+            source = source.push(new_dot());
+        }
         let mut text = widget::column::with_capacity(4)
             .push(source)
             .push(
@@ -1922,32 +2045,40 @@ impl App {
                     .font(cosmic::font::semibold())
                     .ellipsize(one_line()),
             );
-        if !notification.body.is_empty() {
+        let max_lines = match cfg.format {
+            NotifFormat::Full => cfg.max_body_lines.clamp(1, 5) as usize,
+            NotifFormat::Compact => cfg.max_body_lines.clamp(1, 2) as usize,
+            NotifFormat::Minimal => 0,
+        };
+        if cfg.show_body && max_lines > 0 && !notification.body.is_empty() {
             text = text.push(widget::text::caption(notification.body.clone()).ellipsize(
-                iced::core::text::Ellipsize::End(iced::core::text::EllipsizeHeightLimit::Lines(3)),
+                iced::core::text::Ellipsize::End(
+                    iced::core::text::EllipsizeHeightLimit::Lines(max_lines),
+                ),
             ));
         }
         // Its buttons, like Reply or Mark as read; the default is the click.
-        let actions: Vec<Element<'_, Message>> = notification
-            .actions
-            .iter()
-            .filter(|(key, label)| key != "default" && !label.is_empty())
-            .map(|(key, label)| {
-                button::custom(widget::text::caption(label.clone()))
-                    .padding([4, 12])
-                    .class(on_card_class())
-                    .on_press(Message::NotificationAction(notification.id, key.clone()))
-                    .into()
-            })
-            .collect();
-        if !actions.is_empty() {
-            text = text.push(
-                widget::row::with_children(actions)
-                    .spacing(spacing.space_xxs)
-                    .padding([spacing.space_xxs, 0, 0, 0]),
-            );
+        if cfg.show_actions {
+            let actions: Vec<Element<'_, Message>> = notification
+                .actions
+                .iter()
+                .filter(|(key, label)| key != "default" && !label.is_empty())
+                .map(|(key, label)| {
+                    button::custom(widget::text::caption(label.clone()))
+                        .padding([4, 12])
+                        .class(on_card_class())
+                        .on_press(Message::NotificationAction(notification.id, key.clone()))
+                        .into()
+                })
+                .collect();
+            if !actions.is_empty() {
+                text = text.push(
+                    widget::row::with_children(actions)
+                        .spacing(spacing.space_xxs)
+                        .padding([spacing.space_xxs, 0, 0, 0]),
+                );
+            }
         }
-        let key = (notification.id, notification.restored);
         // On the right: dismiss, and under it how many more of the app's.
         let mut side = widget::column::with_capacity(2)
             .push(
@@ -1972,16 +2103,21 @@ impl App {
                 .on_press(Message::ToggleGroup(app)),
             );
         }
+        let (icon_size, card_pad) = match cfg.format {
+            NotifFormat::Full => (32, [12, 12]),
+            NotifFormat::Compact => (24, [8, 10]),
+            NotifFormat::Minimal => (18, [6, 10]),
+        };
         let content = widget::row::with_children(vec![
-            widget::icon::icon(app_icon).size(32).into(),
+            widget::icon::icon(app_icon).size(icon_size).into(),
             text.width(Length::Fill).into(),
             side.into(),
         ])
         .spacing(spacing.space_s);
         button::custom(content)
-            .padding(12)
+            .padding(card_pad)
             .width(Length::Fill)
-            .class(card_class())
+            .class(card_style)
             .on_press(Message::OpenNotification(key))
             .into()
     }

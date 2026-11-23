@@ -11,9 +11,9 @@ use cosmic::{
 };
 
 use super::{
-    Monitor, Message, Sort, bytes,
+    Monitor, Message, bytes, sort_groups,
     chart::{Area, Bars, Days, Hue, Series, Split},
-    config::{BarItem, Panel},
+    config::{BarItem, CardMode, Panel, ProcSort},
     decimal,
     sample::{Chip, Temp},
     texts::texts,
@@ -200,6 +200,28 @@ fn speed(value: f32) -> String {
     format!("{}/s", bytes(f64::from(value)))
 }
 
+fn truncate_name(name: &str, max_chars: usize) -> String {
+    if name.chars().count() <= max_chars {
+        name.to_owned()
+    } else {
+        let mut s: String = name.chars().take(max_chars.saturating_sub(1)).collect();
+        s.push('…');
+        s
+    }
+}
+
+fn format_gpu_cell(gpu_pct: f32, gpu_mem_mb: u64) -> String {
+    if gpu_pct >= 0.5 {
+        format!("{gpu_pct:.0}%")
+    } else if gpu_mem_mb >= 1024 {
+        format!("{}G", decimal(gpu_mem_mb as f64 / 1024.0, 1))
+    } else if gpu_mem_mb > 0 {
+        format!("{gpu_mem_mb}M")
+    } else {
+        "—".to_owned()
+    }
+}
+
 fn money(value: f64) -> String {
     format!("{} {}", texts().currency, decimal(value, 2))
 }
@@ -266,7 +288,7 @@ impl Monitor {
     pub fn main_view(&self) -> Element<'_, Message> {
         let mut panels: Vec<Element<'_, Message>> = Vec::new();
         for panel in self.settings.order.iter().copied() {
-            if self.settings.hidden.contains(&panel) {
+            if self.settings.card_mode(panel) == CardMode::Hidden {
                 continue;
             }
             // Nothing to say for a GPU that isn't there.
@@ -314,37 +336,54 @@ impl Monitor {
         )
     }
 
-    /// The header, and under it the weather.
+    /// The header, and under it the weather (unless hidden).
     fn header_and_weather(&self) -> Element<'_, Message> {
+        if self.settings.weather_mode == CardMode::Hidden {
+            return crate::central::pages::panel(self.header_row());
+        }
         let spacing = theme::spacing();
         crate::central::pages::panel(
             widget::column::with_children(vec![
                 self.header_row(),
-                widget::container(self.weather_block()).padding([0, spacing.space_xxs, spacing.space_xxs, spacing.space_xxs]).into(),
+                widget::container(self.weather_block())
+                    .padding([0, spacing.space_xxs, spacing.space_xxs, spacing.space_xxs])
+                    .into(),
             ])
             .spacing(spacing.space_xxs),
         )
     }
 
-    /// A panel, its title on top, which folds it; what it says, under.
+    /// A panel, its title on top cycling Full -> Compact -> Minimal -> Full;
+    /// what it says, under (depending on the active CardMode).
     fn panel(&self, panel: Panel) -> Element<'_, Message> {
         let spacing = theme::spacing();
-        let folded = self.settings.is_folded(panel);
-        let (summary, extra) = self.summary(panel);
+        let mode = self.settings.card_mode(panel);
+        let (summary, extra) = self.summary(panel, mode);
+        let summary_el: Element<'_, Message> = if mode == CardMode::Minimal {
+            widget::text::caption(summary)
+                .wrapping(iced::widget::text::Wrapping::None)
+                .class(theme::Text::Custom(dimmed))
+                .into()
+        } else {
+            widget::text::body(summary).class(theme::Text::Custom(dimmed)).into()
+        };
+        let chevron = match mode {
+            CardMode::Full => "go-up-symbolic",
+            CardMode::Compact => "list-remove-symbolic",
+            CardMode::Minimal | CardMode::Hidden => "go-down-symbolic",
+        };
         let mut title = widget::row::with_capacity(5)
             .push(badge(panel_icon(panel), panel_hue(panel), 26.0))
             .push(widget::text::heading(panel.name()).width(Length::Fill))
-            .push(widget::text::body(summary).class(theme::Text::Custom(dimmed)))
+            .push(summary_el)
             .spacing(spacing.space_xs)
             .align_y(Alignment::Center);
-        title = title.push(
-            widget::icon::icon(icon(if folded { "go-down-symbolic" } else { "go-up-symbolic" })).size(14),
-        );
+        title = title.push(widget::icon::icon(icon(chevron)).size(14));
         let title = button::custom(title)
             .padding([4, 4])
             .width(Length::Fill)
             .class(title_class())
-            .on_press(Message::ToggleFold(panel));
+            .on_press(Message::CycleCardMode(panel));
         let header: Element<'_, Message> = match extra {
             Some(extra) => widget::row::with_children(vec![title.into(), extra])
                 .spacing(2)
@@ -353,17 +392,94 @@ impl Monitor {
             None => title.into(),
         };
         let mut column = widget::column::with_capacity(2).push(header).spacing(spacing.space_xs);
-        if !folded {
-            column = column.push(
-                widget::container(self.body(panel)).padding([0, spacing.space_xxs, spacing.space_xxs, spacing.space_xxs]),
-            );
+        match mode {
+            CardMode::Full => {
+                column = column.push(
+                    widget::container(self.body(panel))
+                        .padding([0, spacing.space_xxs, spacing.space_xxs, spacing.space_xxs]),
+                );
+            }
+            CardMode::Compact => {
+                column = column.push(
+                    widget::container(self.compact_body(panel))
+                        .padding([0, spacing.space_xxs, spacing.space_xxs, spacing.space_xxs]),
+                );
+            }
+            CardMode::Minimal | CardMode::Hidden => {}
         }
         crate::central::pages::panel(column.padding(spacing.space_s))
     }
 
-    /// What a panel says in its title, folded or not; and a button there.
-    fn summary(&self, panel: Panel) -> (String, Option<Element<'_, Message>>) {
+    /// What a panel says in its title: concise in Full/Compact, rich inline
+    /// summary in Minimal; plus an optional button beside the title.
+    fn summary(&self, panel: Panel, mode: CardMode) -> (String, Option<Element<'_, Message>>) {
         let now = self.now.as_ref();
+        let t = texts();
+        if mode == CardMode::Minimal {
+            let text = match panel {
+                Panel::Energy => self.total_watts().map(|w| format!("{w:.0} W")).unwrap_or_default(),
+                Panel::Cpu => match now.and_then(|n| cpu_temp(&n.chips)) {
+                    Some(temp) => format!("{:.0}% · {temp:.0} °C", self.rates.cpu),
+                    None => format!("{:.0}%", self.rates.cpu),
+                },
+                Panel::Gpu => now
+                    .and_then(|n| n.gpu.as_ref())
+                    .map(|g| {
+                        let mut parts = vec![format!("{:.0}%", g.usage)];
+                        if let Some(temp) = g.temp {
+                            parts.push(format!("{temp:.0} °C"));
+                        }
+                        if let Some(watts) = g.watts {
+                            parts.push(format!("{watts:.0} W"));
+                        }
+                        parts.join(" · ")
+                    })
+                    .unwrap_or_default(),
+                Panel::Memory => now
+                    .map(|n| {
+                        format!(
+                            "{} / {}",
+                            decimal(n.memory.used as f64 / 1024f64.powi(3), 1),
+                            bytes(n.memory.total as f64),
+                        )
+                    })
+                    .unwrap_or_default(),
+                Panel::Disks => now
+                    .and_then(|n| {
+                        n.mounts
+                            .iter()
+                            .find(|m| m.path == "/")
+                            .or_else(|| n.mounts.first())
+                            .map(|m| format!("{:.0}%", m.used as f64 / m.total.max(1) as f64 * 100.0))
+                    })
+                    .unwrap_or_else(|| speed(self.rates.read + self.rates.write)),
+                Panel::Network => format!("↓ {} ↑ {}", speed(self.rates.down), speed(self.rates.up)),
+                Panel::Sensors => {
+                    let mut parts = Vec::new();
+                    if let Some(cpu_t) = now.and_then(|n| cpu_temp(&n.chips)) {
+                        parts.push(format!("{cpu_t:.0} °C"));
+                    }
+                    if let Some(gpu_t) = now.and_then(|n| n.gpu.as_ref()).and_then(|g| g.temp) {
+                        parts.push(format!("GPU {gpu_t:.0} °C"));
+                    }
+                    parts.join(" · ")
+                }
+                Panel::Processes => {
+                    let mut groups: Vec<&super::Group> = self.rates.groups.iter().collect();
+                    sort_groups(&mut groups, ProcSort::Cpu, false);
+                    if let Some(top) = groups.first() {
+                        let short = truncate_name(&top.name, 14);
+                        format!("{}: {} ({:.0}%)", t.procs_top, short, top.cpu)
+                    } else {
+                        String::new()
+                    }
+                }
+                Panel::System => now
+                    .map(|n| format!("{} · {}", uptime(n.uptime), decimal(f64::from(n.load[0]), 2)))
+                    .unwrap_or_default(),
+            };
+            return (text, None);
+        }
         match panel {
             Panel::Energy => (
                 self.total_watts().map(|w| format!("{w:.0} W")).unwrap_or_default(),
@@ -379,7 +495,7 @@ impl Monitor {
                     .unwrap_or_default(),
                 None,
             ),
-            Panel::Disks => (format!("{}", speed(self.rates.read + self.rates.write)), None),
+            Panel::Disks => (speed(self.rates.read + self.rates.write), None),
             Panel::Network => (format!("↓ {}", speed(self.rates.down)), None),
             Panel::Sensors => (
                 now.and_then(|n| cpu_temp(&n.chips)).map(|t| format!("{t:.0} °C")).unwrap_or_default(),
@@ -405,9 +521,345 @@ impl Monitor {
             Panel::Disks => self.disks(now),
             Panel::Network => self.network(now),
             Panel::Sensors => self.sensors(now),
-            Panel::Processes => self.processes(),
+            Panel::Processes => self.processes(false),
             Panel::System => self.system(now),
         }
+    }
+
+    fn compact_body(&self, panel: Panel) -> Element<'_, Message> {
+        let Some(now) = self.now.as_ref() else {
+            return faint(texts().reading).into();
+        };
+        match panel {
+            Panel::Energy => self.energy_compact(),
+            Panel::Cpu => self.cpu_compact(now),
+            Panel::Gpu => self.gpu_compact(now),
+            Panel::Memory => self.memory_compact(now),
+            Panel::Disks => self.disks_compact(now),
+            Panel::Network => self.network_compact(now),
+            Panel::Sensors => self.sensors_compact(now),
+            Panel::Processes => self.processes(true),
+            Panel::System => self.system_compact(now),
+        }
+    }
+
+    fn energy_compact(&self) -> Element<'_, Message> {
+        let t = texts();
+        let dark = self.dark();
+        let spacing = theme::spacing();
+        let mut column = widget::column::with_capacity(4).spacing(spacing.space_xs);
+        let mut breakdown = Vec::new();
+        if let Some(w) = self.rates.cpu_watts {
+            breakdown.push(format!("{} {w:.0} W", t.cpu));
+        }
+        if let Some(w) = self.rates.gpu_watts {
+            breakdown.push(format!("{} {w:.0} W", t.gpu));
+        }
+        if self.settings.rest_watts > 0.0 {
+            breakdown.push(format!("{} ~{:.0} W", t.rest, self.settings.rest_watts));
+        }
+        column = column.push(
+            widget::row::with_children(vec![
+                widget::text(self.total_watts().map_or("—".to_owned(), |w| format!("{w:.0} W")))
+                    .size(20)
+                    .font(cosmic::font::bold())
+                    .class(theme::Text::Color(Hue::Energy.color(dark)))
+                    .into(),
+                widget::space::horizontal().into(),
+                faint(breakdown.join(" · ")).into(),
+            ])
+            .align_y(Alignment::Center),
+        );
+        let ledger = &self.meter.ledger;
+        let fmt_wh = |wh: f64| match self.settings.tariff {
+            Some(tariff) => format!("{} · {}", kwh(wh), money(wh / 1000.0 * tariff)),
+            None => kwh(wh),
+        };
+        column = column.push(stats(vec![
+            stat(t.today, fmt_wh(ledger.today_wh()), Some(Hue::Energy)),
+            stat(t.this_month, fmt_wh(ledger.month_wh()), None),
+        ]));
+        column.into()
+    }
+
+    fn cpu_compact<'a>(&'a self, now: &'a super::sample::Reading) -> Element<'a, Message> {
+        let t = texts();
+        let dark = self.dark();
+        let temp = cpu_temp(&now.chips);
+        let mut extras = Vec::new();
+        if let Some(c) = temp {
+            extras.push(format!("{c:.0} °C"));
+        }
+        if let Some((avg, _)) = now.frequency {
+            extras.push(format!("{} GHz", decimal(f64::from(avg) / 1000.0, 2)));
+        }
+        if let Some(w) = self.rates.cpu_watts {
+            extras.push(format!("{w:.0} W"));
+        }
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text(format!("{:.0}%", self.rates.cpu))
+                    .size(20)
+                    .font(cosmic::font::bold())
+                    .class(theme::Text::Color(Hue::Cpu.color(dark)))
+                    .into(),
+                widget::space::horizontal().into(),
+                faint(extras.join(" · ")).into(),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            Split::level(self.rates.cpu / 100.0, Some(Hue::Cpu), 8.0),
+            line(
+                format!("{} {} · {} threads", self.info.cores, t.cores, self.info.threads),
+                format!("{} {}", t.load, decimal(f64::from(now.load[0]), 2)),
+            ),
+        ])
+        .spacing(6)
+        .into()
+    }
+
+    fn gpu_compact<'a>(&'a self, now: &'a super::sample::Reading) -> Element<'a, Message> {
+        let t = texts();
+        let dark = self.dark();
+        let Some(gpu) = &now.gpu else {
+            return faint(t.no_gpu).into();
+        };
+        let mut extras = Vec::new();
+        if let Some(c) = gpu.temp {
+            extras.push(format!("{c:.0} °C"));
+        }
+        if let Some(w) = gpu.watts {
+            extras.push(format!("{w:.0} W"));
+        }
+        if let Some(clk) = gpu.clock {
+            extras.push(format!("{} GHz", decimal(f64::from(clk) / 1000.0, 2)));
+        }
+        let mut column = widget::column::with_capacity(4)
+            .push(
+                widget::row::with_children(vec![
+                    widget::text(format!("{:.0}%", gpu.usage))
+                        .size(20)
+                        .font(cosmic::font::bold())
+                        .class(theme::Text::Color(Hue::Gpu.color(dark)))
+                        .into(),
+                    widget::space::horizontal().into(),
+                    faint(extras.join(" · ")).into(),
+                ])
+                .align_y(Alignment::Center),
+            )
+            .push(Split::level(gpu.usage / 100.0, Some(Hue::Gpu), 8.0))
+            .spacing(6);
+        if gpu.vram_total > 0 {
+            let fraction = gpu.vram_used as f32 / gpu.vram_total as f32;
+            column = column
+                .push(line(
+                    t.vram.to_owned(),
+                    format!("{} / {}", bytes(gpu.vram_used as f64), bytes(gpu.vram_total as f64)),
+                ))
+                .push(Split::level(fraction, Some(Hue::Gpu), 6.0));
+        }
+        column.into()
+    }
+
+    fn memory_compact<'a>(&'a self, now: &'a super::sample::Reading) -> Element<'a, Message> {
+        let t = texts();
+        let dark = self.dark();
+        let memory = &now.memory;
+        let total = memory.total.max(1) as f32;
+        let mut cache = Hue::Memory.color(dark);
+        cache.a = 0.38;
+        let mut column = widget::column::with_capacity(4)
+            .push(
+                widget::row::with_children(vec![
+                    widget::text(format!(
+                        "{} / {}",
+                        decimal(memory.used as f64 / 1024f64.powi(3), 1),
+                        bytes(memory.total as f64),
+                    ))
+                    .size(18)
+                    .font(cosmic::font::bold())
+                    .class(theme::Text::Color(Hue::Memory.color(dark)))
+                    .into(),
+                    widget::space::horizontal().into(),
+                    faint(format!(
+                        "{} {}",
+                        t.available,
+                        bytes(memory.total.saturating_sub(memory.used) as f64)
+                    ))
+                    .into(),
+                ])
+                .align_y(Alignment::Center),
+            )
+            .push(
+                Split {
+                    parts: vec![
+                        (memory.used as f32 / total, Hue::Memory.color(dark)),
+                        (memory.cache as f32 / total, cache),
+                    ],
+                }
+                .view(8.0),
+            )
+            .spacing(6);
+        if memory.swap_total > 0 {
+            column = column.push(line(
+                t.swap.to_owned(),
+                format!("{} / {}", bytes(memory.swap_used as f64), bytes(memory.swap_total as f64)),
+            ));
+        }
+        column.into()
+    }
+
+    fn disks_compact<'a>(&'a self, now: &'a super::sample::Reading) -> Element<'a, Message> {
+        let t = texts();
+        let mut column = widget::column::with_capacity(6).spacing(6);
+        column = column.push(widget::row::with_children(vec![
+            widget::row::with_children(vec![
+                dot(Hue::Disk),
+                widget::text::caption(format!("{} {}", t.read, speed(self.rates.read))).into(),
+            ])
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::space::horizontal().into(),
+            widget::row::with_children(vec![
+                dot(Hue::Upload),
+                widget::text::caption(format!("{} {}", t.write, speed(self.rates.write))).into(),
+            ])
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into(),
+        ]));
+        for mount in &now.mounts {
+            let fraction = mount.used as f32 / mount.total.max(1) as f32;
+            column = column.push(
+                widget::column::with_children(vec![
+                    line(
+                        mount.path.clone(),
+                        format!(
+                            "{} / {} · {:.0}%",
+                            bytes(mount.used as f64),
+                            bytes(mount.total as f64),
+                            fraction * 100.0
+                        ),
+                    ),
+                    Split::level(fraction, None, 6.0),
+                ])
+                .spacing(3),
+            );
+        }
+        column.into()
+    }
+
+    fn network_compact<'a>(&'a self, now: &'a super::sample::Reading) -> Element<'a, Message> {
+        let t = texts();
+        let dark = self.dark();
+        let mut column = widget::column::with_capacity(3).spacing(6);
+        column = column.push(
+            widget::row::with_children(vec![
+                widget::row::with_children(vec![
+                    dot(Hue::Download),
+                    widget::text(format!("↓ {}", speed(self.rates.down)))
+                        .size(15)
+                        .font(cosmic::font::semibold())
+                        .class(theme::Text::Color(Hue::Download.color(dark)))
+                        .into(),
+                ])
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into(),
+                widget::row::with_children(vec![
+                    dot(Hue::Upload),
+                    widget::text(format!("↑ {}", speed(self.rates.up)))
+                        .size(15)
+                        .font(cosmic::font::semibold())
+                        .class(theme::Text::Color(Hue::Upload.color(dark)))
+                        .into(),
+                ])
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .align_y(Alignment::Center),
+        );
+        if let Some((name, address)) = &now.route {
+            let value = match address {
+                Some(ip) => format!("{name} · {ip}"),
+                None => name.clone(),
+            };
+            column = column.push(line(t.interface.to_owned(), value));
+        }
+        column = column.push(line(
+            t.since_boot.to_owned(),
+            format!("↓ {} · ↑ {}", bytes(now.net.0 as f64), bytes(now.net.1 as f64)),
+        ));
+        column.into()
+    }
+
+    fn sensors_compact<'a>(&'a self, now: &'a super::sample::Reading) -> Element<'a, Message> {
+        let t = texts();
+        let mut column = widget::column::with_capacity(6).spacing(4);
+        let mut drives = 0;
+        for chip in &now.chips {
+            let Some(temp) = chip.temps.first() else { continue };
+            let label = match chip.kind.as_str() {
+                "k10temp" | "coretemp" | "zenpower" | "cpu_thermal" => t.cpu.to_owned(),
+                "nvme" | "drivetemp" => {
+                    drives += 1;
+                    if chip.model.is_empty() {
+                        format!("{} {drives}", t.drive)
+                    } else {
+                        chip.model.clone()
+                    }
+                }
+                "amdgpu" | "nouveau" => t.gpu.to_owned(),
+                "acpitz" => t.board.to_owned(),
+                kind => kind.to_owned(),
+            };
+            column = column.push(
+                widget::row::with_children(vec![
+                    dot(temperature_hue(temp)),
+                    faint(label).width(Length::Fill).into(),
+                    widget::text::caption(format!("{:.0} °C", temp.celsius))
+                        .font(cosmic::font::semibold())
+                        .into(),
+                ])
+                .spacing(6)
+                .align_y(Alignment::Center),
+            );
+        }
+        if let Some(gpu) = &now.gpu
+            && let Some(celsius) = gpu.temp
+        {
+            let temp = Temp { label: t.gpu.to_owned(), celsius, critical: Some(90.0) };
+            column = column.push(
+                widget::row::with_children(vec![
+                    dot(temperature_hue(&temp)),
+                    faint(gpu.name.clone()).width(Length::Fill).into(),
+                    widget::text::caption(format!("{celsius:.0} °C"))
+                        .font(cosmic::font::semibold())
+                        .into(),
+                ])
+                .spacing(6)
+                .align_y(Alignment::Center),
+            );
+        }
+        column.into()
+    }
+
+    fn system_compact<'a>(&'a self, now: &'a super::sample::Reading) -> Element<'a, Message> {
+        let t = texts();
+        widget::column::with_children(vec![
+            line(t.os.to_owned(), self.info.os.clone()),
+            line(t.kernel.to_owned(), self.info.kernel.clone()),
+            line(
+                t.uptime.to_owned(),
+                format!("{} · {} {}", uptime(now.uptime), t.load, decimal(f64::from(now.load[0]), 2)),
+            ),
+        ])
+        .spacing(4)
+        .into()
     }
 
     /// Watts now, large, of what; the minute's chart; the energy today, this
@@ -899,31 +1351,69 @@ impl Monitor {
         column.into()
     }
 
-    fn processes(&self) -> Element<'_, Message> {
+    fn processes(&self, compact: bool) -> Element<'_, Message> {
         let t = texts();
         let spacing = theme::spacing();
-        let sort = self.sort.unwrap_or(Sort::Cpu);
+        let sort = self.settings.proc_sort;
+        let asc = self.settings.proc_sort_asc;
+        let limit = if compact {
+            self.settings.procs_count.min(3)
+        } else {
+            self.settings.procs_count
+        };
         let mut groups: Vec<&super::Group> = self.rates.groups.iter().collect();
-        match sort {
-            Sort::Cpu => groups.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.memory.cmp(&a.memory))),
-            Sort::Memory => groups.sort_by(|a, b| b.memory.cmp(&a.memory)),
+        sort_groups(&mut groups, sort, asc);
+
+        let dark = self.dark();
+        let col_header = |label: &str, col: ProcSort, width: Length, align: iced::alignment::Horizontal| -> Element<'static, Message> {
+            let active = sort == col;
+            let text = if active {
+                format!("{label} {}", if asc { "▲" } else { "▼" })
+            } else {
+                label.to_owned()
+            };
+            let lbl = widget::text::caption(text)
+                .wrapping(iced::widget::text::Wrapping::None)
+                .width(Length::Fill)
+                .align_x(align);
+            let lbl = if active {
+                lbl.font(cosmic::font::semibold())
+                    .class(theme::Text::Color(Hue::Cpu.color(dark)))
+            } else {
+                lbl.class(theme::Text::Custom(dimmed))
+            };
+            button::custom(lbl)
+                .padding([2, 2])
+                .width(width)
+                .class(title_class())
+                .on_press(Message::Sort(col))
+                .into()
+        };
+
+        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(6);
+        if !compact {
+            header_cells.push(widget::space::horizontal().width(Length::Fixed(22.0)).into());
         }
-        let mut column = widget::column::with_capacity(12).spacing(spacing.space_xxs);
+        header_cells.push(col_header(t.name_col, ProcSort::Name, Length::Fill, iced::alignment::Horizontal::Left));
+        header_cells.push(col_header(t.cpu, ProcSort::Cpu, Length::Fixed(52.0), iced::alignment::Horizontal::Right));
+        header_cells.push(col_header(t.ram_col, ProcSort::Ram, Length::Fixed(60.0), iced::alignment::Horizontal::Right));
+        header_cells.push(col_header(t.gpu, ProcSort::Gpu, Length::Fixed(50.0), iced::alignment::Horizontal::Right));
+        if !compact {
+            header_cells.push(widget::space::horizontal().width(Length::Fixed(20.0)).into());
+        }
+
+        let mut column = widget::column::with_capacity(limit + 2).spacing(spacing.space_xxs);
         column = column.push(
-            widget::row::with_children(vec![
-                faint(t.sort_by).width(Length::Fill).into(),
-                chip(t.cpu, sort == Sort::Cpu, Message::Sort(Sort::Cpu)),
-                chip(t.memory, sort == Sort::Memory, Message::Sort(Sort::Memory)),
-            ])
-            .spacing(6)
-            .align_y(Alignment::Center),
+            widget::row::with_children(header_cells)
+                .spacing(5)
+                .padding([0u16, 0, 2, 0])
+                .align_y(Alignment::Center),
         );
         if groups.is_empty() {
             column = column.push(faint(t.reading));
         }
-        let dark = self.dark();
-        for group in groups.into_iter().take(8) {
-            if self.asking_end.as_deref() == Some(group.name.as_str()) {
+        for group in groups.into_iter().take(limit) {
+            if !compact && self.asking_end.as_deref() == Some(group.name.as_str()) {
                 let question = if group.pids.len() > 1 {
                     format!("{} {} ({} {})?", t.end, group.name, group.pids.len(), t.processes_word)
                 } else {
@@ -951,59 +1441,98 @@ impl Monitor {
                 );
                 continue;
             }
-            // Its initial, on its own color: the name picks it.
-            let initial = group.name.chars().next().unwrap_or('?').to_uppercase().to_string();
-            let hues = [Hue::Cpu, Hue::Gpu, Hue::Memory, Hue::Disk, Hue::Download, Hue::Upload, Hue::Energy];
-            let hue = hues[group.name.bytes().map(usize::from).sum::<usize>() % hues.len()];
-            let avatar = widget::container(
-                widget::text::caption(initial).font(cosmic::font::bold()).class(theme::Text::Color(hue.color(dark))),
-            )
-            .center(Length::Fixed(26.0))
-            .class(theme::Container::custom(move |theme| {
-                let mut color = hue.color(theme.cosmic().is_dark);
-                color.a = 0.16;
-                widget::container::Style {
-                    background: Some(Background::Color(color)),
-                    border: iced::Border { radius: 13.0.into(), ..Default::default() },
-                    ..Default::default()
-                }
-            }));
             let name = if group.pids.len() > 1 {
                 format!("{} ({})", group.name, group.pids.len())
             } else {
                 group.name.clone()
             };
-            let end: Element<'_, Message> = if group.mine && !VITAL.contains(&group.name.as_str()) {
-                button::icon(icon("window-close-symbolic"))
-                    .icon_size(12)
-                    .padding(4)
-                    .class(theme::Button::Text)
-                    .on_press(Message::AskEnd(Some(group.name.clone())))
-                    .into()
-            } else {
-                widget::space::horizontal().width(Length::Fixed(20.0)).into()
+            let name_el = {
+                let txt = widget::text::caption(name)
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .width(Length::Fill);
+                if sort == ProcSort::Name {
+                    txt.font(cosmic::font::semibold())
+                } else {
+                    txt
+                }
             };
-            let cpu_text = widget::text::caption(format!("{} %", decimal(f64::from(group.cpu), 1)))
-                .width(Length::Fixed(48.0))
-                .align_x(iced::alignment::Horizontal::Right);
-            let memory_text = widget::text::caption(bytes(group.memory as f64))
-                .width(Length::Fixed(64.0))
-                .align_x(iced::alignment::Horizontal::Right);
-            let (cpu_text, memory_text) = match sort {
-                Sort::Cpu => (cpu_text.font(cosmic::font::semibold()), memory_text.class(theme::Text::Custom(dimmed))),
-                Sort::Memory => (cpu_text.class(theme::Text::Custom(dimmed)), memory_text.font(cosmic::font::semibold())),
+            let cpu_el = {
+                let txt = widget::text::caption(format!("{}%", decimal(f64::from(group.cpu), 1)))
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .width(Length::Fixed(52.0))
+                    .align_x(iced::alignment::Horizontal::Right);
+                if sort == ProcSort::Cpu {
+                    txt.font(cosmic::font::semibold())
+                } else {
+                    txt.class(theme::Text::Custom(dimmed))
+                }
             };
+            let mem_el = {
+                let txt = widget::text::caption(bytes(group.memory as f64))
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .width(Length::Fixed(60.0))
+                    .align_x(iced::alignment::Horizontal::Right);
+                if sort == ProcSort::Ram {
+                    txt.font(cosmic::font::semibold())
+                } else {
+                    txt.class(theme::Text::Custom(dimmed))
+                }
+            };
+            let gpu_el = {
+                let txt = widget::text::caption(format_gpu_cell(group.gpu_pct, group.gpu_mem_mb))
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .width(Length::Fixed(50.0))
+                    .align_x(iced::alignment::Horizontal::Right);
+                if sort == ProcSort::Gpu {
+                    txt.font(cosmic::font::semibold())
+                } else {
+                    txt.class(theme::Text::Custom(dimmed))
+                }
+            };
+
+            let mut row_cells: Vec<Element<'_, Message>> = Vec::with_capacity(6);
+            if !compact {
+                // Its initial, on its own color: the name picks it.
+                let initial = group.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                let hues = [Hue::Cpu, Hue::Gpu, Hue::Memory, Hue::Disk, Hue::Download, Hue::Upload, Hue::Energy];
+                let hue = hues[group.name.bytes().map(usize::from).sum::<usize>() % hues.len()];
+                let avatar = widget::container(
+                    widget::text::caption(initial).font(cosmic::font::bold()).class(theme::Text::Color(hue.color(dark))),
+                )
+                .center(Length::Fixed(22.0))
+                .class(theme::Container::custom(move |theme| {
+                    let mut color = hue.color(theme.cosmic().is_dark);
+                    color.a = 0.16;
+                    widget::container::Style {
+                        background: Some(Background::Color(color)),
+                        border: iced::Border { radius: 11.0.into(), ..Default::default() },
+                        ..Default::default()
+                    }
+                }));
+                row_cells.push(avatar.into());
+            }
+            row_cells.push(name_el.into());
+            row_cells.push(cpu_el.into());
+            row_cells.push(mem_el.into());
+            row_cells.push(gpu_el.into());
+            if !compact {
+                let end: Element<'_, Message> = if group.mine && !VITAL.contains(&group.name.as_str()) {
+                    button::icon(icon("window-close-symbolic"))
+                        .icon_size(12)
+                        .padding(4)
+                        .class(theme::Button::Text)
+                        .on_press(Message::AskEnd(Some(group.name.clone())))
+                        .into()
+                } else {
+                    widget::space::horizontal().width(Length::Fixed(20.0)).into()
+                };
+                row_cells.push(end);
+            }
             column = column.push(
-                widget::row::with_children(vec![
-                    avatar.into(),
-                    widget::text::caption(name).width(Length::Fill).into(),
-                    cpu_text.into(),
-                    memory_text.into(),
-                    end,
-                ])
-                .spacing(8)
-                .padding([2, 0])
-                .align_y(Alignment::Center),
+                widget::row::with_children(row_cells)
+                    .spacing(5)
+                    .padding([2, 0])
+                    .align_y(Alignment::Center),
             );
         }
         column.into()
@@ -1028,15 +1557,15 @@ impl Monitor {
         .into()
     }
 
-    /// Arranging: each panel shown or not, a place up or down; what the bar
-    /// shows.
+    /// Arranging: each panel's mode (Full, Compact, Minimal, Hidden) and order;
+    /// what the bar shows.
     pub fn edit_view(&self) -> Element<'_, Message> {
         let t = texts();
         let spacing = theme::spacing();
-        let mut panels = widget::column::with_capacity(12).spacing(2);
+        let mut panels = widget::column::with_capacity(12).spacing(6);
         let last = self.settings.order.len().saturating_sub(1);
         for (at, panel) in self.settings.order.iter().copied().enumerate() {
-            let shown = !self.settings.hidden.contains(&panel);
+            let current = self.settings.card_mode(panel);
             let arrow = |name: &str, message: Option<Message>| -> Element<'_, Message> {
                 button::icon(icon(name))
                     .icon_size(14)
@@ -1045,17 +1574,25 @@ impl Monitor {
                     .on_press_maybe(message)
                     .into()
             };
+            let mode_chips: Vec<Element<'_, Message>> = CardMode::ALL
+                .into_iter()
+                .map(|mode| chip(mode.name(), current == mode, Message::SetCardMode(panel, mode)))
+                .collect();
             panels = panels.push(
-                widget::row::with_children(vec![
-                    badge(panel_icon(panel), panel_hue(panel), 26.0),
-                    widget::text::body(panel.name()).width(Length::Fill).into(),
-                    arrow("go-up-symbolic", (at > 0).then_some(Message::Shift(panel, false))),
-                    arrow("go-down-symbolic", (at < last).then_some(Message::Shift(panel, true))),
-                    widget::toggler(shown).on_toggle(move |_| Message::ToggleHidden(panel)).into(),
+                widget::column::with_children(vec![
+                    widget::row::with_children(vec![
+                        badge(panel_icon(panel), panel_hue(panel), 26.0),
+                        widget::text::body(panel.name()).width(Length::Fill).into(),
+                        arrow("go-up-symbolic", (at > 0).then_some(Message::Shift(panel, false))),
+                        arrow("go-down-symbolic", (at < last).then_some(Message::Shift(panel, true))),
+                    ])
+                    .spacing(spacing.space_xs)
+                    .align_y(Alignment::Center)
+                    .into(),
+                    widget::row::with_children(mode_chips).spacing(4).into(),
                 ])
-                .spacing(spacing.space_xs)
-                .padding([2, 0])
-                .align_y(Alignment::Center),
+                .spacing(4)
+                .padding([2, 0]),
             );
         }
         let mut bar = widget::column::with_capacity(6).spacing(2);

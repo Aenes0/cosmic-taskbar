@@ -11,6 +11,7 @@
 //! not through the socket the panel gives applets marked
 //! `X-NotificationsApplet`: see `watch`.
 
+pub mod config;
 pub mod service;
 mod watch;
 

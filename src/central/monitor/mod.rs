@@ -31,7 +31,7 @@ use cosmic::{
 };
 
 use chart::HISTORY;
-use config::{BarItem, BarMode, Panel, Settings};
+use config::{BarItem, BarMode, CardMode, Panel, ProcSort, Settings};
 use widget::segmented_button::{Entity, SingleSelectModel};
 use sample::{Info, Reading};
 
@@ -78,12 +78,6 @@ const WEATHER_TICK: Duration = Duration::from_secs(60);
 /// After a failed reading, how long until the next try.
 const WEATHER_RETRY: Duration = Duration::from_secs(5 * 60);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Sort {
-    Cpu,
-    Memory,
-}
-
 #[derive(Clone, Debug)]
 pub enum Message {
     /// Time to read again.
@@ -100,8 +94,8 @@ pub enum Message {
     ScreenHeight(Option<i32>),
     /// Into editing or out of it.
     Edit(bool),
-    ToggleFold(Panel),
-    ToggleHidden(Panel),
+    CycleCardMode(Panel),
+    SetCardMode(Panel, CardMode),
     Shift(Panel, bool),
     ToggleBar(BarItem),
     BarMode(BarItem, Entity),
@@ -112,7 +106,7 @@ pub enum Message {
     TariffInput(String),
     RestInput(String),
     ResetEnergy,
-    Sort(Sort),
+    Sort(ProcSort),
     /// A program whose processes to end, asked first; none, not now.
     AskEnd(Option<String>),
     End(String),
@@ -121,7 +115,7 @@ pub enum Message {
     WeatherTick,
     /// Read, or not; and whether it was tried (another applet may be at it).
     WeatherFetched(Option<Box<weather::Weather>>, bool),
-    ToggleWeatherExpanded,
+    CycleWeatherMode,
     /// Into choosing a place, or out of it.
     EditPlace(bool),
     PlaceInput(String),
@@ -138,8 +132,67 @@ pub struct Group {
     /// Percent of the whole CPU.
     pub cpu: f32,
     pub memory: u64,
+    /// GPU utilization percent aggregated across PIDs.
+    pub gpu_pct: f32,
+    /// Dedicated GPU memory in MiB aggregated across PIDs.
+    pub gpu_mem_mb: u64,
     pub pids: Vec<u32>,
     pub mine: bool,
+}
+
+/// Sorts process groups by the requested column and direction (`asc`), with
+/// deterministic tie-breakers.
+pub(crate) fn sort_groups<'a>(groups: &mut [&'a Group], sort: ProcSort, asc: bool) {
+    groups.sort_by(|a, b| {
+        let ord = match sort {
+            ProcSort::Cpu => a.cpu.total_cmp(&b.cpu).then_with(|| a.memory.cmp(&b.memory)),
+            ProcSort::Ram => a.memory.cmp(&b.memory).then_with(|| a.cpu.total_cmp(&b.cpu)),
+            ProcSort::Gpu => a
+                .gpu_pct
+                .total_cmp(&b.gpu_pct)
+                .then_with(|| a.gpu_mem_mb.cmp(&b.gpu_mem_mb))
+                .then_with(|| a.cpu.total_cmp(&b.cpu)),
+            ProcSort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        };
+        let directed = if asc { ord } else { ord.reverse() };
+        directed.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+}
+
+/// Last sampling timestamp for each independently scheduled telemetry component.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ComponentTimers {
+    pub cpu: Option<Instant>,
+    pub gpu: Option<Instant>,
+    pub ram: Option<Instant>,
+    pub disk: Option<Instant>,
+    pub net: Option<Instant>,
+    pub procs: Option<Instant>,
+}
+
+impl ComponentTimers {
+    pub(crate) fn is_due(last: Option<Instant>, now: Instant, interval_secs: u64) -> bool {
+        match last {
+            None => true,
+            Some(at) => now.saturating_duration_since(at) >= Duration::from_secs(interval_secs.max(1)),
+        }
+    }
+
+    pub(crate) fn due(
+        &self,
+        now: Instant,
+        settings: &Settings,
+        full: bool,
+        want_procs: bool,
+    ) -> (bool, bool, bool, bool, bool, bool) {
+        let cpu = Self::is_due(self.cpu, now, settings.cpu_secs);
+        let gpu = Self::is_due(self.gpu, now, settings.gpu_secs);
+        let ram = Self::is_due(self.ram, now, settings.ram_secs);
+        let disk = full && Self::is_due(self.disk, now, settings.disk_secs);
+        let net = Self::is_due(self.net, now, settings.net_secs);
+        let procs = want_procs && Self::is_due(self.procs, now, settings.procs_secs);
+        (cpu, gpu, ram, disk, net, procs)
+    }
 }
 
 /// What changed since the reading before.
@@ -198,7 +251,10 @@ pub struct Monitor {
     pub(crate) meter: energy::Meter,
     /// While a reading is on its way, no other is asked for.
     reading: bool,
-    pub(crate) sort: Option<Sort>,
+    /// Last sampling instant per component, for fine-grained intervals.
+    timers: ComponentTimers,
+    /// Total CPU ticks when processes were last sampled.
+    last_procs_cpu_total: Option<u64>,
     pub(crate) asking_end: Option<String>,
     pub(crate) energy_settings: bool,
     pub(crate) tariff_input: String,
@@ -266,12 +322,12 @@ impl Monitor {
             .map_or(MAX_HEIGHT, |height| (height as f32 - SCREEN_MARGIN).max(480.0))
     }
 
-    /// Whether processes are read: only while their panel shows.
+    /// Whether processes are read: while their card is visible (Full, Compact,
+    /// or Minimal for the inline top-process summary).
     fn wants_processes(&self) -> bool {
         self.popup.is_some()
             && !self.editing
-            && !self.settings.hidden.contains(&Panel::Processes)
-            && !self.settings.is_folded(Panel::Processes)
+            && self.settings.card_mode(Panel::Processes) != CardMode::Hidden
     }
 
     /// Reloads Monitor settings whenever another process (the hosted panel or
@@ -301,15 +357,37 @@ impl Monitor {
         if self.reading {
             return Task::none();
         }
-        self.reading = true;
         let full = self.popup.is_some();
+        let want_procs = self.wants_processes();
+        let now = Instant::now();
+        let (mut cpu, mut gpu_sample, mut ram, mut disk, mut net, mut procs) =
+            self.timers.due(now, &self.settings, full, want_procs);
+        if self.now.is_none() {
+            cpu = true;
+            gpu_sample = true;
+            ram = true;
+            disk = full;
+            net = true;
+            procs = want_procs;
+        }
+        let gpu_energy = self.meter.counts()
+            && (full || self.gpu_energy.is_none_or(|(_, at)| at.elapsed() >= GPU_ENERGY_EVERY));
+        if gpu_energy && !full {
+            gpu_sample = true;
+        }
+        if !cpu && !gpu_sample && !ram && !disk && !net && !procs {
+            return Task::none();
+        }
+        self.reading = true;
         let depth = sample::Depth {
             full,
-            procs: self.wants_processes(),
-            // Only the one counting needs it; while the popup shows, at
-            // every reading, for the panel's numbers.
-            gpu_energy: self.meter.counts()
-                && (full || self.gpu_energy.is_none_or(|(_, at)| at.elapsed() >= GPU_ENERGY_EVERY)),
+            cpu,
+            gpu_sample,
+            ram,
+            disk,
+            net,
+            procs,
+            gpu_energy: gpu_energy && gpu_sample,
             gpu: if self.hosted { sample::GpuSource::Publish } else { sample::GpuSource::Shared },
         };
         Task::future(async move {
@@ -360,8 +438,12 @@ impl Monitor {
         }
         let place = config::weather_place();
         let now = chrono::Utc::now().timestamp();
+        let stale_secs = (self.settings.weather_mins.clamp(5, 180) as i64) * 60;
         let due = force
-            || self.weather.as_ref().is_none_or(|w| w.place != place || w.is_stale(now));
+            || self
+                .weather
+                .as_ref()
+                .is_none_or(|w| w.place != place || w.is_stale_after(now, stale_secs));
         let resting = self.weather_failed_at.is_some_and(|at| at.elapsed() < WEATHER_RETRY);
         if !due || self.weather_fetching || (resting && !force) {
             return Task::none();
@@ -400,94 +482,210 @@ impl Monitor {
         }
     }
 
-    fn take(&mut self, new: Reading) {
+    fn take(&mut self, mut new: Reading) {
         let Some(old) = self.now.take() else {
+            let at = new.at;
+            if new.sampled.cpu {
+                self.timers.cpu = Some(at);
+            }
+            if new.sampled.gpu {
+                self.timers.gpu = Some(at);
+            }
+            if new.sampled.ram {
+                self.timers.ram = Some(at);
+            }
+            if new.sampled.disk {
+                self.timers.disk = Some(at);
+            }
+            if new.sampled.net {
+                self.timers.net = Some(at);
+            }
+            if new.sampled.procs {
+                self.timers.procs = Some(at);
+                self.last_procs_cpu_total = new.procs_cpu_total;
+            }
             self.now = Some(new);
             return;
         };
         let dt = new.at.duration_since(old.at).as_secs_f32().max(0.001);
         let seconds = dt.round() as usize;
-        let mut rates = Rates::default();
-        // The CPU: all, then each thread.
-        let busy = |a: &sample::CpuTimes, b: &sample::CpuTimes| {
-            let total = b.total.saturating_sub(a.total);
-            if total == 0 {
-                0.0
-            } else {
-                b.busy.saturating_sub(a.busy) as f32 / total as f32 * 100.0
-            }
-        };
-        let mut cpus = old.cpu.iter().zip(&new.cpu).map(|(a, b)| busy(a, b));
-        rates.cpu = cpus.next().unwrap_or(0.0);
-        rates.cores = cpus.collect();
-        // Energy: the CPU's counters, the GPU's.
+        // Start from last rates so components whose interval has not elapsed
+        // keep their previously computed values untouched.
+        let mut rates = self.rates.clone();
         let mut joules = 0.0f64;
-        if let (Some(a), Some(b)) = (&old.rapl, &new.rapl) {
-            let used: u64 = a
-                .iter()
-                .zip(b)
-                .map(|((a, range), (b, _))| if b >= a { b - a } else { range - a + b })
-                .sum();
-            joules += used as f64 / 1e6;
-            rates.cpu_watts = Some(used as f32 / 1e6 / dt);
-        }
-        if let Some(gpu) = &new.gpu {
-            rates.gpu_watts = gpu.watts;
-            let guessed = f64::from(gpu.watts.unwrap_or(0.0)) * f64::from(dt.min(30.0));
-            joules += match (self.gpu_energy, gpu.energy_mj) {
-                // All since it was last read.
-                (Some((a, _)), Some(b)) if b >= a => (b - a) as f64 / 1000.0,
-                // Not read this time: the next one counts this too.
-                (Some(_), None) => 0.0,
-                // The first, or after the driver restarted.
-                _ => guessed,
+
+        // CPU: all, then each thread, plus RAPL energy.
+        if new.sampled.cpu {
+            let dt_cpu = self
+                .timers
+                .cpu
+                .map_or(dt, |t| new.at.duration_since(t).as_secs_f32().max(0.001));
+            let busy = |a: &sample::CpuTimes, b: &sample::CpuTimes| {
+                let total = b.total.saturating_sub(a.total);
+                if total == 0 {
+                    0.0
+                } else {
+                    b.busy.saturating_sub(a.busy) as f32 / total as f32 * 100.0
+                }
             };
-            if let Some(b) = gpu.energy_mj {
-                self.gpu_energy = Some((b, Instant::now()));
+            if !old.cpu.is_empty() {
+                let mut cpus = old.cpu.iter().zip(&new.cpu).map(|(a, b)| busy(a, b));
+                rates.cpu = cpus.next().unwrap_or(0.0);
+                rates.cores = cpus.collect();
             }
+            if let (Some(a), Some(b)) = (&old.rapl, &new.rapl) {
+                let used: u64 = a
+                    .iter()
+                    .zip(b)
+                    .map(|((a, range), (b, _))| if b >= a { b - a } else { range - a + b })
+                    .sum();
+                joules += used as f64 / 1e6;
+                rates.cpu_watts = Some(used as f32 / 1e6 / dt_cpu);
+            }
+            self.timers.cpu = Some(new.at);
+        } else {
+            new.cpu = old.cpu;
+            new.frequency = old.frequency;
+            new.rapl = old.rapl;
+            new.load = old.load;
+            new.uptime = old.uptime;
+            new.tasks = old.tasks;
         }
+
+        // Sensors: merge fresh CPU sensors with cached drive/board sensors when
+        // disk sensors were not due in this tick.
+        if new.sampled.disk {
+            // `chips(true)` already read every chip.
+        } else if new.sampled.cpu {
+            let cached_other = old
+                .chips
+                .into_iter()
+                .filter(|c| !sample::CPU_CHIPS.contains(&c.kind.as_str()));
+            new.chips.extend(cached_other);
+        } else {
+            new.chips = old.chips;
+        }
+
+        // GPU metrics & energy.
+        if new.sampled.gpu {
+            let dt_gpu = self
+                .timers
+                .gpu
+                .map_or(dt, |t| new.at.duration_since(t).as_secs_f32().max(0.001));
+            if let Some(gpu) = &new.gpu {
+                rates.gpu_watts = gpu.watts;
+                let guessed = f64::from(gpu.watts.unwrap_or(0.0)) * f64::from(dt_gpu.min(30.0));
+                joules += match (self.gpu_energy, gpu.energy_mj) {
+                    // All since it was last read.
+                    (Some((a, _)), Some(b)) if b >= a => (b - a) as f64 / 1000.0,
+                    // Not read this time: the next one counts this too.
+                    (Some(_), None) => 0.0,
+                    // The first, or after the driver restarted.
+                    _ => guessed,
+                };
+                if let Some(b) = gpu.energy_mj {
+                    self.gpu_energy = Some((b, Instant::now()));
+                }
+            } else {
+                rates.gpu_watts = None;
+            }
+            self.timers.gpu = Some(new.at);
+        } else {
+            new.gpu = old.gpu;
+        }
+
         // The rest, guessed; not for the time asleep.
         if rates.cpu_watts.is_some() || rates.gpu_watts.is_some() {
             joules += self.settings.rest_watts * f64::from(dt.min(30.0));
         }
         self.meter.add(joules, self.popup.is_some());
-        // Drives and network, a second.
-        for (name, read, written) in &new.disks {
-            if let Some((_, r0, w0)) = old.disks.iter().find(|(n, ..)| n == name) {
-                let r = read.saturating_sub(*r0) as f32 * 512.0 / dt;
-                let w = written.saturating_sub(*w0) as f32 * 512.0 / dt;
-                rates.read += r;
-                rates.write += w;
-                rates.disks.push((name.clone(), r, w));
-            }
+
+        // RAM.
+        if new.sampled.ram {
+            self.timers.ram = Some(new.at);
+        } else {
+            new.memory = old.memory;
         }
-        rates.down = new.net.0.saturating_sub(old.net.0) as f32 / dt;
-        rates.up = new.net.1.saturating_sub(old.net.1) as f32 / dt;
-        // Processes, by program: their share of all the CPU's time.
-        if let Some(procs) = &new.procs {
-            let all_ticks = new.cpu.first().zip(old.cpu.first()).map_or(0, |(b, a)| b.total.saturating_sub(a.total));
-            let mut groups: HashMap<&str, Group> = HashMap::new();
-            for (pid, proc) in procs {
-                let before = old.procs.as_ref().and_then(|p| p.get(pid)).map_or(proc.ticks, |p| p.ticks);
-                let cpu = if all_ticks == 0 {
-                    0.0
-                } else {
-                    proc.ticks.saturating_sub(before) as f32 / all_ticks as f32 * 100.0
+
+        // Drives.
+        if new.sampled.disk {
+            let dt_disk = self
+                .timers
+                .disk
+                .map_or(dt, |t| new.at.duration_since(t).as_secs_f32().max(0.001));
+            rates.read = 0.0;
+            rates.write = 0.0;
+            rates.disks.clear();
+            for (name, read, written) in &new.disks {
+                if let Some((_, r0, w0)) = old.disks.iter().find(|(n, ..)| n == name) {
+                    let r = read.saturating_sub(*r0) as f32 * 512.0 / dt_disk;
+                    let w = written.saturating_sub(*w0) as f32 * 512.0 / dt_disk;
+                    rates.read += r;
+                    rates.write += w;
+                    rates.disks.push((name.clone(), r, w));
+                }
+            }
+            self.timers.disk = Some(new.at);
+        } else {
+            new.disks = old.disks;
+            new.mounts = old.mounts;
+        }
+
+        // Network.
+        if new.sampled.net {
+            let dt_net = self
+                .timers
+                .net
+                .map_or(dt, |t| new.at.duration_since(t).as_secs_f32().max(0.001));
+            if self.timers.net.is_some() {
+                rates.down = new.net.0.saturating_sub(old.net.0) as f32 / dt_net;
+                rates.up = new.net.1.saturating_sub(old.net.1) as f32 / dt_net;
+            }
+            self.timers.net = Some(new.at);
+        } else {
+            new.net = old.net;
+            new.route = old.route;
+        }
+
+        // Processes, by program: their share of CPU, RAM and GPU.
+        if new.sampled.procs {
+            if let Some(procs) = &new.procs {
+                let all_ticks = match (new.procs_cpu_total, self.last_procs_cpu_total) {
+                    (Some(b), Some(a)) => b.saturating_sub(a),
+                    _ => 0,
                 };
-                let group = groups.entry(&proc.name).or_insert_with(|| Group {
-                    name: proc.name.clone(),
-                    cpu: 0.0,
-                    memory: 0,
-                    pids: Vec::new(),
-                    mine: true,
-                });
-                group.cpu += cpu;
-                group.memory += proc.memory;
-                group.pids.push(*pid);
-                group.mine &= proc.mine;
+                let mut groups: HashMap<&str, Group> = HashMap::new();
+                for (pid, proc) in procs {
+                    let before = old.procs.as_ref().and_then(|p| p.get(pid)).map_or(proc.ticks, |p| p.ticks);
+                    let cpu = if all_ticks == 0 {
+                        0.0
+                    } else {
+                        proc.ticks.saturating_sub(before) as f32 / all_ticks as f32 * 100.0
+                    };
+                    let group = groups.entry(&proc.name).or_insert_with(|| Group {
+                        name: proc.name.clone(),
+                        cpu: 0.0,
+                        memory: 0,
+                        gpu_pct: 0.0,
+                        gpu_mem_mb: 0,
+                        pids: Vec::new(),
+                        mine: true,
+                    });
+                    group.cpu += cpu;
+                    group.memory += proc.memory;
+                    group.gpu_pct = (group.gpu_pct + proc.gpu_pct).min(100.0);
+                    group.gpu_mem_mb += proc.gpu_mem_mb;
+                    group.pids.push(*pid);
+                    group.mine &= proc.mine;
+                }
+                rates.groups = groups.into_values().collect();
             }
-            rates.groups = groups.into_values().collect();
+            self.last_procs_cpu_total = new.procs_cpu_total;
+            self.timers.procs = Some(new.at);
+        } else {
+            new.procs = old.procs;
         }
+
         // The charts.
         push(&mut self.history.cpu, rates.cpu, seconds);
         if let Some(gpu) = &new.gpu {
@@ -550,6 +748,8 @@ impl Monitor {
         }
         self.popup = Some(id);
         self.settings_tick();
+        self.timers.disk = None;
+        self.timers.procs = None;
         let page = page.map_or_else(Task::none, |page| self.turn_to(page));
         // Fresh numbers, and the processes, at once; the weather, if it's old.
         let weather = self.weather_tick(false);
@@ -770,16 +970,24 @@ impl cosmic::Application for Monitor {
                 self.editing = on;
                 self.asking_end = None;
                 if !on {
+                    self.timers.procs = None;
                     return self.read();
                 }
             }
-            Message::ToggleFold(panel) => {
-                self.settings.toggle_fold(panel);
-                if panel == Panel::Processes {
+            Message::CycleCardMode(panel) => {
+                let next = self.settings.cycle_card_mode(panel);
+                if panel == Panel::Processes && next != CardMode::Hidden {
+                    self.timers.procs = None;
                     return self.read();
                 }
             }
-            Message::ToggleHidden(panel) => self.settings.toggle_hidden(panel),
+            Message::SetCardMode(panel, mode) => {
+                self.settings.set_card_mode(panel, mode);
+                if panel == Panel::Processes && mode != CardMode::Hidden {
+                    self.timers.procs = None;
+                    return self.read();
+                }
+            }
             Message::Shift(panel, down) => self.settings.shift(panel, down),
             Message::ToggleBar(item) => self.settings.toggle_bar(item),
             Message::BarMode(item, entity) => {
@@ -813,7 +1021,7 @@ impl cosmic::Application for Monitor {
                 self.rest_input = text;
             }
             Message::ResetEnergy => self.meter.reset(),
-            Message::Sort(sort) => self.sort = Some(sort),
+            Message::Sort(sort) => self.settings.click_proc_sort(sort),
             Message::AskEnd(name) => self.asking_end = name,
             Message::End(name) => {
                 self.asking_end = None;
@@ -822,6 +1030,7 @@ impl cosmic::Application for Monitor {
                         sample::terminate(*pid);
                     }
                 }
+                self.timers.procs = None;
                 return self.read();
             }
             Message::WeatherTick => return self.weather_tick(false),
@@ -838,7 +1047,9 @@ impl cosmic::Application for Monitor {
                     None => {}
                 }
             }
-            Message::ToggleWeatherExpanded => self.settings.toggle_weather_expanded(),
+            Message::CycleWeatherMode => {
+                self.settings.cycle_weather_mode();
+            }
             Message::EditPlace(editing) => {
                 self.place_editing = editing;
                 self.place_input.clear();
@@ -1228,5 +1439,149 @@ mod tests {
         monitor.settings.bar_modes.insert(BarItem::Cpu, BarMode::Always);
 
         assert!(monitor.on_bar(BarItem::Cpu));
+    }
+
+    #[test]
+    fn sort_groups_orders_by_cpu_ram_gpu_and_case_insensitive_name() {
+        let items = vec![
+            Group { name: "zed".into(), cpu: 5.0, memory: 400, gpu_pct: 10.0, gpu_mem_mb: 256, pids: vec![1], mine: true },
+            Group { name: "Alpha".into(), cpu: 25.0, memory: 100, gpu_pct: 0.0, gpu_mem_mb: 512, pids: vec![2], mine: true },
+            Group { name: "blender".into(), cpu: 15.0, memory: 800, gpu_pct: 42.0, gpu_mem_mb: 1024, pids: vec![3], mine: true },
+            Group { name: "chrome".into(), cpu: 15.0, memory: 600, gpu_pct: 0.0, gpu_mem_mb: 128, pids: vec![4], mine: true },
+        ];
+
+        let mut by_cpu: Vec<&Group> = items.iter().collect();
+        sort_groups(&mut by_cpu, ProcSort::Cpu, false);
+        let names: Vec<&str> = by_cpu.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "blender", "chrome", "zed"]);
+
+        let mut by_ram: Vec<&Group> = items.iter().collect();
+        sort_groups(&mut by_ram, ProcSort::Ram, false);
+        let names: Vec<&str> = by_ram.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["blender", "chrome", "zed", "Alpha"]);
+
+        let mut by_gpu: Vec<&Group> = items.iter().collect();
+        sort_groups(&mut by_gpu, ProcSort::Gpu, false);
+        let names: Vec<&str> = by_gpu.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["blender", "zed", "Alpha", "chrome"]);
+
+        let mut by_name_asc: Vec<&Group> = items.iter().collect();
+        sort_groups(&mut by_name_asc, ProcSort::Name, true);
+        let names: Vec<&str> = by_name_asc.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "blender", "chrome", "zed"]);
+
+        let mut by_name_desc: Vec<&Group> = items.iter().collect();
+        sort_groups(&mut by_name_desc, ProcSort::Name, false);
+        let names: Vec<&str> = by_name_desc.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["zed", "chrome", "blender", "Alpha"]);
+    }
+
+    #[test]
+    fn component_timers_honor_per_component_intervals() {
+        let mut settings = Settings::default();
+        settings.cpu_secs = 1;
+        settings.gpu_secs = 5;
+        settings.ram_secs = 10;
+        settings.disk_secs = 5;
+        settings.net_secs = 2;
+        settings.procs_secs = 10;
+
+        let t0 = Instant::now();
+        let timers = ComponentTimers {
+            cpu: Some(t0),
+            gpu: Some(t0),
+            ram: Some(t0),
+            disk: Some(t0),
+            net: Some(t0),
+            procs: Some(t0),
+        };
+
+        // At +2s: only CPU (1s) and Net (2s) are due.
+        let (cpu, gpu, ram, disk, net, procs) =
+            timers.due(t0 + Duration::from_secs(2), &settings, true, true);
+        assert!(cpu);
+        assert!(!gpu);
+        assert!(!ram);
+        assert!(!disk);
+        assert!(net);
+        assert!(!procs);
+
+        // At +5s: CPU, GPU, Disk, Net are due; RAM and Procs still wait for 10s.
+        let (cpu, gpu, ram, disk, net, procs) =
+            timers.due(t0 + Duration::from_secs(5), &settings, true, true);
+        assert!(cpu);
+        assert!(gpu);
+        assert!(!ram);
+        assert!(disk);
+        assert!(net);
+        assert!(!procs);
+
+        // With full=false and want_procs=false, disk and procs are never due.
+        let (_, _, _, disk, _, procs) =
+            timers.due(t0 + Duration::from_secs(30), &settings, false, false);
+        assert!(!disk);
+        assert!(!procs);
+    }
+
+    #[test]
+    fn take_preserves_cached_values_when_component_not_sampled() {
+        let mut monitor = Monitor::default();
+        let t0 = Instant::now();
+        let first = Reading {
+            at: t0,
+            sampled: sample::Sampled::default(),
+            cpu: vec![sample::CpuTimes { busy: 100, total: 1000 }],
+            frequency: Some((3500.0, 4200.0)),
+            memory: sample::Memory { total: 64_000, used: 16_000, ..Default::default() },
+            chips: Vec::new(),
+            gpu: Some(sample::Gpu { name: "RTX".into(), usage: 25.0, ..Default::default() }),
+            disks: Vec::new(),
+            mounts: Vec::new(),
+            net: (10_000, 5_000),
+            route: Some(("eth0".into(), Some("192.168.1.2".into()))),
+            rapl: None,
+            load: [1.0, 0.5, 0.25],
+            uptime: 3600.0,
+            tasks: 200,
+            procs: None,
+            procs_cpu_total: None,
+        };
+        monitor.take(first);
+
+        // Second tick: only CPU sampled; RAM, GPU, Net must keep previous values.
+        let second = Reading {
+            at: t0 + Duration::from_secs(1),
+            sampled: sample::Sampled {
+                cpu: true,
+                gpu: false,
+                ram: false,
+                disk: false,
+                net: false,
+                procs: false,
+            },
+            cpu: vec![sample::CpuTimes { busy: 150, total: 1100 }],
+            frequency: Some((3600.0, 4300.0)),
+            memory: sample::Memory::default(),
+            chips: Vec::new(),
+            gpu: None,
+            disks: Vec::new(),
+            mounts: Vec::new(),
+            net: (0, 0),
+            route: None,
+            rapl: None,
+            load: [1.2, 0.6, 0.3],
+            uptime: 3601.0,
+            tasks: 201,
+            procs: None,
+            procs_cpu_total: None,
+        };
+        monitor.take(second);
+
+        let now = monitor.now.as_ref().unwrap();
+        assert!((monitor.rates.cpu - 50.0).abs() < 0.1);
+        assert_eq!(now.memory.used, 16_000);
+        assert_eq!(now.gpu.as_ref().unwrap().usage, 25.0);
+        assert_eq!(now.net, (10_000, 5_000));
+        assert_eq!(now.route.as_ref().unwrap().0, "eth0");
     }
 }
