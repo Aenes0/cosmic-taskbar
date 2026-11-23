@@ -1,7 +1,14 @@
 {
-    "peripherals": "never",
-    "volume": "always",
     "power": "always",
+    "high-contrast": "never",
+    "lock": "never",
+    "peripherals": "never",
     "network": "always",
+    "session": "never",
+    "screenshot": "never",
+    "settings": "never",
+    "volume": "always",
+    "workspaces": "never",
     "camera": "active",
+    "touchpad": "never",
 }
