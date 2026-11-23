@@ -2168,8 +2168,9 @@ impl App {
     }
 
     /// Dedicated compact page opened by the `^` shortcut on the bar:
-    /// shows background apps in a clean grid, and in edit mode lets the user
-    /// reorder/hide background apps as well as configure every system bar icon.
+    /// shows background apps in a compact strip without a redundant title,
+    /// and in edit mode lets the user reorder/hide background apps as well as
+    /// reorder and configure every system bar icon.
     pub fn background_page(&self) -> Element<'_, Message> {
         use crate::central::layout::BarItem;
         let tx = crate::central::texts::texts();
@@ -2178,50 +2179,27 @@ impl App {
         let one_line =
             || iced::core::text::Ellipsize::End(iced::core::text::EllipsizeHeightLimit::Lines(1));
 
-        let edit_btn: Element<'_, Message> = if self.background_editing {
-            button::custom(
-                widget::row::with_children(vec![
-                    widget::icon::icon(icon("object-select-symbolic")).size(16).into(),
-                    widget::text::caption(tx.done).into(),
-                ])
-                .spacing(spacing.space_xxs)
-                .align_y(Alignment::Center),
-            )
-            .padding([6, 12])
-            .class(chip_class(true))
-            .on_press(Message::Tray(BackgroundMsg::ToggleEdit))
-            .into()
-        } else {
-            widget::tooltip(
+        let apps: Vec<(usize, &status_menu::State)> = self.background.apps().collect();
+
+        if !self.background_editing {
+            let edit_btn: Element<'_, Message> = widget::tooltip(
                 circle_button(
                     "document-edit-symbolic",
                     Message::Tray(BackgroundMsg::ToggleEdit),
-                    32.0,
+                    BACKGROUND_BUTTON,
                 ),
                 widget::text::body(t.edit),
                 widget::tooltip::Position::Bottom,
             )
-            .into()
-        };
-
-        let header = widget::row::with_children(vec![
-            widget::text::title4(tx.background_apps)
-                .width(Length::Fill)
-                .into(),
-            edit_btn,
-        ])
-        .spacing(spacing.space_xs)
-        .align_y(Alignment::Center);
-
-        let apps: Vec<(usize, &status_menu::State)> = self.background.apps().collect();
-        let mut body: Vec<Element<'_, Message>> = Vec::new();
-
-        if !self.background_editing {
-            if apps.is_empty() {
-                body.push(note(tx.no_background_apps));
+            .into();
+            let main_content: Element<'_, Message> = if apps.is_empty() {
+                widget::text::body(tx.no_background_apps)
+                    .class(theme::Text::Custom(dimmed))
+                    .width(Length::Fill)
+                    .into()
             } else {
                 let rows: Vec<Element<'_, Message>> = apps
-                    .chunks(BACKGROUND_COLUMNS)
+                    .chunks(BACKGROUND_COLUMNS - 1)
                     .map(|chunk| {
                         widget::row::with_children(
                             chunk
@@ -2233,114 +2211,91 @@ impl App {
                         .into()
                     })
                     .collect();
-                body.push(
-                    widget::container(
-                        widget::column::with_children(rows).spacing(spacing.space_xxs),
-                    )
-                    .padding([spacing.space_xs, spacing.space_m, spacing.space_m, spacing.space_m])
-                    .into(),
-                );
-            }
-        } else {
-            if apps.is_empty() {
-                body.push(note(tx.no_background_apps));
-            } else {
-                let total = apps.len();
-                for (index, (id, state)) in apps.into_iter().enumerate() {
-                    let name = state.identity.label().unwrap_or(tx.background_apps).to_owned();
-                    let has_key = self.background.key_of(id).is_some();
-                    let visible = self.background.is_visible(id);
-                    let status = if visible { tx.on_bar } else { tx.hidden };
-                    let move_btn = |icon_name: &str, msg: Option<Message>| -> Element<'_, Message> {
-                        button::icon(icon(icon_name))
-                            .icon_size(14)
-                            .padding(5)
-                            .class(theme::Button::Text)
-                            .on_press_maybe(msg)
-                            .into()
-                    };
-                    let up = move_btn(
-                        "go-up-symbolic",
-                        (has_key && index > 0)
-                            .then_some(Message::Tray(BackgroundMsg::Move(id, true))),
-                    );
-                    let down = move_btn(
-                        "go-down-symbolic",
-                        (has_key && index + 1 < total)
-                            .then_some(Message::Tray(BackgroundMsg::Move(id, false))),
-                    );
-                    let mut toggle = widget::toggler(visible);
-                    if has_key {
-                        toggle = toggle.on_toggle(move |_| Message::Tray(BackgroundMsg::Toggle(id)));
-                    }
-                    let info = widget::column::with_children(vec![
-                        widget::text::body(name).ellipsize(one_line()).into(),
-                        widget::text::caption(status)
-                            .class(theme::Text::Custom(dimmed))
-                            .into(),
-                    ])
-                    .width(Length::Fill);
-                    body.push(
-                        padded_control(
-                            widget::row::with_children(vec![
-                                widget::icon::icon(state.icon_handle().clone()).size(20).into(),
-                                info.into(),
-                                up,
-                                down,
-                                toggle.into(),
-                            ])
-                            .spacing(spacing.space_xs)
-                            .align_y(Alignment::Center),
-                        )
-                        .into(),
-                    );
-                }
-            }
+                widget::column::with_children(rows)
+                    .spacing(spacing.space_xxs)
+                    .width(Length::Fill)
+                    .into()
+            };
+            return widget::container(
+                widget::row::with_children(vec![main_content, edit_btn])
+                    .spacing(spacing.space_xs)
+                    .align_y(Alignment::Center),
+            )
+            .padding(spacing.space_m)
+            .into();
+        }
 
-            // System icons shown on the bar: unified in the same edit panel.
-            body.push(padded_control(widget::divider::horizontal::default()).into());
-            body.push(section(tx.system_bar_icons));
-            let mut bar_items: Vec<BarItem> = vec![
-                BarItem::Network,
-                BarItem::Volume,
-                BarItem::Notifications,
-                BarItem::Privacy,
-                BarItem::Peripherals,
-            ];
-            if self.battery.is_some() {
-                bar_items.push(BarItem::Battery);
-            }
-            bar_items.push(BarItem::Clock);
-            for tile in Tile::ALL {
-                if tile != Tile::Wifi && self.tile_state(tile).is_some() {
-                    bar_items.push(BarItem::Tile(tile));
+        let done_btn: Element<'_, Message> = button::custom(
+            widget::row::with_children(vec![
+                widget::icon::icon(icon("object-select-symbolic")).size(16).into(),
+                widget::text::caption(tx.done).into(),
+            ])
+            .spacing(spacing.space_xxs)
+            .align_y(Alignment::Center),
+        )
+        .padding([6, 12])
+        .class(chip_class(true))
+        .on_press(Message::Tray(BackgroundMsg::ToggleEdit))
+        .into();
+
+        let header = widget::row::with_children(vec![
+            widget::text::title4(tx.system_bar_icons)
+                .width(Length::Fill)
+                .into(),
+            done_btn,
+        ])
+        .spacing(spacing.space_xs)
+        .align_y(Alignment::Center);
+
+        let move_btn = |icon_name: &str, msg: Option<Message>| -> Element<'_, Message> {
+            button::icon(icon(icon_name))
+                .icon_size(14)
+                .padding(5)
+                .class(theme::Button::Text)
+                .on_press_maybe(msg)
+                .into()
+        };
+
+        let mut body: Vec<Element<'_, Message>> = Vec::new();
+        body.push(section(tx.background_apps));
+        if apps.is_empty() {
+            body.push(note(tx.no_background_apps));
+        } else {
+            let total = apps.len();
+            for (index, (id, state)) in apps.into_iter().enumerate() {
+                let name = state.identity.label().unwrap_or(tx.background_apps).to_owned();
+                let has_key = self.background.key_of(id).is_some();
+                let visible = self.background.is_visible(id);
+                let status = if visible { tx.on_bar } else { tx.hidden };
+                let up = move_btn(
+                    "go-up-symbolic",
+                    (has_key && index > 0)
+                        .then_some(Message::Tray(BackgroundMsg::Move(id, true))),
+                );
+                let down = move_btn(
+                    "go-down-symbolic",
+                    (has_key && index + 1 < total)
+                        .then_some(Message::Tray(BackgroundMsg::Move(id, false))),
+                );
+                let mut toggle = widget::toggler(visible);
+                if has_key {
+                    toggle = toggle.on_toggle(move |_| Message::Tray(BackgroundMsg::Toggle(id)));
                 }
-            }
-            for item in bar_items {
-                let current = self.panel_icons.get(item);
-                let choices = widget::row::with_children(
-                    item.choices()
-                        .iter()
-                        .map(|&show| -> Element<'_, Message> {
-                            button::custom(widget::text::caption(show.name()))
-                                .padding([4, 8])
-                                .class(chip_class(show == current))
-                                .on_press(Message::SetBarIcon(item, show))
-                                .into()
-                        })
-                        .collect::<Vec<_>>(),
-                )
-                .spacing(4)
-                .align_y(Alignment::Center);
+                let info = widget::column::with_children(vec![
+                    widget::text::body(name).ellipsize(one_line()).into(),
+                    widget::text::caption(status)
+                        .class(theme::Text::Custom(dimmed))
+                        .into(),
+                ])
+                .width(Length::Fill);
                 body.push(
                     padded_control(
                         widget::row::with_children(vec![
-                            widget::icon::icon(icon(item.icon())).size(16).into(),
-                            widget::text::body(item.name())
-                                .ellipsize(one_line())
-                                .width(Length::Fill)
-                                .into(),
-                            choices.into(),
+                            widget::icon::icon(state.icon_handle().clone()).size(20).into(),
+                            info.into(),
+                            up,
+                            down,
+                            toggle.into(),
                         ])
                         .spacing(spacing.space_xs)
                         .align_y(Alignment::Center),
@@ -2348,6 +2303,88 @@ impl App {
                     .into(),
                 );
             }
+        }
+
+        // System icons shown on the bar: reorderable and configurable in the same edit panel.
+        body.push(padded_control(widget::divider::horizontal::default()).into());
+        body.push(section(tx.system_bar_icons));
+        let ordered_bar_items = self.panel_icons.ordered(&self.reorderable_bar_items());
+        let total_bar_items = ordered_bar_items.len();
+        for (index, item) in ordered_bar_items.into_iter().enumerate() {
+            let current = self.panel_icons.get(item);
+            let up = move_btn(
+                "go-up-symbolic",
+                (index > 0).then_some(Message::MoveBarIcon(item, true)),
+            );
+            let down = move_btn(
+                "go-down-symbolic",
+                (index + 1 < total_bar_items).then_some(Message::MoveBarIcon(item, false)),
+            );
+            let choices = widget::row::with_children(
+                item.choices()
+                    .iter()
+                    .map(|&show| -> Element<'_, Message> {
+                        button::custom(widget::text::caption(show.name()))
+                            .padding([4, 6])
+                            .class(chip_class(show == current))
+                            .on_press(Message::SetBarIcon(item, show))
+                            .into()
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .spacing(3)
+            .align_y(Alignment::Center);
+            body.push(
+                padded_control(
+                    widget::row::with_children(vec![
+                        widget::icon::icon(icon(item.icon())).size(16).into(),
+                        widget::text::body(item.name())
+                            .ellipsize(one_line())
+                            .width(Length::Fill)
+                            .into(),
+                        up,
+                        down,
+                        choices.into(),
+                    ])
+                    .spacing(spacing.space_xxs)
+                    .align_y(Alignment::Center),
+                )
+                .into(),
+            );
+        }
+        // Clock stays anchored at the bar's end (toggleable Always / Never).
+        {
+            let item = BarItem::Clock;
+            let current = self.panel_icons.get(item);
+            let choices = widget::row::with_children(
+                item.choices()
+                    .iter()
+                    .map(|&show| -> Element<'_, Message> {
+                        button::custom(widget::text::caption(show.name()))
+                            .padding([4, 6])
+                            .class(chip_class(show == current))
+                            .on_press(Message::SetBarIcon(item, show))
+                            .into()
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .spacing(3)
+            .align_y(Alignment::Center);
+            body.push(
+                padded_control(
+                    widget::row::with_children(vec![
+                        widget::icon::icon(icon(item.icon())).size(16).into(),
+                        widget::text::body(item.name())
+                            .ellipsize(one_line())
+                            .width(Length::Fill)
+                            .into(),
+                        choices.into(),
+                    ])
+                    .spacing(spacing.space_xxs)
+                    .align_y(Alignment::Center),
+                )
+                .into(),
+            );
         }
 
         widget::column::with_children(vec![

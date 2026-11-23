@@ -161,6 +161,7 @@ pub enum Message {
     /// What the background apps say, ask or are asked.
     Tray(background::Msg),
     SetBarIcon(BarItem, Show),
+    MoveBarIcon(BarItem, bool),
     ToggleFold(Section),
     /// An item's resize handle dragged this far across since pressed; let go.
     ResizeDrag(usize, f32),
@@ -428,9 +429,30 @@ impl App {
         self.bar_button(true)
     }
 
-    /// The bar's button: the icons, and the clock beside them.
+    /// System bar items that can be shown and reordered on the bar (all
+    /// system items except the clock, which stays anchored at the bar's end).
+    pub(crate) fn reorderable_bar_items(&self) -> Vec<BarItem> {
+        let mut items = vec![BarItem::Privacy, BarItem::Notifications];
+        for tile in Tile::ALL {
+            if tile != Tile::Wifi && tile != Tile::Power && self.tile_state(tile).is_some() {
+                items.push(BarItem::Tile(tile));
+            }
+        }
+        items.push(BarItem::Network);
+        items.push(BarItem::Volume);
+        items.push(BarItem::Peripherals);
+        if self.battery.is_some() {
+            items.push(BarItem::Battery);
+        }
+        if self.tile_state(Tile::Power).is_some() {
+            items.push(BarItem::Tile(Tile::Power));
+        }
+        items
+    }
+
+    /// The bar's button: individual icon buttons, and the clock beside them
+    /// (which alone opens the Central panel).
     fn bar_button(&self, in_corner: bool) -> Element<'_, Message> {
-        let t = strings();
         let applet = &self.core.applet;
         let size = applet.suggested_size(true).0;
         let (major, minor) = applet.suggested_padding(true);
@@ -448,11 +470,6 @@ impl App {
                 .into()
         };
         let panel_icon = |name: &str| colored(name, None);
-        // No tooltips on the bar: COSMIC's float over it and swallow the
-        // click under them; what each icon means is in the popup.
-        let tip = |content: Element<'static, Message>, _text: String| -> Element<'static, Message> {
-            content
-        };
         // On a panel at a side of the screen, the icons go in a column, and
         // what an icon says goes under it, smaller, to fit the panel's width.
         let horizontal = applet.is_horizontal();
@@ -475,12 +492,26 @@ impl App {
             }
         };
 
-        let mut icons: Vec<Element<'_, Message>> = Vec::with_capacity(10);
-        let shows = |item: BarItem| self.panel_icons.get(item);
-        // A right click opens the popup right on the icon's page.
-        let at = |content: Element<'static, Message>, page: Page| -> Element<'static, Message> {
-            widget::mouse_area(content).on_right_press(Message::OpenAt(page)).into()
+        let icon_pad = if horizontal { [minor, 4] } else { [4, minor] };
+        let icon_btn = |content: Element<'static, Message>, on_press: Message| -> Element<'static, Message> {
+            button::custom(content)
+                .padding(icon_pad)
+                .class(theme::Button::AppletIcon)
+                .on_press(on_press)
+                .into()
         };
+        // Each system icon has its own hover highlight; left click does NOT
+        // open the Central panel (only the clock does), while right click
+        // still opens the icon's own page.
+        let at = |content: Element<'static, Message>, page: Page| -> Element<'static, Message> {
+            widget::mouse_area(icon_btn(content, Message::None))
+                .on_right_press(Message::OpenAt(page))
+                .into()
+        };
+
+        let mut icons: Vec<Element<'_, Message>> = Vec::with_capacity(12);
+        let shows = |item: BarItem| self.panel_icons.get(item);
+
         // Discreet arrow shortcut (`^`) to open the dedicated background apps
         // and bar icons page in `central --panels` (zero xdg_popup).
         let arrow_icon = match applet.anchor {
@@ -489,27 +520,27 @@ impl App {
             cosmic::applet::cosmic_panel_config::PanelAnchor::Left => "go-next-symbolic",
             cosmic::applet::cosmic_panel_config::PanelAnchor::Right => "go-previous-symbolic",
         };
-        let arrow = widget::mouse_area(
-            widget::container(
-                widget::icon::icon(icon(arrow_icon))
-                    .size((size * 3 / 4).max(12))
-                    .class(theme::Svg::Custom(std::rc::Rc::new(|theme| {
-                        iced::widget::svg::Style {
-                            color: Some(theme.cosmic().background(theme.transparent).on.into()),
-                        }
-                    }))),
-            )
-            .center(Length::Fixed(f32::from(size))),
+        let arrow_glyph: Element<'static, Message> = widget::container(
+            widget::icon::icon(icon(arrow_icon))
+                .size((size * 3 / 4).max(12))
+                .class(theme::Svg::Custom(std::rc::Rc::new(|theme| {
+                    iced::widget::svg::Style {
+                        color: Some(theme.cosmic().background(theme.transparent).on.into()),
+                    }
+                }))),
         )
-        .on_press(Message::Tray(background::Msg::BarArrow))
+        .center(Length::Fixed(f32::from(size)))
+        .into();
+        let arrow = widget::mouse_area(icon_btn(
+            arrow_glyph,
+            Message::Tray(background::Msg::BarArrow),
+        ))
         .on_right_press(Message::Tray(background::Msg::BarArrow));
-        icons.push(tip(
-            arrow.into(),
-            crate::central::texts::texts().background_apps.to_owned(),
-        ));
-        // The background apps picked for the bar, first: a click does what
-        // the app's icon does, a right click opens its menu in the panel.
-        for (id, handle, name) in self.background.on_bar() {
+        icons.push(arrow.into());
+
+        // The background apps picked for the bar: each with its own hover
+        // highlight, left click activates, right click opens its menu.
+        for (id, handle, _name) in self.background.on_bar() {
             let symbolic = handle.symbolic;
             let glyph = widget::icon::icon(handle).size(size);
             let glyph = if symbolic {
@@ -521,179 +552,154 @@ impl App {
             } else {
                 glyph
             };
-            let area = widget::mouse_area(glyph)
-                .on_press(Message::Tray(background::Msg::BarPress(id)))
-                .on_right_press(Message::Tray(background::Msg::OpenMenu(id)));
-            icons.push(tip(area.into(), name));
+            let area = widget::mouse_area(icon_btn(
+                glyph.into(),
+                Message::Tray(background::Msg::BarPress(id)),
+            ))
+            .on_right_press(Message::Tray(background::Msg::OpenMenu(id)));
+            icons.push(area.into());
         }
-        // Who is listening or watching, in the colors phones use.
-        let privacy = &self.privacy;
-        if shows(BarItem::Privacy) != Show::Never {
-            if !privacy.camera.is_empty() {
-                let green: fn(&cosmic::Theme) -> iced::Color =
-                    |theme| theme.cosmic().success_color().into();
-                icons.push(tip(
-                    colored("camera-web-symbolic", Some(green)),
-                    format!("{} · {}", privacy.camera.join(", "), t.using_camera),
-                ));
-            }
-            if !privacy.microphone.is_empty() {
-                let orange: fn(&cosmic::Theme) -> iced::Color =
-                    |theme| theme.cosmic().warning_color().into();
-                icons.push(at(
-                    tip(
-                        colored("audio-input-microphone-symbolic", Some(orange)),
-                        format!("{} · {}", privacy.microphone.join(", "), t.using_microphone),
-                    ),
-                    Page::Sound,
-                ));
-            }
-        }
-        // Notifications: a bell, lit with how many are new.
-        let new = self.new_count();
-        let bell = match shows(BarItem::Notifications) {
-            Show::Always => true,
-            Show::Active => new > 0,
-            Show::Never => false,
-        };
-        if bell {
-            if new == 0 {
-                icons.push(at(
-                    tip(
-                        panel_icon("notification-symbolic"),
-                        format!("{} {}", self.notifications.len(), t.notifications.to_lowercase()),
-                    ),
-                    Page::Main,
-                ));
-            } else {
-                let accent: fn(&cosmic::Theme) -> iced::Color =
-                    |theme| theme.cosmic().accent_color().into();
-                icons.push(at(
-                    tip(
-                        with_text(colored("notification-new-symbolic", Some(accent)), new.to_string(), true),
-                        format!(
-                            "{new} {}",
-                            if new == 1 { t.new_notification } else { t.new_notifications }
-                        ),
-                    ),
-                    Page::Main,
-                ));
-            }
-        }
-        // The power profile goes by the clock, not among the rest.
-        let mut power_tile = None;
-        for (tile, state) in self.bar_tiles() {
-            if tile == Tile::Power {
-                power_tile = Some(state);
-                continue;
-            }
-            let page = match tile {
-                Tile::Bluetooth => Page::Bluetooth,
-                Tile::Vpn => Page::Vpn,
-                Tile::Power => Page::Power,
-                Tile::DoNotDisturb => Page::DoNotDisturb,
-                Tile::Tiling => Page::Tiling,
-                Tile::Camera => Page::Camera,
-                _ => Page::Main,
-            };
-            let text = match &state.subtitle {
-                Some(subtitle) => format!("{} · {subtitle}", state.title),
-                None => state.title.to_owned(),
-            };
-            icons.push(at(tip(panel_icon(state.icon), text), page));
-        }
-        if shows(BarItem::Network) != Show::Never {
-            let network = match &self.network.connection {
-                Some((name, _)) => name.clone(),
-                None if self.airplane_mode() => t.airplane_mode.to_owned(),
-                None => t.disconnected.to_owned(),
-            };
-            icons.push(at(tip(panel_icon(self.network_icon()), network), Page::Wifi));
-        }
-        if let Some(volume) = self.volume.as_ref().filter(|_| shows(BarItem::Volume) != Show::Never) {
-            let text = if volume.muted {
-                format!("{}: {}", t.volume, t.muted)
-            } else {
-                format!("{}: {:.0}%", t.volume, volume.level * 100.0)
-            };
-            // Scroll for louder or quieter; the middle button mutes. The
-            // area takes the left button too, so it opens the popup itself.
-            let area = widget::mouse_area(panel_icon(self.volume_icon()))
-                .on_right_press(Message::OpenAt(Page::Sound))
-                .on_scroll(|delta| Message::ScrollVolume(scroll_steps(delta)))
-                .on_middle_press(Message::ToggleMute);
-            icons.push(tip(area.into(), text));
-        }
-        // Each mouse, keyboard, headset… with its charge.
-        if shows(BarItem::Peripherals) != Show::Never {
-            for peripheral in &self.peripherals {
-                icons.push(at(
-                    tip(
-                        with_text(
-                            panel_icon(&peripheral.icon),
-                            format!("{:.0}%", peripheral.percentage),
-                            false,
-                        ),
-                        format!("{}: {:.0}%", peripheral.name, peripheral.percentage),
-                    ),
-                    Page::Power,
-                ));
-            }
-        }
-        // The computer's battery last, by the screen's edge; scrolling on it
-        // sets the screen's brightness.
-        if let Some(battery) = self.battery.as_ref().filter(|_| shows(BarItem::Battery) != Show::Never) {
-            let icon = panel_icon(&symbolic(&battery.icon));
-            let content = if self.show_percentage {
-                with_text(icon, format!("{:.0}%", battery.percentage), false)
-            } else {
-                icon
-            };
-            let mut text = format!("{}: {:.0}%", t.battery, battery.percentage);
-            match battery.time_left {
-                Some(left) if battery.charging => {
-                    text.push_str(&format!(" · {} {}", duration(left), t.until_full));
+
+        // System icons in the user's chosen order.
+        let active_tiles: std::collections::HashMap<Tile, crate::central::tiles::TileState> =
+            self.bar_tiles().into_iter().collect();
+        for item in self.panel_icons.ordered(&self.reorderable_bar_items()) {
+            match item {
+                BarItem::Privacy => {
+                    if shows(BarItem::Privacy) != Show::Never {
+                        let privacy = &self.privacy;
+                        if !privacy.camera.is_empty() {
+                            let green: fn(&cosmic::Theme) -> iced::Color =
+                                |theme| theme.cosmic().success_color().into();
+                            icons.push(icon_btn(
+                                colored("camera-web-symbolic", Some(green)),
+                                Message::None,
+                            ));
+                        }
+                        if !privacy.microphone.is_empty() {
+                            let orange: fn(&cosmic::Theme) -> iced::Color =
+                                |theme| theme.cosmic().warning_color().into();
+                            icons.push(at(
+                                colored("audio-input-microphone-symbolic", Some(orange)),
+                                Page::Sound,
+                            ));
+                        }
+                    }
                 }
-                Some(left) => text.push_str(&format!(" · {} {}", duration(left), t.left)),
-                None if battery.charging && battery.percentage >= 99.0 => {
-                    text.push_str(&format!(" · {}", t.charged));
+                BarItem::Notifications => {
+                    let new = self.new_count();
+                    let bell = match shows(BarItem::Notifications) {
+                        Show::Always => true,
+                        Show::Active => new > 0,
+                        Show::Never => false,
+                    };
+                    if bell {
+                        if new == 0 {
+                            icons.push(at(panel_icon("notification-symbolic"), Page::Main));
+                        } else {
+                            let accent: fn(&cosmic::Theme) -> iced::Color =
+                                |theme| theme.cosmic().accent_color().into();
+                            icons.push(at(
+                                with_text(
+                                    colored("notification-new-symbolic", Some(accent)),
+                                    new.to_string(),
+                                    true,
+                                ),
+                                Page::Main,
+                            ));
+                        }
+                    }
                 }
-                None => {}
+                BarItem::Tile(Tile::Power) => {
+                    if let Some(state) = active_tiles.get(&Tile::Power) {
+                        let color: fn(&cosmic::Theme) -> iced::Color =
+                            match self.power.as_ref().map(|p| p.active.as_str()) {
+                                Some("power-saver") => |_| iced::Color::from_rgb(0.30, 0.82, 0.50),
+                                Some("performance") => |_| iced::Color::from_rgb(0.95, 0.35, 0.35),
+                                _ => |_| iced::Color::from_rgb(0.96, 0.78, 0.25),
+                            };
+                        let glyph = size * 7 / 8;
+                        let content: Element<'static, Message> = widget::container(
+                            widget::icon::icon(icon(state.icon))
+                                .size(glyph)
+                                .class(theme::Svg::Custom(std::rc::Rc::new(move |th| {
+                                    iced::widget::svg::Style { color: Some(color(th)) }
+                                }))),
+                        )
+                        .center(Length::Fixed(f32::from(size)))
+                        .into();
+                        icons.push(at(content, Page::Power));
+                    }
+                }
+                BarItem::Tile(tile) => {
+                    if let Some(state) = active_tiles.get(&tile) {
+                        let page = match tile {
+                            Tile::Bluetooth => Page::Bluetooth,
+                            Tile::Vpn => Page::Vpn,
+                            Tile::Power => Page::Power,
+                            Tile::DoNotDisturb => Page::DoNotDisturb,
+                            Tile::Tiling => Page::Tiling,
+                            Tile::Camera => Page::Camera,
+                            _ => Page::Main,
+                        };
+                        icons.push(at(panel_icon(state.icon), page));
+                    }
+                }
+                BarItem::Network => {
+                    if shows(BarItem::Network) != Show::Never {
+                        icons.push(at(panel_icon(self.network_icon()), Page::Wifi));
+                    }
+                }
+                BarItem::Volume => {
+                    if self.volume.is_some() && shows(BarItem::Volume) != Show::Never {
+                        let area = widget::mouse_area(icon_btn(
+                            panel_icon(self.volume_icon()),
+                            Message::None,
+                        ))
+                        .on_right_press(Message::OpenAt(Page::Sound))
+                        .on_scroll(|delta| Message::ScrollVolume(scroll_steps(delta)))
+                        .on_middle_press(Message::ToggleMute);
+                        icons.push(area.into());
+                    }
+                }
+                BarItem::Peripherals => {
+                    if shows(BarItem::Peripherals) != Show::Never {
+                        for peripheral in &self.peripherals {
+                            icons.push(at(
+                                with_text(
+                                    panel_icon(&peripheral.icon),
+                                    format!("{:.0}%", peripheral.percentage),
+                                    false,
+                                ),
+                                Page::Power,
+                            ));
+                        }
+                    }
+                }
+                BarItem::Battery => {
+                    if let Some(battery) = self
+                        .battery
+                        .as_ref()
+                        .filter(|_| shows(BarItem::Battery) != Show::Never)
+                    {
+                        let glyph = panel_icon(&symbolic(&battery.icon));
+                        let content = if self.show_percentage {
+                            with_text(glyph, format!("{:.0}%", battery.percentage), false)
+                        } else {
+                            glyph
+                        };
+                        let area = widget::mouse_area(icon_btn(content, Message::None))
+                            .on_right_press(Message::OpenAt(Page::Power))
+                            .on_scroll(|delta| Message::ScrollBrightness(scroll_steps(delta)));
+                        icons.push(area.into());
+                    }
+                }
+                BarItem::Clock => {}
             }
-            let area = widget::mouse_area(content)
-                .on_right_press(Message::OpenAt(Page::Power))
-                .on_scroll(|delta| Message::ScrollBrightness(scroll_steps(delta)));
-            icons.push(tip(area.into(), text));
         }
-        // The power profile last, right before the clock: green when saving,
-        // yellow balanced, red at full performance; a little smaller than the
-        // rest, as its drawing fills its square, kept in a square as big.
-        if let Some(state) = power_tile {
-            let color: fn(&cosmic::Theme) -> iced::Color = match self.power.as_ref().map(|p| p.active.as_str()) {
-                Some("power-saver") => |_| iced::Color::from_rgb(0.30, 0.82, 0.50),
-                Some("performance") => |_| iced::Color::from_rgb(0.95, 0.35, 0.35),
-                _ => |_| iced::Color::from_rgb(0.96, 0.78, 0.25),
-            };
-            let glyph = size * 7 / 8;
-            let content: Element<'static, Message> = widget::container(
-                widget::icon::icon(icon(state.icon))
-                    .size(glyph)
-                    .class(theme::Svg::Custom(std::rc::Rc::new(move |th| {
-                        iced::widget::svg::Style { color: Some(color(th)) }
-                    }))),
-            )
-            .center(Length::Fixed(f32::from(size)))
-            .into();
-            let text = match &state.subtitle {
-                Some(subtitle) => format!("{} · {subtitle}", state.title),
-                None => state.title.to_owned(),
-            };
-            icons.push(at(tip(content, text), Page::Power));
-        }
-        // The clock last, as Windows 11's: the time over the date, smaller,
-        // both centered.
-        // Kept apart: it goes without the icons' padding, its two lines
-        // tight, to be no taller than they are and not make the bar taller.
+
+        // The clock last, as Windows 11's: its own button, and the ONLY item
+        // whose left click opens the Central panel.
         let clock: Option<Element<'_, Message>> = (shows(BarItem::Clock) != Show::Never).then(|| {
             let (time, date) = if self.clock.0.is_empty() {
                 crate::central::calendar::bar_lines()
@@ -701,50 +707,45 @@ impl App {
                 self.clock.clone()
             };
             let tight = iced::widget::text::LineHeight::Relative(1.05);
-            widget::column::with_children(vec![
+            let lines: Element<'_, Message> = widget::column::with_children(vec![
                 widget::text::body(time).line_height(tight).into(),
                 widget::text::caption(date).line_height(tight).into(),
             ])
             .align_x(Alignment::Center)
-            .into()
+            .into();
+            let button = button::custom(lines)
+                .padding(if horizontal { [0, major] } else { [major, 0] })
+                .class(theme::Button::AppletIcon);
+            if in_corner {
+                button.on_press_down(Message::CornerPress).into()
+            } else {
+                button.on_press(Message::None).into()
+            }
         });
+
+        let item_gap = (self.bar_spacing.gap() / 2).max(1);
         let icons: Element<'_, Message> = if horizontal {
             widget::row::with_children(icons)
-                .spacing(self.bar_spacing.gap())
+                .spacing(item_gap)
                 .align_y(Alignment::Center)
                 .into()
         } else {
             widget::column::with_children(icons)
-                .spacing(self.bar_spacing.gap())
+                .spacing(item_gap)
                 .align_x(Alignment::Center)
                 .into()
         };
-        // The icons with the panel's padding; the clock beside them without.
-        let padded = widget::container(icons).padding(if horizontal { [minor, 0] } else { [0, minor] });
-        let content: Element<'_, Message> = match clock {
-            Some(clock) if horizontal => widget::row::with_children(vec![padded.into(), clock])
-                .spacing(self.bar_spacing.gap() + major / 2)
+        match clock {
+            Some(clock) if horizontal => widget::row::with_children(vec![icons, clock])
+                .spacing(major / 2)
                 .align_y(Alignment::Center)
                 .into(),
-            Some(clock) => widget::column::with_children(vec![padded.into(), clock])
-                .spacing(self.bar_spacing.gap() + major / 2)
+            Some(clock) => widget::column::with_children(vec![icons, clock])
+                .spacing(major / 2)
                 .align_x(Alignment::Center)
                 .into(),
-            None => padded.into(),
-        };
-        let button = button::custom(content)
-            .padding(if horizontal { [0, major] } else { [major, 0] })
-            .class(theme::Button::AppletIcon);
-        // Alone, it looks a button but the press is the window's (see
-        // PanelPress); in a corner the window is not ours, so the button's,
-        // on the press (not the release) as the window's was. A mouse_area
-        // around it would never see it: the button takes the press.
-        let button = if in_corner {
-            button.on_press_down(Message::CornerPress)
-        } else {
-            button.on_press(Message::None)
-        };
-        button.into()
+            None => icons,
+        }
     }
 
     pub(crate) fn high_contrast(&self) -> bool {
@@ -1523,6 +1524,10 @@ impl cosmic::Application for App {
                 return self.update(Message::Preview(page));
             }
             Message::SetBarIcon(item, show) => self.panel_icons.set(item, show),
+            Message::MoveBarIcon(item, up) => {
+                let items = self.reorderable_bar_items();
+                self.panel_icons.move_item(item, up, &items);
+            }
             Message::Tray(message) => return self.tray(message),
             Message::ToggleFold(section) => {
                 self.layout.toggle_fold(section);

@@ -73,7 +73,7 @@ pub enum BarItem {
 }
 
 impl BarItem {
-    fn id(self) -> String {
+    pub fn id(self) -> String {
         match self {
             BarItem::Privacy => "privacy".into(),
             BarItem::Notifications => "notifications".into(),
@@ -83,6 +83,22 @@ impl BarItem {
             BarItem::Peripherals => "peripherals".into(),
             BarItem::Battery => "battery".into(),
             BarItem::Clock => "clock".into(),
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<BarItem> {
+        match id {
+            "privacy" => Some(BarItem::Privacy),
+            "notifications" => Some(BarItem::Notifications),
+            "network" => Some(BarItem::Network),
+            "volume" => Some(BarItem::Volume),
+            "peripherals" => Some(BarItem::Peripherals),
+            "battery" => Some(BarItem::Battery),
+            "clock" => Some(BarItem::Clock),
+            other => Tile::ALL
+                .into_iter()
+                .find(|tile| tile.id() == other)
+                .map(BarItem::Tile),
         }
     }
 
@@ -134,6 +150,8 @@ impl BarItem {
 #[derive(Clone, Debug, Default)]
 pub struct PanelIcons {
     picked: HashMap<String, Show>,
+    /// User-chosen order of system bar icons (by `BarItem::id`).
+    order: Vec<String>,
     /// The old switch, "show the tiles that are on": off hides them all.
     tiles_hidden: bool,
 }
@@ -145,8 +163,10 @@ impl PanelIcons {
             .into_iter()
             .filter_map(|(id, show)| Some((id, Show::from_id(&show)?)))
             .collect();
+        let order = get::<Vec<String>>("panel_icons_order").unwrap_or_default();
         PanelIcons {
             picked,
+            order,
             tiles_hidden: crate::central::services::HIDE_ACTIVE.get(),
         }
     }
@@ -172,6 +192,55 @@ impl PanelIcons {
             .map(|(id, show)| (id.as_str(), show.id()))
             .collect();
         set("panel_icons", saved);
+    }
+
+    /// Returns `items` in the user's saved order, appending any new/unlisted
+    /// items at the end in their default order.
+    pub fn ordered(&self, items: &[BarItem]) -> Vec<BarItem> {
+        let mut result = Vec::with_capacity(items.len());
+        for id in &self.order {
+            if let Some(&item) = items.iter().find(|item| item.id() == *id)
+                && !result.contains(&item)
+            {
+                result.push(item);
+            }
+        }
+        for &item in items {
+            if !result.contains(&item) {
+                result.push(item);
+            }
+        }
+        result
+    }
+
+    /// Moves `item` one step up (earlier) or down (later) among `items` and
+    /// persists the new order.
+    pub fn move_item(&mut self, item: BarItem, up: bool, items: &[BarItem]) {
+        let mut current: Vec<String> = self.ordered(items).into_iter().map(BarItem::id).collect();
+        let target = item.id();
+        let Some(pos) = current.iter().position(|id| *id == target) else {
+            return;
+        };
+        let swap_with = if up {
+            if pos == 0 {
+                return;
+            }
+            pos - 1
+        } else {
+            if pos + 1 >= current.len() {
+                return;
+            }
+            pos + 1
+        };
+        current.swap(pos, swap_with);
+        // Preserve any saved IDs not currently present (e.g. battery on desktop).
+        for id in &self.order {
+            if !current.contains(id) {
+                current.push(id.clone());
+            }
+        }
+        self.order = current;
+        set("panel_icons_order", &self.order);
     }
 }
 
@@ -299,5 +368,35 @@ mod tests {
             layout.show(section, false);
             assert!(!layout.is_folded(section));
         }
+    }
+
+    #[test]
+    fn bar_item_id_round_trip() {
+        for item in [
+            BarItem::Privacy,
+            BarItem::Notifications,
+            BarItem::Network,
+            BarItem::Volume,
+            BarItem::Peripherals,
+            BarItem::Battery,
+            BarItem::Clock,
+            BarItem::Tile(Tile::Power),
+            BarItem::Tile(Tile::Bluetooth),
+        ] {
+            assert_eq!(BarItem::from_id(&item.id()), Some(item));
+        }
+    }
+
+    #[test]
+    fn panel_icons_ordered_and_move() {
+        let items = [BarItem::Network, BarItem::Volume, BarItem::Notifications];
+        let mut icons = PanelIcons::default();
+        assert_eq!(icons.ordered(&items), vec![BarItem::Network, BarItem::Volume, BarItem::Notifications]);
+        icons.order = vec!["notifications".into(), "network".into()];
+        assert_eq!(icons.ordered(&items), vec![BarItem::Notifications, BarItem::Network, BarItem::Volume]);
+        icons.move_item(BarItem::Volume, true, &items);
+        assert_eq!(icons.ordered(&items), vec![BarItem::Notifications, BarItem::Volume, BarItem::Network]);
+        icons.move_item(BarItem::Notifications, true, &items);
+        assert_eq!(icons.ordered(&items), vec![BarItem::Notifications, BarItem::Volume, BarItem::Network]);
     }
 }
