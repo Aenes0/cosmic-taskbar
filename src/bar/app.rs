@@ -929,61 +929,55 @@ impl Taskbar {
         send_popup(cmd)
     }
 
-    /// Returns the length of the group in the favorite list after which items are displayed in a popup.
-    /// Shrink the favorite list until it only has active windows, or until it fits in the length provided.
+    /// Number of active (non-pinned) apps that have at least one window on the
+    /// current monitor and workspace.
+    fn filtered_active_count(&self) -> usize {
+        self.active_list
+            .iter()
+            .filter(|dock_item| {
+                dock_item.toplevels.iter().any(|(toplevel_info, _)| {
+                    self.is_on_current_monitor_and_workspace(toplevel_info)
+                })
+            })
+            .count()
+    }
+
+    /// Returns the length of the group in the favorite list (and active list) after which items
+    /// are displayed in an overflow popup.
+    /// Counts only active apps visible on the current monitor and workspace so other monitors'
+    /// windows never trigger spurious overflow on narrow/portrait monitors.
     fn panel_overflow_lengths(&self) -> (Option<usize>, Option<usize>) {
-        let mut favorite_index;
-        let mut active_index = None;
-        let Some(mut max_major_axis_len) = self.core.applet.suggested_bounds.as_ref().map(|c| {
+        let Some(max_major_axis_len) = self.core.applet.suggested_bounds.as_ref().map(|c| {
             // if we have a configure for width and height, we're in a overflow popup
             match self.core.applet.anchor {
                 PanelAnchor::Top | PanelAnchor::Bottom => c.width as u32,
                 PanelAnchor::Left | PanelAnchor::Right => c.height as u32,
             }
         }) else {
-            return (None, active_index);
+            return (None, None);
         };
-        // tracing::error!("{} {}", max_major_axis_len, self.pinned_list.len());
-        // subtract the divider width
-        max_major_axis_len -= 1;
+        let max_major_axis_len = max_major_axis_len.saturating_sub(1);
         let applet_icon = AppletIconData::new(&self.core.applet);
 
-        let button_total_size = self.core.applet.suggested_size(true).0
-            + self.core.applet.suggested_padding(true).0 * 2
-            + applet_icon.icon_spacing as u16;
+        let button_total_size = (self.core.applet.suggested_size(false).0
+            + self.core.applet.suggested_padding(false).0 * 2
+            + applet_icon.icon_spacing as u16)
+            .max(1);
 
+        let btn_count = (max_major_axis_len / button_total_size as u32) as usize;
+        let pinned_len = self.pinned_list.len();
+        let active_len = self.filtered_active_count();
         let favorite_active_cnt = self
             .pinned_list
             .iter()
-            .filter(|t| !t.toplevels.is_empty())
+            .filter(|t| {
+                t.toplevels
+                    .iter()
+                    .any(|(info, _)| self.is_on_current_monitor_and_workspace(info))
+            })
             .count();
 
-        // initial calculation of favorite_index
-        let btn_count = max_major_axis_len / button_total_size as u32;
-        if btn_count >= self.pinned_list.len() as u32 + self.active_list.len() as u32 {
-            return (None, active_index);
-        } else {
-            favorite_index = (btn_count as usize).min(favorite_active_cnt).max(2);
-        }
-
-        // calculation of active_index based on favorite_index if there is still not enough space
-        let active_index_max = (btn_count as i32)
-            - (self.pinned_list.len() as i32).saturating_sub(favorite_index as i32);
-        if active_index_max >= self.active_list.len() as i32 {
-            active_index = Some(self.active_list.len());
-        } else {
-            active_index = Some((active_index_max.max(2) as usize).min(self.active_list.len()));
-        }
-
-        // final calculation of favorite_index if there is still not enough space
-        if let Some(active_index) = active_index {
-            let favorite_index_max = (btn_count as i32) - active_index as i32;
-            favorite_index = favorite_index_max.max(2) as usize;
-        } else {
-            favorite_index = (btn_count as usize).min(self.pinned_list.len());
-        }
-        // tracing::error!("{} {} {:?}", btn_count, favorite_index, active_index);
-        (Some(favorite_index), active_index)
+        compute_overflow_cutoffs(btn_count, pinned_len, favorite_active_cnt, active_len)
     }
 
     fn currently_active_toplevel(&self) -> Vec<ExtForeignToplevelHandleV1> {
@@ -1421,13 +1415,12 @@ impl cosmic::Application for Taskbar {
             })
             .collect();
 
-        if favorite_popup_cutoff.is_some() {
-            // button to show more favorites
+        if favorite_popup_cutoff.is_some_and(|n| n < self.pinned_list.len()) {
+            // button to show more favorites (distinct ellipsis icon so it is not
+            // confused with the system tray chevron on narrow/portrait monitors)
             let icon = match self.core.applet.anchor {
-                PanelAnchor::Bottom => "go-up-symbolic",
-                PanelAnchor::Left => "go-next-symbolic",
-                PanelAnchor::Right => "go-previous-symbolic",
-                PanelAnchor::Top => "go-down-symbolic",
+                PanelAnchor::Top | PanelAnchor::Bottom => "view-more-horizontal-symbolic",
+                PanelAnchor::Left | PanelAnchor::Right => "view-more-symbolic",
             };
             let btn = self
                 .core
@@ -1503,10 +1496,8 @@ impl cosmic::Application for Taskbar {
         if active_popup_cutoff.is_some_and(|n| n < filtered_active_list.len()) {
             // button to show more active
             let icon = match self.core.applet.anchor {
-                PanelAnchor::Bottom => "go-up-symbolic",
-                PanelAnchor::Left => "go-next-symbolic",
-                PanelAnchor::Right => "go-previous-symbolic",
-                PanelAnchor::Top => "go-down-symbolic",
+                PanelAnchor::Top | PanelAnchor::Bottom => "view-more-horizontal-symbolic",
+                PanelAnchor::Left | PanelAnchor::Right => "view-more-symbolic",
             };
             let btn = self
                 .core
@@ -2904,9 +2895,11 @@ impl Taskbar {
                                     + 2 * app.core.applet.suggested_padding(false).0;
                                 let (_favorite_popup_cutoff, active_popup_cutoff) =
                                     app.panel_overflow_lengths();
-                                let popup_applet_count = app.active_list.len().saturating_sub(
-                                    (active_popup_cutoff.unwrap_or_default()).saturating_sub(1),
-                                ) as f32;
+                                let popup_applet_count = app
+                                    .filtered_active_count()
+                                    .saturating_sub(
+                                        (active_popup_cutoff.unwrap_or_default()).saturating_sub(1),
+                                    ) as f32;
                                 let popup_applet_size = applet_suggested_size as f32
                                     * popup_applet_count
                                     + 4.0 * (popup_applet_count - 1.);
@@ -3024,6 +3017,44 @@ impl Taskbar {
     }
 }
 
+/// Compute `(favorite_cutoff, active_cutoff)` given available button slots `btn_count`.
+/// Each returned `Some(k)` means that section may occupy at most `k` total slots
+/// (`k - 1` visible icons + 1 overflow button), and `k < section_len` strictly.
+/// `None` means the entire section fits without an overflow button.
+fn compute_overflow_cutoffs(
+    btn_count: usize,
+    pinned_len: usize,
+    pinned_active_cnt: usize,
+    active_len: usize,
+) -> (Option<usize>, Option<usize>) {
+    if btn_count >= pinned_len + active_len {
+        return (None, None);
+    }
+    let slots = btn_count.max(2);
+    if pinned_len == 0 {
+        return (None, (slots < active_len).then_some(slots));
+    }
+    if active_len == 0 {
+        return ((slots < pinned_len).then_some(slots), None);
+    }
+    // Prefer keeping all active windows on this monitor visible while shrinking
+    // inactive pinned favorites first.
+    if active_len < slots {
+        let fav_slots = slots - active_len;
+        let fav_cutoff = (fav_slots < pinned_len).then_some(fav_slots);
+        return (fav_cutoff, None);
+    }
+    // Both sections compete for space: keep at least active pinned apps (up to half)
+    // and split remaining slots for active windows.
+    let half = (slots / 2).max(1);
+    let fav_slots = pinned_active_cnt.clamp(1, half).min(pinned_len);
+    let act_slots = slots.saturating_sub(fav_slots).max(1);
+    (
+        (fav_slots < pinned_len).then_some(fav_slots),
+        (act_slots < active_len).then_some(act_slots),
+    )
+}
+
 fn launch_on_preferred_gpu(desktop_info: &DesktopEntry, gpus: Option<&[Gpu]>) -> Option<Message> {
     let exec = desktop_info.exec()?;
 
@@ -3080,5 +3111,47 @@ impl AsMimeTypes for DndPathBuf {
 
     fn as_bytes(&self, _mime_type: &str) -> Option<std::borrow::Cow<'static, [u8]>> {
         Some(Cow::Owned(self.0.to_str()?.as_bytes().to_vec()))
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::compute_overflow_cutoffs;
+
+    #[test]
+    fn everything_fits_returns_none() {
+        assert_eq!(compute_overflow_cutoffs(8, 5, 1, 3), (None, None));
+        assert_eq!(compute_overflow_cutoffs(10, 5, 1, 3), (None, None));
+        assert_eq!(compute_overflow_cutoffs(5, 5, 0, 0), (None, None));
+    }
+
+    #[test]
+    fn portrait_keeps_all_local_active_and_shrinks_favorites() {
+        // 6 slots available, 5 pinned + 3 active on this monitor -> 3 slots for pinned (2 icons + ...), all 3 active visible
+        assert_eq!(compute_overflow_cutoffs(6, 5, 1, 3), (Some(3), None));
+        // 5 slots available, 5 pinned + 3 active -> 2 slots for pinned (1 icon + ...), all 3 active visible
+        assert_eq!(compute_overflow_cutoffs(5, 5, 1, 3), (Some(2), None));
+    }
+
+    #[test]
+    fn never_returns_cutoff_ge_section_len() {
+        assert_eq!(compute_overflow_cutoffs(4, 1, 1, 5), (None, Some(3)));
+        assert_eq!(compute_overflow_cutoffs(3, 0, 0, 5), (None, Some(3)));
+        assert_eq!(compute_overflow_cutoffs(3, 5, 0, 0), (Some(3), None));
+    }
+
+    #[test]
+    fn both_sections_overflow_when_very_narrow() {
+        let (fav, act) = compute_overflow_cutoffs(4, 5, 1, 5);
+        assert_eq!(fav, Some(1));
+        assert_eq!(act, Some(3));
+        assert!(fav.unwrap() + act.unwrap() <= 4);
+    }
+
+    #[test]
+    fn zero_btn_count_does_not_panic() {
+        let (fav, act) = compute_overflow_cutoffs(0, 5, 1, 3);
+        assert_eq!(fav, Some(1));
+        assert_eq!(act, Some(1));
     }
 }
