@@ -1,11 +1,13 @@
 #!/bin/sh
-# Reinicia o cosmic-panel sem sair da sessão (cosmic-session o relança sozinho;
-# se atingir o limite de reinício do cosmic-session, sobe via systemd-run --user).
+# Reinicia o cosmic-panel sem sair da sessão (cosmic-session o relança sozinho).
+# Se o cosmic-session estiver em backoff após vários reinícios seguidos, sobe um
+# fallback temporário que se encerra automaticamente assim que o cosmic-session
+# relançar o painel oficial — garantindo que nunca existam duas barras ativas.
 systemctl --user stop cosmic-panel-manual.service 2>/dev/null || true
 old=$(pgrep -x cosmic-panel | head -1)
 if [ -n "$old" ]; then
     pkill -x cosmic-panel 2>/dev/null || true
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
         sleep 1
         new=$(pgrep -x cosmic-panel | head -1)
         [ -n "$new" ] && [ "$new" != "$old" ] && break
@@ -13,7 +15,18 @@ if [ -n "$old" ]; then
 fi
 if [ -z "$new" ] || [ "$new" = "$old" ]; then
     systemctl --user reset-failed cosmic-panel-manual.service 2>/dev/null || true
-    systemd-run --user --unit=cosmic-panel-manual --collect cosmic-panel >/dev/null 2>&1
+    systemd-run --user --unit=cosmic-panel-manual --collect sh -c '
+        cosmic-panel &
+        mpid=$!
+        while kill -0 "$mpid" 2>/dev/null; do
+            sleep 2
+            if [ "$(pgrep -xc cosmic-panel)" -gt 1 ]; then
+                kill "$mpid" 2>/dev/null || true
+                wait "$mpid" 2>/dev/null || true
+                exit 0
+            fi
+        done
+    ' >/dev/null 2>&1
     for i in 1 2 3 4 5; do
         sleep 1
         new=$(pgrep -x cosmic-panel | head -1)
