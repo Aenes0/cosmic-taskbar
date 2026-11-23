@@ -2317,10 +2317,12 @@ impl App {
     }
 
     /// Dedicated compact page opened by the `^` shortcut on the bar:
-    /// shows background apps in a compact strip without a redundant title,
-    /// and in edit mode lets the user reorder/hide background apps as well as
-    /// reorder and configure every system bar icon.
+    /// shows background apps (plus any system bar icons that overflowed from
+    /// the bar on this monitor) in one compact strip without a redundant title,
+    /// and in edit mode lets the user drag-and-drop reorder and configure both
+    /// background apps and system bar icons.
     pub fn background_page(&self) -> Element<'_, Message> {
+        use crate::central::{app::BgDrag, layout::BarItem};
         let tx = crate::central::texts::texts();
         let t = strings();
         let spacing = theme::spacing();
@@ -2340,25 +2342,75 @@ impl App {
                 widget::tooltip::Position::Bottom,
             )
             .into();
-            let main_content: Element<'_, Message> = if apps.is_empty() {
+            let mut strip_icons: Vec<Element<'_, Message>> = apps
+                .iter()
+                .map(|(id, state)| background_icon(*id, state))
+                .collect();
+            for &item in &self.overflow_bar_items {
+                let page = match item {
+                    BarItem::Network => Page::Network,
+                    BarItem::Volume => Page::Sound,
+                    BarItem::Peripherals | BarItem::Battery => Page::Power,
+                    BarItem::Privacy => Page::Camera,
+                    BarItem::Notifications | BarItem::Clock => Page::Main,
+                    BarItem::Tile(tile) => match tile {
+                        Tile::Bluetooth => Page::Bluetooth,
+                        Tile::Vpn => Page::Vpn,
+                        Tile::Power => Page::Power,
+                        Tile::DoNotDisturb => Page::DoNotDisturb,
+                        Tile::Tiling => Page::Tiling,
+                        Tile::Camera => Page::Camera,
+                        Tile::Wifi => Page::Wifi,
+                        Tile::Session => Page::Session,
+                        _ => Page::Main,
+                    },
+                };
+                let icon_name = match item {
+                    BarItem::Network => self.network_icon(),
+                    BarItem::Volume => self.volume_icon(),
+                    BarItem::Tile(tile) => self
+                        .tile_state(tile)
+                        .map_or_else(|| item.icon(), |s| s.icon),
+                    _ => item.icon(),
+                };
+                let btn = button::custom(
+                    widget::container(widget::icon::icon(icon(icon_name)).size(20))
+                        .center(Length::Fill),
+                )
+                .width(Length::Fixed(BACKGROUND_BUTTON))
+                .height(Length::Fixed(BACKGROUND_BUTTON))
+                .padding(0)
+                .class(chip_class(false))
+                .on_press(Message::ShowPage(page));
+                strip_icons.push(
+                    widget::tooltip(
+                        btn,
+                        widget::text::body(item.name()),
+                        widget::tooltip::Position::Bottom,
+                    )
+                    .into(),
+                );
+            }
+            let main_content: Element<'_, Message> = if strip_icons.is_empty() {
                 widget::text::body(tx.no_background_apps)
                     .class(theme::Text::Custom(dimmed))
                     .width(Length::Fill)
                     .into()
             } else {
-                let rows: Vec<Element<'_, Message>> = apps
-                    .chunks(BACKGROUND_COLUMNS - 1)
-                    .map(|chunk| {
-                        widget::row::with_children(
-                            chunk
-                                .iter()
-                                .map(|(id, state)| background_icon(*id, state))
-                                .collect::<Vec<_>>(),
-                        )
-                        .spacing(spacing.space_xxs)
-                        .into()
-                    })
-                    .collect();
+                let mut rows: Vec<Element<'_, Message>> = Vec::new();
+                let cols = BACKGROUND_COLUMNS - 1;
+                let mut iter = strip_icons.into_iter();
+                loop {
+                    let chunk: Vec<Element<'_, Message>> = iter.by_ref().take(cols).collect();
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    rows.push(
+                        widget::row::with_children(chunk)
+                            .spacing(spacing.space_xxs)
+                            .into(),
+                    );
+                }
                 widget::column::with_children(rows)
                     .spacing(spacing.space_xxs)
                     .width(Length::Fill)
@@ -2395,36 +2447,72 @@ impl App {
         .spacing(spacing.space_xs)
         .align_y(Alignment::Center);
 
-        let move_btn = |icon_name: &str, msg: Option<Message>| -> Element<'_, Message> {
-            button::icon(icon(icon_name))
-                .icon_size(14)
-                .padding(5)
-                .class(theme::Button::Text)
-                .on_press_maybe(msg)
-                .into()
+        let dragging_now = self.bg_drag;
+        let grip = |target: BgDrag, enabled: bool| -> Element<'_, Message> {
+            let active = dragging_now == Some(target);
+            let handle: Element<'_, Message> = widget::container(
+                widget::icon::icon(icon("view-app-grid-symbolic")).size(14),
+            )
+            .padding([4, 3])
+            .into();
+            if enabled {
+                widget::mouse_area(handle)
+                    .on_press(Message::BgDragStart(target))
+                    .interaction(if active {
+                        iced::mouse::Interaction::Grabbing
+                    } else {
+                        iced::mouse::Interaction::Grab
+                    })
+                    .into()
+            } else {
+                handle
+            }
         };
+
+        fn wrap_drag_row<'a>(
+            content: Element<'a, Message>,
+            target: BgDrag,
+            dragging_now: Option<BgDrag>,
+        ) -> Element<'a, Message> {
+            let active = dragging_now == Some(target);
+            let styled: Element<'a, Message> = if active {
+                widget::container(content)
+                    .width(Length::Fill)
+                    .class(theme::Container::custom(|theme| {
+                        let cosmic = theme.cosmic();
+                        let card = crate::central::widgets::card(cosmic);
+                        widget::container::Style {
+                            background: Some(Background::Color(card.hover.into())),
+                            border: iced::Border {
+                                radius: cosmic.corner_radii.radius_s.into(),
+                                width: 1.0,
+                                color: cosmic.accent_color().into(),
+                            },
+                            ..Default::default()
+                        }
+                    }))
+                    .into()
+            } else {
+                content
+            };
+            let mut area = widget::mouse_area(styled).on_enter(Message::BgDragOver(target));
+            if dragging_now.is_some() {
+                area = area.interaction(iced::mouse::Interaction::Grabbing);
+            }
+            area.into()
+        }
 
         let mut body: Vec<Element<'_, Message>> = Vec::new();
         body.push(section(tx.background_apps));
         if apps.is_empty() {
             body.push(note(tx.no_background_apps));
         } else {
-            let total = apps.len();
-            for (index, (id, state)) in apps.into_iter().enumerate() {
+            for (id, state) in apps {
                 let name = state.identity.label().unwrap_or(tx.background_apps).to_owned();
                 let has_key = self.background.key_of(id).is_some();
                 let visible = self.background.is_visible(id);
                 let status = if visible { tx.on_bar } else { tx.hidden };
-                let up = move_btn(
-                    "go-up-symbolic",
-                    (has_key && index > 0)
-                        .then_some(Message::Tray(BackgroundMsg::Move(id, true))),
-                );
-                let down = move_btn(
-                    "go-down-symbolic",
-                    (has_key && index + 1 < total)
-                        .then_some(Message::Tray(BackgroundMsg::Move(id, false))),
-                );
+                let target = BgDrag::App(id);
                 let mut toggle = widget::toggler(visible);
                 if has_key {
                     toggle = toggle.on_toggle(move |_| Message::Tray(BackgroundMsg::Toggle(id)));
@@ -2436,38 +2524,28 @@ impl App {
                         .into(),
                 ])
                 .width(Length::Fill);
-                body.push(
-                    padded_control(
-                        widget::row::with_children(vec![
-                            widget::icon::icon(state.icon_handle().clone()).size(20).into(),
-                            info.into(),
-                            up,
-                            down,
-                            toggle.into(),
-                        ])
-                        .spacing(spacing.space_xs)
-                        .align_y(Alignment::Center),
-                    )
-                    .into(),
-                );
+                let row = padded_control(
+                    widget::row::with_children(vec![
+                        grip(target, has_key),
+                        widget::icon::icon(state.icon_handle().clone()).size(20).into(),
+                        info.into(),
+                        toggle.into(),
+                    ])
+                    .spacing(spacing.space_xs)
+                    .align_y(Alignment::Center),
+                )
+                .into();
+                body.push(wrap_drag_row(row, target, dragging_now));
             }
         }
 
-        // System icons shown on the bar: reorderable and configurable in the same edit panel.
+        // System icons shown on the bar: drag-and-drop reorderable + configurable.
         body.push(padded_control(widget::divider::horizontal::default()).into());
         body.push(section(tx.system_bar_icons));
         let ordered_bar_items = self.panel_icons.ordered(&self.reorderable_bar_items());
-        let total_bar_items = ordered_bar_items.len();
-        for (index, item) in ordered_bar_items.into_iter().enumerate() {
+        for item in ordered_bar_items {
             let current = self.panel_icons.get(item);
-            let up = move_btn(
-                "go-up-symbolic",
-                (index > 0).then_some(Message::MoveBarIcon(item, true)),
-            );
-            let down = move_btn(
-                "go-down-symbolic",
-                (index + 1 < total_bar_items).then_some(Message::MoveBarIcon(item, false)),
-            );
+            let target = BgDrag::BarItem(item);
             let choices = widget::row::with_children(
                 item.choices()
                     .iter()
@@ -2482,23 +2560,21 @@ impl App {
             )
             .spacing(3)
             .align_y(Alignment::Center);
-            body.push(
-                padded_control(
-                    widget::row::with_children(vec![
-                        widget::icon::icon(icon(item.icon())).size(16).into(),
-                        widget::text::body(item.name())
-                            .ellipsize(one_line())
-                            .width(Length::Fill)
-                            .into(),
-                        up,
-                        down,
-                        choices.into(),
-                    ])
-                    .spacing(spacing.space_xxs)
-                    .align_y(Alignment::Center),
-                )
-                .into(),
-            );
+            let row = padded_control(
+                widget::row::with_children(vec![
+                    grip(target, true),
+                    widget::icon::icon(icon(item.icon())).size(16).into(),
+                    widget::text::body(item.name())
+                        .ellipsize(one_line())
+                        .width(Length::Fill)
+                        .into(),
+                    choices.into(),
+                ])
+                .spacing(spacing.space_xxs)
+                .align_y(Alignment::Center),
+            )
+            .into();
+            body.push(wrap_drag_row(row, target, dragging_now));
         }
 
         widget::column::with_children(vec![

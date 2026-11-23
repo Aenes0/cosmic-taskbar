@@ -242,6 +242,32 @@ impl PanelIcons {
         self.order = current;
         set("panel_icons_order", &self.order);
     }
+
+    /// Moves `from` to the slot currently occupied by `to` among `items` and
+    /// persists the new order (for drag-and-drop reordering).
+    pub fn move_to(&mut self, from: BarItem, to: BarItem, items: &[BarItem]) {
+        if from == to {
+            return;
+        }
+        let mut current: Vec<String> = self.ordered(items).into_iter().map(BarItem::id).collect();
+        let from_id = from.id();
+        let to_id = to.id();
+        let (Some(from_pos), Some(to_pos)) = (
+            current.iter().position(|id| *id == from_id),
+            current.iter().position(|id| *id == to_id),
+        ) else {
+            return;
+        };
+        let moved = current.remove(from_pos);
+        current.insert(to_pos, moved);
+        for id in &self.order {
+            if !current.contains(id) {
+                current.push(id.clone());
+            }
+        }
+        self.order = current;
+        set("panel_icons_order", &self.order);
+    }
 }
 
 /// A part of the popup under the grid, that folds away.
@@ -398,5 +424,7 @@ mod tests {
         assert_eq!(icons.ordered(&items), vec![BarItem::Notifications, BarItem::Volume, BarItem::Network]);
         icons.move_item(BarItem::Notifications, true, &items);
         assert_eq!(icons.ordered(&items), vec![BarItem::Notifications, BarItem::Volume, BarItem::Network]);
+        icons.move_to(BarItem::Network, BarItem::Notifications, &items);
+        assert_eq!(icons.ordered(&items), vec![BarItem::Network, BarItem::Notifications, BarItem::Volume]);
     }
 }

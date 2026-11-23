@@ -142,6 +142,13 @@ pub enum Dnd {
     Tomorrow,
 }
 
+/// An item currently being dragged to reorder in `Page::Background`'s edit mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BgDrag {
+    App(usize),
+    BarItem(BarItem),
+}
+
 /// A notification: its id, and whether it is kept from an earlier run, whose
 /// ids may be reused.
 pub type NotificationKey = (u32, bool);
@@ -166,6 +173,9 @@ pub enum Message {
     Tray(background::Msg),
     SetBarIcon(BarItem, Show),
     MoveBarIcon(BarItem, bool),
+    BgDragStart(BgDrag),
+    BgDragOver(BgDrag),
+    BgDragEnd,
     ToggleFold(Section),
     /// An item's resize handle dragged this far across since pressed; let go.
     ResizeDrag(usize, f32),
@@ -419,6 +429,11 @@ pub struct App {
     pub(crate) background: Background,
     /// Whether the dedicated `Page::Background` is currently in edit mode.
     pub(crate) background_editing: bool,
+    /// Active drag-and-drop reorder state in `Page::Background`'s edit mode.
+    pub(crate) bg_drag: Option<BgDrag>,
+    /// System bar icons that overflowed from the bar into the `^` popup on the
+    /// active monitor (passed via `"background:id1,id2"`).
+    pub(crate) overflow_bar_items: Vec<BarItem>,
     /// Where the back button in `Page::TrayMenu` returns to (`Main` by default).
     pub(crate) tray_menu_return: Option<Page>,
     /// The page (or `tray:<key>`) that was open right before closing (so the
@@ -454,6 +469,149 @@ impl App {
         }
         items.push(BarItem::Clock);
         items
+    }
+
+    /// Estimates how many pixels a rendered system bar item needs along the
+    /// panel's main axis, or `None` if it is currently not visible on the bar.
+    fn bar_item_extent(&self, item: BarItem, active_tiles: &std::collections::HashMap<Tile, crate::central::tiles::TileState>) -> Option<f32> {
+        let applet = &self.core.applet;
+        let horizontal = applet.is_horizontal();
+        let size = f32::from(applet.suggested_size(true).0);
+        let major = f32::from(applet.suggested_padding(true).0);
+        let icon_unit = size + 8.0;
+        let text_extra = if horizontal { 34.0 } else { 18.0 };
+        let shows = |it: BarItem| self.panel_icons.get(it);
+        match item {
+            BarItem::Privacy => {
+                if shows(BarItem::Privacy) == Show::Never {
+                    return None;
+                }
+                let count = usize::from(!self.privacy.camera.is_empty())
+                    + usize::from(!self.privacy.microphone.is_empty());
+                (count > 0).then_some(count as f32 * icon_unit)
+            }
+            BarItem::Notifications => {
+                let new = self.new_count();
+                let bell = match shows(BarItem::Notifications) {
+                    Show::Always => true,
+                    Show::Active => new > 0,
+                    Show::Never => false,
+                };
+                bell.then_some(if new > 0 { icon_unit + 18.0 } else { icon_unit })
+            }
+            BarItem::Tile(tile) => active_tiles.contains_key(&tile).then_some(icon_unit),
+            BarItem::Network => (shows(BarItem::Network) != Show::Never).then_some(icon_unit),
+            BarItem::Volume => (self.volume.is_some() && shows(BarItem::Volume) != Show::Never)
+                .then_some(icon_unit),
+            BarItem::Peripherals => {
+                if shows(BarItem::Peripherals) == Show::Never || self.peripherals.is_empty() {
+                    return None;
+                }
+                Some(self.peripherals.len() as f32 * (icon_unit + text_extra))
+            }
+            BarItem::Battery => {
+                let _ = self.battery.as_ref().filter(|_| shows(BarItem::Battery) != Show::Never)?;
+                Some(if self.show_percentage { icon_unit + text_extra } else { icon_unit })
+            }
+            BarItem::Clock => (shows(BarItem::Clock) != Show::Never).then_some(if horizontal {
+                76.0 + 2.0 * major
+            } else {
+                36.0 + 2.0 * major
+            }),
+        }
+    }
+
+    /// Computes which SNI apps and system bar items fit in the panel's
+    /// `suggested_bounds`, always preserving `^`, Clock, and ShowDesktop;
+    /// anything that doesn't fit overflows into the `^` popup.
+    fn bar_plan(
+        &self,
+        in_corner: bool,
+        active_tiles: &std::collections::HashMap<Tile, crate::central::tiles::TileState>,
+    ) -> (std::collections::HashSet<usize>, std::collections::HashSet<BarItem>, Vec<BarItem>) {
+        let applet = &self.core.applet;
+        let horizontal = applet.is_horizontal();
+        let size = f32::from(applet.suggested_size(true).0);
+        let item_gap = f32::from((self.bar_spacing.gap() / 2).max(1));
+        let icon_unit = size + 8.0;
+
+        let sni_ids: Vec<usize> = self.background.on_bar().into_iter().map(|(id, _, _)| id).collect();
+        let ordered_items = self.panel_icons.ordered(&self.reorderable_bar_items());
+
+        let max_len = applet
+            .suggested_bounds
+            .as_ref()
+            .map(|b| if horizontal { b.width } else { b.height })
+            .filter(|&v| v > 0.0)
+            .map(|v| (v - if in_corner { 12.0 } else { 0.0 }).max(0.0));
+
+        let Some(max_len) = max_len else {
+            return (
+                sni_ids.into_iter().collect(),
+                ordered_items.into_iter().collect(),
+                Vec::new(),
+            );
+        };
+
+        // Always reserve room for `^` and the Clock (when enabled).
+        let mut used = icon_unit;
+        if let Some(clock_len) = self.bar_item_extent(BarItem::Clock, active_tiles) {
+            used += item_gap + clock_len;
+        }
+
+        let mut fit_sni = std::collections::HashSet::new();
+        for id in sni_ids {
+            if used + item_gap + icon_unit <= max_len {
+                used += item_gap + icon_unit;
+                fit_sni.insert(id);
+            }
+        }
+
+        let mut fit_items = std::collections::HashSet::new();
+        let mut overflow_items = Vec::new();
+        for item in ordered_items {
+            if item == BarItem::Clock {
+                fit_items.insert(item);
+                continue;
+            }
+            let Some(extent) = self.bar_item_extent(item, active_tiles) else {
+                continue;
+            };
+            if used + item_gap + extent <= max_len {
+                used += item_gap + extent;
+                fit_items.insert(item);
+            } else {
+                overflow_items.push(item);
+            }
+        }
+
+        (fit_sni, fit_items, overflow_items)
+    }
+
+    /// The page page-string for `^`, encoding any system bar items that
+    /// overflowed on this monitor so `central --panels` shows them inside `^`.
+    fn background_wire_page(&self) -> String {
+        let active_tiles: std::collections::HashMap<Tile, crate::central::tiles::TileState> =
+            self.bar_tiles().into_iter().collect();
+        let (_, _, overflow) = self.bar_plan(self.corner, &active_tiles);
+        if overflow.is_empty() {
+            Page::Background.name().to_owned()
+        } else {
+            let ids: Vec<String> = overflow.into_iter().map(BarItem::id).collect();
+            format!("{}:{}", Page::Background.name(), ids.join(","))
+        }
+    }
+
+    fn apply_background_overflow(&mut self, page: &str) {
+        self.overflow_bar_items = page
+            .strip_prefix("background:")
+            .map(|list| {
+                list.split(',')
+                    .filter_map(BarItem::from_id)
+                    .filter(|item| *item != BarItem::Clock)
+                    .collect()
+            })
+            .unwrap_or_default();
     }
 
     /// The bar's button: individual icon buttons, and the clock beside them
@@ -545,9 +703,19 @@ impl App {
         .on_right_press(Message::Tray(background::Msg::BarArrow));
         icons.push(arrow.into());
 
+        // Compute which icons fit in the panel's `suggested_bounds`; `^`,
+        // Clock, and ShowDesktop are always preserved, and overflowed icons
+        // move into the `^` popup automatically.
+        let active_tiles: std::collections::HashMap<Tile, crate::central::tiles::TileState> =
+            self.bar_tiles().into_iter().collect();
+        let (fit_sni, fit_items, _overflow) = self.bar_plan(in_corner, &active_tiles);
+
         // The background apps picked for the bar: each with its own hover
-        // highlight, left click activates, right click opens its menu.
+        // highlight, left click activates/opens menu, right click opens its menu.
         for (id, handle, _name) in self.background.on_bar() {
+            if !fit_sni.contains(&id) {
+                continue;
+            }
             let symbolic = handle.symbolic;
             let glyph = widget::icon::icon(handle).size(size);
             let glyph = if symbolic {
@@ -567,10 +735,11 @@ impl App {
             icons.push(area.into());
         }
 
-        // System icons in the user's chosen order.
-        let active_tiles: std::collections::HashMap<Tile, crate::central::tiles::TileState> =
-            self.bar_tiles().into_iter().collect();
+        // System icons in the user's chosen order (skipping any that overflowed into `^`).
         for item in self.panel_icons.ordered(&self.reorderable_bar_items()) {
+            if !fit_items.contains(&item) {
+                continue;
+            }
             match item {
                 BarItem::Privacy => {
                     if shows(BarItem::Privacy) != Show::Never {
@@ -819,6 +988,7 @@ impl App {
         self.last_closed_page = self.page_name();
         self.background.close();
         self.background_editing = false;
+        self.bg_drag = None;
         self.tray_menu_return = None;
         self.page = None;
         let destroy = match self.popup.take() {
@@ -879,6 +1049,13 @@ impl App {
             self.background.open_menu(app);
             return opened;
         }
+        // Dedicated `^` page, optionally carrying overflowed system bar icons.
+        if let Some(p) = page.filter(|p| *p == Page::Background.name() || p.starts_with("background:")) {
+            self.apply_background_overflow(p);
+            self.page = Some(Page::Background);
+            return opened;
+        }
+        self.overflow_bar_items.clear();
         // Opened on a page, as a right click on the bar's icon, or a preview
         // (what it picks or adds while editing kept).
         match page.and_then(Page::from_name).filter(|page| *page != Page::Main) {
@@ -969,7 +1146,7 @@ impl App {
                     return ask_host(crate::central::panels::service::open(
                         Which::Central,
                         panel_output(),
-                        Page::Background.name().to_owned(),
+                        self.background_wire_page(),
                     ));
                 }
                 if self.popup.is_some() {
@@ -1039,6 +1216,13 @@ impl App {
     /// Turns to a page while it shows; asking for the same page (or same tray
     /// app menu) that is already open toggles the popup closed.
     pub(crate) fn turn_to(&mut self, page: &str) -> app::Task<Message> {
+        if page == Page::Background.name() || page.starts_with("background:") {
+            if self.page == Some(Page::Background) {
+                return self.close_popup();
+            }
+            self.apply_background_overflow(page);
+            return <Self as cosmic::Application>::update(self, Message::ShowPage(Page::Background));
+        }
         if self.page_name().as_deref() == Some(page) {
             return self.close_popup();
         }
@@ -1530,6 +1714,22 @@ impl cosmic::Application for App {
             Message::MoveBarIcon(item, up) => {
                 let items = self.reorderable_bar_items();
                 self.panel_icons.move_item(item, up, &items);
+            }
+            Message::BgDragStart(target) => {
+                self.bg_drag = Some(target);
+            }
+            Message::BgDragOver(target) => match (self.bg_drag, target) {
+                (Some(BgDrag::App(from)), BgDrag::App(to)) if from != to => {
+                    self.background.move_to(from, to);
+                }
+                (Some(BgDrag::BarItem(from)), BgDrag::BarItem(to)) if from != to => {
+                    let items = self.reorderable_bar_items();
+                    self.panel_icons.move_to(from, to, &items);
+                }
+                _ => {}
+            },
+            Message::BgDragEnd => {
+                self.bg_drag = None;
             }
             Message::Tray(message) => return self.tray(message),
             Message::ToggleFold(section) => {
@@ -2464,6 +2664,14 @@ impl cosmic::Application for App {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
                 )) => Some(Message::DragEnd),
+                _ => None,
+            }));
+        }
+        if self.bg_drag.is_some() {
+            subscriptions.push(event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::BgDragEnd),
                 _ => None,
             }));
         }

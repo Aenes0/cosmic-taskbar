@@ -169,6 +169,24 @@ impl Background {
         self.set_visible(visible);
     }
 
+    /// Moves `from_id` to the position of `to_id` in the display order
+    /// (for drag-and-drop reordering).
+    pub fn move_to(&mut self, from_id: usize, to_id: usize) {
+        if from_id == to_id {
+            return;
+        }
+        let (Some(from_key), Some(to_key)) = (
+            self.key_of(from_id).map(str::to_owned),
+            self.key_of(to_id).map(str::to_owned),
+        ) else {
+            return;
+        };
+        let present = self.present_keys_ordered();
+        let refs: Vec<&str> = present.iter().map(String::as_str).collect();
+        let visible = move_key_to(&self.config.visible, &refs, &from_key, &to_key);
+        self.set_visible(visible);
+    }
+
     fn present_keys_ordered(&self) -> Vec<String> {
         let mut keys = Vec::new();
         for (_, state) in self.apps() {
@@ -455,6 +473,29 @@ pub fn move_visible(order: &[String], present: &[&str], key: &str, up: bool) -> 
         out.iter().position(|k| k == other),
     ) {
         out.swap(a, b);
+    }
+    out
+}
+
+/// Moves `from_key` to the slot of `to_key` among `present`, preserving any
+/// previously ordered keys that aren't currently running.
+pub fn move_key_to(order: &[String], present: &[&str], from_key: &str, to_key: &str) -> Vec<String> {
+    let (Some(from_pos), Some(to_pos)) = (
+        present.iter().position(|k| *k == from_key),
+        present.iter().position(|k| *k == to_key),
+    ) else {
+        return order.to_vec();
+    };
+    if from_pos == to_pos {
+        return order.to_vec();
+    }
+    let mut out: Vec<String> = present.iter().map(|k| (*k).to_owned()).collect();
+    let moved = out.remove(from_pos);
+    out.insert(to_pos, moved);
+    for existing in order {
+        if !out.contains(existing) {
+            out.push(existing.clone());
+        }
     }
     out
 }

@@ -177,13 +177,16 @@ impl Panels {
         // Clicking the same bar icon (system page, `^`, or tray app) while its
         // popup is open closes it on focus loss right before the D-Bus Open
         // arrives: treat that as a toggle-close and do not reopen.
+        let req_base = request.page.as_deref().map(|p| {
+            p.split_once(':').filter(|(head, _)| *head == central::Page::Background.name()).map_or(p, |(head, _)| head)
+        });
         if shown.is_none()
             && request.which == Which::Central
-            && request.page.is_some()
+            && req_base.is_some()
             && recent_closed.is_some_and(|(which, output, page, _)| {
                 *which == Which::Central
                     && output.as_str() == request.output.as_str()
-                    && page.as_deref() == request.page.as_deref()
+                    && page.as_deref() == req_base
             })
         {
             return Task::none();
