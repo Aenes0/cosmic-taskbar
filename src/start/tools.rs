@@ -25,6 +25,7 @@ pub enum Tool {
     InTerminal(Vec<String>),
     Search,
     ShowDesktop,
+    ControlPanel,
     /// Opens or closes "Shut down or sign out".
     PowerMenu,
 }
@@ -48,6 +49,9 @@ impl Tool {
             Tool::Search => spawn_clean(&crate::start::menu::self_exe().to_string_lossy(), &["--menu"]),
             Tool::ShowDesktop => {
                 spawn_clean(&crate::start::menu::self_exe().to_string_lossy(), &["--show-desktop"]);
+            }
+            Tool::ControlPanel => {
+                spawn_clean(&crate::start::menu::self_exe().to_string_lossy(), &["control-panel"]);
             }
             Tool::PowerMenu => {}
         }
@@ -122,6 +126,11 @@ fn items() -> Vec<Option<(&'static str, &'static str, Tool)>> {
         )),
         None,
         Some(("utilities-system-monitor-symbolic", t.task_manager, task_manager_tool())),
+        Some((
+            "preferences-system-symbolic",
+            if crate::shared::locale::portuguese() { "Painel de Controle" } else { "Control Panel" },
+            Tool::ControlPanel,
+        )),
         Some(("emblem-system-symbolic", t.settings, Tool::Run("cosmic-settings", Vec::new()))),
         Some(("system-file-manager-symbolic", t.file_explorer, Tool::Run("cosmic-files", Vec::new()))),
         Some(("system-search-symbolic", t.search, Tool::Search)),

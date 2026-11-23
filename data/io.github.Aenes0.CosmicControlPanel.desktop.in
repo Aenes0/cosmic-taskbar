@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Control Panel
+Name[pt]=Painel de Controle
+Name[pt_BR]=Painel de Controle
+Comment=Manage power profiles, battery, taskbar, tray, cameras, network, displays, and updates
+Comment[pt]=Gerencie energia, bateria, barra, tray, câmeras, rede, monitores e atualizações
+Comment[pt_BR]=Gerencie energia, bateria, barra, tray, câmeras, rede, monitores e atualizações
+Type=Application
+Exec=@bindir@/cosmic-taskbar control-panel
+Icon=emblem-system-symbolic
+Terminal=false
+Categories=Settings;System;COSMIC;
+Keywords=control;panel;settings;power;battery;tray;camera;network;update;energia;bateria;painel;ajustes;
+StartupWMClass=io.github.Aenes0.CosmicControlPanel

@@ -20,6 +20,7 @@
 
 mod bar;
 mod central;
+mod control_panel;
 mod logi;
 mod shared;
 mod start;
@@ -35,6 +36,8 @@ enum Mode {
     /// The workspaces' button.
     Workspaces,
     Central,
+    /// Full native COSMIC Control Panel app.
+    ControlPanel,
     /// The Logitech service; its own arguments start at this index.
     Logi(usize),
 }
@@ -47,6 +50,7 @@ fn mode(program: &str, first_arg: Option<&str>) -> Option<Mode> {
         Some("start" | "--menu" | "--tools") => return Some(Mode::Start),
         Some("workspaces") => return Some(Mode::Workspaces),
         Some("central") => return Some(Mode::Central),
+        Some("control-panel" | "--control-panel") => return Some(Mode::ControlPanel),
         // Only the Central has these: it runs its own executable with them
         // (the panels' host, when there is no unit), which is this program.
         Some("--panels" | "--tray" | "--monitor" | "--clipboard" | "--notifications") => {
@@ -94,10 +98,11 @@ fn main() -> ExitCode {
         Some(Mode::Start) => exit_code(start::run()),
         Some(Mode::Workspaces) => exit_code(start::run_workspaces()),
         Some(Mode::Central) => exit_code(central::run()),
+        Some(Mode::ControlPanel) => exit_code(control_panel::run()),
         Some(Mode::Logi(from)) => logi::run_service(args.get(from..).unwrap_or_default()),
         None => {
             eprintln!(
-                "cosmic-taskbar: unknown mode {:?}; use taskbar, start, workspaces, --menu, --tools, --show-desktop, central or logi",
+                "cosmic-taskbar: unknown mode {:?}; use taskbar, start, workspaces, --menu, --tools, --show-desktop, central, control-panel or logi",
                 args.get(1)
             );
             ExitCode::from(2)
@@ -118,6 +123,8 @@ mod tests {
         assert_eq!(mode("cosmic-taskbar", Some("--tools")), Some(Mode::Start));
         assert_eq!(mode("cosmic-taskbar", Some("workspaces")), Some(Mode::Workspaces));
         assert_eq!(mode("cosmic-taskbar", Some("central")), Some(Mode::Central));
+        assert_eq!(mode("cosmic-taskbar", Some("control-panel")), Some(Mode::ControlPanel));
+        assert_eq!(mode("cosmic-taskbar", Some("--control-panel")), Some(Mode::ControlPanel));
         assert_eq!(mode("cosmic-taskbar", Some("logi")), Some(Mode::Logi(2)));
     }
 

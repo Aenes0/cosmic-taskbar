@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 mod app;
-mod audio;
+pub(crate) mod audio;
 mod background;
-mod bar_spacing;
+pub(crate) mod bar_spacing;
 mod board;
 mod calendar;
 mod clipboard;
 mod corner;
 mod host;
 mod i18n;
-mod layout;
+pub(crate) mod layout;
 mod latest;
 mod media;
 mod monitor;
@@ -18,15 +18,15 @@ mod notifications;
 mod pages;
 mod panels;
 mod privileged;
-mod services;
+pub(crate) mod services;
 mod show_desktop;
 mod slow;
 mod texts;
-mod tiles;
+pub(crate) mod tiles;
 mod timing;
 mod transition;
-mod tray;
-mod widgets;
+pub(crate) mod tray;
+pub(crate) mod widgets;
 mod workspaces;
 
 pub const APP_ID: &str = "io.github.Aenes0.CosmicCentral";
