@@ -2670,7 +2670,13 @@ impl cosmic::Application for App {
                     cosmic::action::app(Message::None)
                 });
             }
-            Message::Privacy(privacy) => self.privacy = privacy,
+            Message::Privacy(privacy) => {
+                let cam_changed = privacy.camera != self.privacy.camera;
+                self.privacy = privacy;
+                if cam_changed && Tile::Camera.available() {
+                    return read_camera();
+                }
+            }
             Message::ScrollVolume(steps) => {
                 if let Some(volume) = &self.volume {
                     let percent = (volume.level * 100.0 + steps * 5.0).clamp(0.0, 100.0);
@@ -2750,11 +2756,19 @@ impl cosmic::Application for App {
                 iced::time::every(Duration::from_secs(20)).map(|_| Message::CheckDoNotDisturb),
             );
         }
-        // The service writes down how it is every couple of seconds: for its
-        // page, and for the tile's subtitle while it's on.
-        if self.popup.is_some() && (self.page == Some(Page::Camera) || self.camera.on) {
+        // Poll camera status: every 2s while the camera page is open or Iriun
+        // is active (both in the popup host and on the bar applet), and every
+        // 4s on the bar when the camera icon can appear so toggling Iriun
+        // on/off from the popup or CLI always updates the bar icon.
+        if (self.popup.is_some() && self.page == Some(Page::Camera)) || self.camera.on {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(2)).map(|_| Message::ReadCamera));
+        } else if !self.hosted
+            && Tile::Camera.available()
+            && self.panel_icons.get(BarItem::Tile(Tile::Camera)) != Show::Never
+        {
+            subscriptions
+                .push(iced::time::every(Duration::from_secs(4)).map(|_| Message::ReadCamera));
         }
         if self.popup.is_some() && self.shown_media().is_some_and(|m| m.playing) {
             subscriptions
