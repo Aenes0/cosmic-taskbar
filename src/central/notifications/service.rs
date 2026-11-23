@@ -38,9 +38,17 @@ pub struct FdoNotifications {
 
 impl FdoNotifications {
     fn new(store: Arc<Store>) -> Self {
+        let start_id = store
+            .load()
+            .iter()
+            .map(|n| n.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
         Self {
             store,
-            next_id: AtomicU32::new(1),
+            next_id: AtomicU32::new(start_id),
             history_iface: tokio::sync::OnceCell::new(),
         }
     }

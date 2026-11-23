@@ -143,8 +143,9 @@ pub struct Panels {
     toasts: Vec<Toast>,
     /// Layer-shell surface currently hosting floating toasts and its anchor position.
     toast_surface: Option<(window::Id, NotifPosition)>,
-    /// Notification IDs already seen so old history never pops up as toasts.
-    seen_toast_ids: HashSet<u32>,
+    /// Notification `(id, time)` pairs already seen so old history never pops up as toasts,
+    /// while reused IDs after a daemon restart always show.
+    seen_toast_ids: HashSet<(u32, std::time::SystemTime)>,
     /// Live user configuration for floating notification toasts.
     notif_config: NotifConfig,
 }
@@ -396,7 +397,10 @@ impl cosmic::Application for Panels {
         // (A layer surface blurs only with Auto::System: none is asked for;
         // measured, turning this off too changed nothing.)
         core.set_auto_blur(cosmic::core::Auto::Popup.into());
-        let initial_seen: HashSet<u32> = notifications::load().into_iter().map(|n| n.id).collect();
+        let initial_seen: HashSet<(u32, std::time::SystemTime)> = notifications::load()
+            .into_iter()
+            .map(|n| (n.id, n.time))
+            .collect();
         let panels = Self {
             central: App::hosted(core.clone()),
             monitor: Monitor::hosted(core.clone()),
@@ -521,10 +525,11 @@ impl cosmic::Application for Panels {
                 self.toasts.retain(|t| live_ids.contains(&t.notification.id));
                 let mut added = false;
                 for n in list.into_iter().rev() {
-                    if n.restored || n.seen || self.seen_toast_ids.contains(&n.id) {
+                    let key = (n.id, n.time);
+                    if n.restored || n.seen || self.seen_toast_ids.contains(&key) {
                         continue;
                     }
-                    self.seen_toast_ids.insert(n.id);
+                    self.seen_toast_ids.insert(key);
                     if !dnd {
                         self.toasts.retain(|t| t.notification.id != n.id);
                         self.toasts.insert(0, Toast::new(n));
