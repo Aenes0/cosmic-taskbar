@@ -18,6 +18,10 @@ fn get<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
 }
 
 fn set<T: serde::Serialize>(key: &str, value: T) {
+    // Never overwrite the user's real ~/.config/cosmic during `cargo test`.
+    if cfg!(test) {
+        return;
+    }
     if let Some(Err(err)) = config().map(|c| c.set(key, value)) {
         tracing::warn!("cannot save {key}: {err}");
     }
