@@ -1251,8 +1251,38 @@ impl App {
         }
     }
 
+    /// Reloads all user-configurable settings from disk (`cosmic_config`).
+    /// Called both on live `SettingsChanged` notifications and whenever the
+    /// hosted Central popup opens (since `central --panels` does not hold
+    /// `settings_subscription` while the popup is closed).
+    fn reload_settings(&mut self) {
+        if self.drag.is_none() && self.resizing.is_none() && self.before_edit.is_none() {
+            let tiles = load_tiles();
+            if tiles != self.tiles {
+                self.tiles = tiles;
+                self.selected_tile = None;
+            }
+        }
+        self.panel_icons = PanelIcons::load();
+        self.layout = Layout::load();
+        self.bar_spacing = BarSpacing::load();
+        self.primary_display = layout::primary_display();
+        self.show_percentage = SHOW_PERCENTAGE.get();
+        self.notif_config = NotifConfig::load();
+        self.do_not_disturb = DO_NOT_DISTURB.get();
+        if !self.do_not_disturb && self.dnd_until.is_some() {
+            self.dnd_until = None;
+            services::set_dnd_until(None);
+        }
+        self.dark_mode = DARK_MODE.get();
+        self.tiling_config = services::tiling_config();
+        self.touchpad = services::touchpad();
+        self.hot_edge = services::hot_edge();
+    }
+
     /// What opening reads, the panel on its main page.
     fn opened(&mut self) -> app::Task<Message> {
+        self.reload_settings();
         self.page = Some(Page::Main);
         self.calendar_month = crate::central::calendar::Month::now();
         self.fold_for_room();
@@ -1273,8 +1303,12 @@ impl App {
     }
 
     /// No room for it all: the calendar and what was copied fold, for the
-    /// notifications; with room, they open.
+    /// notifications; with room, they open — unless the user explicitly
+    /// configured folded sections in the Central or Control Panel.
     fn fold_for_room(&mut self) {
+        if !self.layout.folded.is_empty() {
+            return;
+        }
         let folded = !self.everything_fits(false);
         self.layout.show(Section::Notifications, false);
         self.layout.show(Section::Calendar, folded);
@@ -2231,30 +2265,8 @@ impl cosmic::Application for App {
             }
             Message::Inhibited(cookie) => self.inhibit = cookie,
             Message::SettingsChanged => {
-                // What another screen's applet saved; not while this one is
-                // in the middle of moving or resizing an item.
-                if self.drag.is_none() && self.resizing.is_none() && self.before_edit.is_none() {
-                    let tiles = load_tiles();
-                    if tiles != self.tiles {
-                        self.tiles = tiles;
-                        self.selected_tile = None;
-                    }
-                }
-                self.panel_icons = PanelIcons::load();
-                self.layout = Layout::load();
-                self.bar_spacing = BarSpacing::load();
-                self.primary_display = layout::primary_display();
-                self.notif_config = NotifConfig::load();
-                self.do_not_disturb = DO_NOT_DISTURB.get();
-                // Turned off elsewhere: no timer left.
-                if !self.do_not_disturb && self.dnd_until.is_some() {
-                    self.dnd_until = None;
-                    services::set_dnd_until(None);
-                }
-                self.dark_mode = DARK_MODE.get();
-                self.tiling_config = services::tiling_config();
-                self.touchpad = services::touchpad();
-                self.hot_edge = services::hot_edge();
+                // What another screen's applet or the Control Panel saved.
+                self.reload_settings();
             }
             Message::ToggleShowPercentage => {
                 self.show_percentage = !self.show_percentage;

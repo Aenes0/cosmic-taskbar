@@ -122,6 +122,7 @@ pub enum Message {
     SearchPlace,
     PlacesFound(Vec<weather::Place>),
     PickPlace(weather::Place),
+    SettingsChanged,
     None,
 }
 
@@ -782,6 +783,29 @@ impl Monitor {
     }
 }
 
+/// Watches `io.github.Aenes0.CosmicCentral.Monitor` so bar applets and the
+/// hosted Monitor popup reload settings immediately when changed from the
+/// Control Panel or another screen.
+fn monitor_settings_subscription() -> Subscription<()> {
+    Subscription::run_with("monitor-settings", |_| {
+        cosmic::iced::stream::channel(4, |output: futures::channel::mpsc::Sender<()>| async move {
+            let watcher = cosmic::cosmic_config::Config::new(APP_ID, 1)
+                .ok()
+                .and_then(|cfg| {
+                    let output = std::sync::Mutex::new(output);
+                    cfg.watch(move |_, _| {
+                        if let Ok(mut tx) = output.lock() {
+                            _ = tx.try_send(());
+                        }
+                    })
+                    .ok()
+                });
+            futures::future::pending::<()>().await;
+            drop(watcher);
+        })
+    })
+}
+
 fn popup_limits(max_height: f32) -> Limits {
     Limits::NONE
         .min_width(WIDTH)
@@ -1079,6 +1103,11 @@ impl cosmic::Application for Monitor {
                 self.weather_failed_at = None;
                 return self.weather_tick(true);
             }
+            Message::SettingsChanged => {
+                self.settings_seen = None;
+                self.settings_tick();
+                return self.weather_tick(false);
+            }
             Message::None => {}
         }
         Task::none()
@@ -1095,6 +1124,7 @@ impl cosmic::Application for Monitor {
         Subscription::batch([
             iced::time::every(every).map(|_| Message::Tick),
             iced::time::every(WEATHER_TICK).map(|_| Message::WeatherTick),
+            monitor_settings_subscription().map(|()| Message::SettingsChanged),
             event::listen_with(|event, _, _| {
                 use iced::event::wayland::{Event as Wayland, OutputEvent};
                 match event {

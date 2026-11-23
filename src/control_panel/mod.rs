@@ -335,6 +335,36 @@ impl ControlPanel {
         items
     }
 
+    fn persist_power_config(&mut self, sync_idle: bool) {
+        if let Err(err) = self.power_config.save() {
+            self.notice = Some(format!("Falha ao salvar perfis de energia: {err}"));
+            return;
+        }
+        if sync_idle
+            && self
+                .power
+                .as_ref()
+                .is_some_and(|p| p.active == self.editing_profile.id())
+        {
+            let tuning = self.power_config.get(self.editing_profile);
+            if let Err(err) = power_config::apply_idle_timeouts(tuning) {
+                self.notice = Some(format!("Falha ao aplicar tempos de tela/login: {err}"));
+            }
+        }
+    }
+
+    fn persist_osd_config(&mut self) {
+        if let Err(err) = self.osd_config.normalized().save() {
+            self.notice = Some(err);
+        }
+    }
+
+    fn persist_greeter_config(&mut self) {
+        if let Err(err) = data::save_greeter_config(&self.greeter) {
+            self.notice = Some(err);
+        }
+    }
+
     fn reload_all(&self) -> app::Task<Message> {
         Task::batch([
             Task::future(async {
@@ -453,6 +483,11 @@ impl cosmic::Application for ControlPanel {
                         cosmic::action::app(Message::CameraLoaded(services::camera().await))
                     });
                 }
+                if sec == Section::Bar {
+                    self.panel_icons = PanelIcons::load();
+                    self.bar_spacing = BarSpacing::load();
+                    self.tray_config = data::load_tray_config();
+                }
                 if sec == Section::Monitor {
                     self.monitor_settings = MonitorSettings::load();
                     self.weather_place = monitor::config::weather_place();
@@ -466,7 +501,19 @@ impl cosmic::Application for ControlPanel {
                     self.hot_edge = services::hot_edge();
                 }
                 if sec == Section::Notifications {
-                    self.notif_config = NotifConfig::load();
+                    let prev_accent = self.notif_config.accent_hex.clone();
+                let prev_bg = self.notif_config.bg_hex.clone();
+                self.notif_config = NotifConfig::load();
+                if !prev_accent.is_empty()
+                    && crate::central::notifications::config::parse_hex_color(&prev_accent).is_none()
+                {
+                    self.notif_config.accent_hex = prev_accent;
+                }
+                if !prev_bg.is_empty()
+                    && crate::central::notifications::config::parse_hex_color(&prev_bg).is_none()
+                {
+                    self.notif_config.bg_hex = prev_bg;
+                }
                 }
                 if sec == Section::DevicesOsd {
                     self.osd_config = osd_config::load_or_default();
@@ -522,7 +569,19 @@ impl cosmic::Application for ControlPanel {
                 self.hot_edge = services::hot_edge();
                 self.monitor_settings = MonitorSettings::load();
                 self.weather_place = monitor::config::weather_place();
+                let prev_accent = self.notif_config.accent_hex.clone();
+                let prev_bg = self.notif_config.bg_hex.clone();
                 self.notif_config = NotifConfig::load();
+                if !prev_accent.is_empty()
+                    && crate::central::notifications::config::parse_hex_color(&prev_accent).is_none()
+                {
+                    self.notif_config.accent_hex = prev_accent;
+                }
+                if !prev_bg.is_empty()
+                    && crate::central::notifications::config::parse_hex_color(&prev_bg).is_none()
+                {
+                    self.notif_config.bg_hex = prev_bg;
+                }
             }
             // Power
             Message::SetPowerProfile(profile) => {
@@ -565,74 +624,96 @@ impl cosmic::Application for ControlPanel {
             Message::PowerToggleBoost => {
                 let t = self.power_config.get_mut(self.editing_profile);
                 t.boost = !t.boost;
+                self.persist_power_config(false);
             }
             Message::PowerCpuMaxMhz(mhz) => {
                 self.power_config.get_mut(self.editing_profile).cpu_max_mhz = mhz;
+                self.persist_power_config(false);
             }
             Message::PowerEpp(epp) => {
                 self.power_config.get_mut(self.editing_profile).epp = epp;
+                self.persist_power_config(false);
             }
             Message::PowerIntelMaxPerf(pct) => {
                 self.power_config.get_mut(self.editing_profile).intel_max_perf_pct =
                     pct.clamp(10, 100);
+                self.persist_power_config(false);
             }
             Message::PowerRaplPl1(w) => {
                 self.power_config.get_mut(self.editing_profile).rapl_pl1_w = w;
+                self.persist_power_config(false);
             }
             Message::PowerRaplPl2(w) => {
                 self.power_config.get_mut(self.editing_profile).rapl_pl2_w = w;
+                self.persist_power_config(false);
             }
             Message::PowerToggleDisableCcd1 => {
                 let t = self.power_config.get_mut(self.editing_profile);
                 t.disable_ccd1 = !t.disable_ccd1;
+                self.persist_power_config(false);
             }
             Message::PowerMaxOnlineCores(cores) => {
                 self.power_config.get_mut(self.editing_profile).max_online_cores = cores;
+                self.persist_power_config(false);
             }
             Message::PowerNvidiaPowerLimit(w) => {
                 self.power_config.get_mut(self.editing_profile).nvidia_power_limit_w = w;
+                self.persist_power_config(false);
             }
             Message::PowerNvidiaGpuClock(mhz) => {
                 self.power_config.get_mut(self.editing_profile).nvidia_gpu_clock_mhz = mhz;
+                self.persist_power_config(false);
             }
             Message::PowerNvidiaMemClock(mhz) => {
                 self.power_config.get_mut(self.editing_profile).nvidia_mem_clock_mhz = mhz;
+                self.persist_power_config(false);
             }
             Message::PowerToggleNvidiaPersistence => {
                 let t = self.power_config.get_mut(self.editing_profile);
                 t.nvidia_persistence = !t.nvidia_persistence;
+                self.persist_power_config(false);
             }
             Message::PowerIntelIgpuMaxMhz(mhz) => {
                 self.power_config.get_mut(self.editing_profile).intel_igpu_max_mhz = mhz;
+                self.persist_power_config(false);
             }
             Message::PowerDisplayHz(hz) => {
                 self.power_config.get_mut(self.editing_profile).display_hz = hz;
+                self.persist_power_config(false);
             }
             Message::PowerScreenOffMins(mins) => {
                 self.power_config.get_mut(self.editing_profile).screen_off_mins = mins;
+                self.persist_power_config(true);
             }
             Message::PowerLockMins(mins) => {
                 self.power_config.get_mut(self.editing_profile).lock_mins = mins;
+                self.persist_power_config(true);
             }
             Message::PowerSuspendAcMins(mins) => {
                 self.power_config.get_mut(self.editing_profile).suspend_ac_mins = mins;
+                self.persist_power_config(true);
             }
             Message::PowerSuspendBatteryMins(mins) => {
                 self.power_config.get_mut(self.editing_profile).suspend_battery_mins = mins;
+                self.persist_power_config(true);
             }
             Message::PowerPcieAspm(aspm) => {
                 self.power_config.get_mut(self.editing_profile).pcie_aspm = aspm;
+                self.persist_power_config(false);
             }
             Message::PowerSataAlpm(alpm) => {
                 self.power_config.get_mut(self.editing_profile).sata_alpm = alpm;
+                self.persist_power_config(false);
             }
             Message::PowerToggleAudioSave => {
                 let t = self.power_config.get_mut(self.editing_profile);
                 t.audio_power_save = !t.audio_power_save;
+                self.persist_power_config(false);
             }
             Message::PowerToggleWifiSave => {
                 let t = self.power_config.get_mut(self.editing_profile);
                 t.wifi_power_save = !t.wifi_power_save;
+                self.persist_power_config(false);
             }
             Message::PowerSaveOnly => match self.power_config.save() {
                 Ok(()) => {
@@ -954,20 +1035,24 @@ impl cosmic::Application for ControlPanel {
             Message::OsdDurationMs(ms) => {
                 self.osd_config.duration =
                     std::time::Duration::from_millis(ms.clamp(200, 20_000));
+                self.persist_osd_config();
             }
             Message::OsdBatteryLow(pct) => {
                 self.osd_config.battery_low = pct.clamp(2, 99);
                 if self.osd_config.battery_critical >= self.osd_config.battery_low {
                     self.osd_config.battery_critical = self.osd_config.battery_low - 1;
                 }
+                self.persist_osd_config();
             }
             Message::OsdBatteryCritical(pct) => {
                 let max_crit = self.osd_config.battery_low.saturating_sub(1).max(1);
                 self.osd_config.battery_critical = pct.clamp(1, max_crit);
+                self.persist_osd_config();
             }
             Message::OsdBatteryIntervalMins(mins) => {
                 self.osd_config.legacy_battery_interval =
                     std::time::Duration::from_secs(mins.clamp(1, 1440) * 60);
+                self.persist_osd_config();
             }
             Message::OsdEmojiCommand(cmd) => {
                 let trimmed = cmd.trim();
@@ -976,6 +1061,7 @@ impl cosmic::Application for ControlPanel {
                 } else {
                     Some(cmd)
                 };
+                self.persist_osd_config();
             }
             Message::OsdSaveOnly => {
                 self.osd_config = self.osd_config.normalized();
@@ -1158,30 +1244,39 @@ impl cosmic::Application for ControlPanel {
             // Login (Greeter)
             Message::GreeterWallpaperInput(val) => {
                 self.greeter.wallpaper = val;
+                self.persist_greeter_config();
             }
             Message::GreeterTheme(theme) => {
                 self.greeter.theme = theme;
+                self.persist_greeter_config();
             }
             Message::GreeterToggleClock24h => {
                 self.greeter.clock_24h = !self.greeter.clock_24h;
+                self.persist_greeter_config();
             }
             Message::GreeterToggleShowSeconds => {
                 self.greeter.show_seconds = !self.greeter.show_seconds;
+                self.persist_greeter_config();
             }
             Message::GreeterBlurRadius(radius) => {
                 self.greeter.blur_radius = radius.min(60);
+                self.persist_greeter_config();
             }
             Message::GreeterDimOpacity(val) => {
                 self.greeter.dim_opacity = ((val * 100.0).round() / 100.0).clamp(0.0, 0.85);
+                self.persist_greeter_config();
             }
             Message::GreeterDefaultUserInput(val) => {
                 self.greeter.default_user = val;
+                self.persist_greeter_config();
             }
             Message::GreeterSessionInput(val) => {
                 self.greeter.session = val;
+                self.persist_greeter_config();
             }
             Message::GreeterToggleIsolatedBinary => {
                 self.greeter.isolated_binary = !self.greeter.isolated_binary;
+                self.persist_greeter_config();
             }
             Message::GreeterSaveOnly => match data::save_greeter_config(&self.greeter) {
                 Ok(path) => {
@@ -1260,7 +1355,19 @@ impl cosmic::Application for ControlPanel {
                 self.monitor_settings = MonitorSettings::load();
                 self.weather_place = monitor::config::weather_place();
                 self.central_layout = Layout::load();
+                let prev_accent = self.notif_config.accent_hex.clone();
+                let prev_bg = self.notif_config.bg_hex.clone();
                 self.notif_config = NotifConfig::load();
+                if !prev_accent.is_empty()
+                    && crate::central::notifications::config::parse_hex_color(&prev_accent).is_none()
+                {
+                    self.notif_config.accent_hex = prev_accent;
+                }
+                if !prev_bg.is_empty()
+                    && crate::central::notifications::config::parse_hex_color(&prev_bg).is_none()
+                {
+                    self.notif_config.bg_hex = prev_bg;
+                }
                 self.osd_config = osd_config::load_or_default();
                 self.greeter = data::load_greeter_config();
                 self.power_config = PowerProfilesConfig::load(
