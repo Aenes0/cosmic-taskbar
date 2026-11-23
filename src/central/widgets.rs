@@ -606,11 +606,14 @@ impl<'a, Message> Level<'a, Message> {
             let span = (bounds.width - side - 2.0 * COMPACT_KNOB).max(1.0);
             return ((at.x - start) / span).clamp(0.0, 1.0);
         }
-        let span = (self.length(bounds) - side).max(1.0);
+        // The track starts a little before the icon's square ends, and the
+        // knob can go to its far end.
+        let lead = side - LEVEL_LEAD;
+        let span = (self.length(bounds) - lead - LEVEL_END).max(1.0);
         let along = if self.vertical {
-            bounds.y + bounds.height - side / 2.0 - at.y
+            bounds.y + bounds.height - at.y - lead
         } else {
-            at.x - (bounds.x + side / 2.0)
+            at.x - bounds.x - lead
         };
         (along / span).clamp(0.0, 1.0)
     }
@@ -630,7 +633,34 @@ struct LevelState {
 const DRAG_START: f32 = 4.0;
 /// A compact level's knob's radius, and its rail's thickness.
 const COMPACT_KNOB: f32 = 7.0;
-const COMPACT_RAIL: f32 = 6.0;
+const COMPACT_RAIL: f32 = 4.0;
+/// Material 3's slider, delicate: the track's thickness, the gap between it
+/// and the thumb, how far before the icon's square ends the track starts, and
+/// how far the thumb's center stops short of the far end.
+const LEVEL_RAIL: f32 = 10.0;
+const LEVEL_GAP: f32 = 5.0;
+const LEVEL_LEAD: f32 = 4.0;
+const LEVEL_END: f32 = 4.0;
+/// Pairs of the thumb's thickness, resting and held.
+const THUMB: (f32, f32) = (4.0, 3.0);
+
+/// A rounded piece, nothing if it has no size.
+fn pill(renderer: &mut cosmic::Renderer, bounds: Rectangle, radius: [f32; 4], color: Color) {
+    if bounds.width <= 0.0 || bounds.height <= 0.0 {
+        return;
+    }
+    renderer.fill_quad(
+        renderer::Quad {
+            bounds,
+            border: Border {
+                radius: radius.into(),
+                ..Border::default()
+            },
+            ..renderer::Quad::default()
+        },
+        color,
+    );
+}
 
 impl<Message: Clone> Widget<Message, cosmic::Theme, cosmic::Renderer> for Level<'_, Message> {
     fn tag(&self) -> tree::Tag {
@@ -781,73 +811,66 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, cosmic::Renderer> for Level<
         if self.compact {
             return self.draw_compact(tree, renderer, theme, style, layout, cursor, viewport, hovered);
         }
-        let track: Color = if hovered { component.hover } else { component.base }.into();
         let side = self.thickness(bounds);
-        let radius = side / 2.0;
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds,
-                border: Border {
-                    radius: self.corners(radius).into(),
-                    ..Border::default()
-                },
-                ..renderer::Quad::default()
-            },
-            track,
-        );
-        let (lit, on): (Color, Color) = if self.dimmed {
-            (component.pressed.into(), component.on.into())
+        let length = self.length(bounds);
+        // Material 3: a thin pill of track, the part up to the level in the
+        // accent and the rest the same, see-through; a thin thumb between
+        // them, a gap on each side. The whole of it, thick, still takes the
+        // drag, and shows a faint plate under the pointer.
+        let (lit, inactive, on): (Color, Color, Color) = if self.dimmed {
+            let on: Color = component.on.into();
+            (Color { a: 0.5, ..on }, Color { a: 0.16, ..on }, on)
         } else {
-            let accent = &cosmic.accent_button;
-            (accent.base.into(), readable(accent.on, accent.base))
+            let accent: Color = cosmic.accent_button.base.into();
+            (accent, Color { a: 0.28, ..accent }, accent)
         };
-        // How far it's lit, along it, from the icon's end.
-        let lit_length = side + (self.length(bounds) - side) * self.value;
-        let lit_bounds = if self.vertical {
+        if hovered {
+            let plate: Color = component.hover.into();
+            pill(renderer, bounds, self.corners(side / 2.0), Color { a: 0.45, ..plate });
+        }
+        let lead = side - LEVEL_LEAD;
+        let travel = (length - lead - LEVEL_END).max(1.0);
+        // Where the thumb is, along it from the start.
+        let at = lead + travel * self.value;
+        let thickness = if hovered { LEVEL_RAIL + 2.0 } else { LEVEL_RAIL };
+        let round = thickness / 2.0;
+        let inner = 2.0f32.min(round);
+        // A piece of the track, from one distance along it to another.
+        let piece = |from: f32, to: f32| -> Rectangle {
+            if self.vertical {
+                Rectangle::new(
+                    Point::new(bounds.center_x() - thickness / 2.0, bounds.y + bounds.height - to),
+                    Size::new(thickness, to - from),
+                )
+            } else {
+                Rectangle::new(
+                    Point::new(bounds.x + from, bounds.center_y() - thickness / 2.0),
+                    Size::new(to - from, thickness),
+                )
+            }
+        };
+        let (lit_radius, rest_radius) = if self.vertical {
+            ([inner, inner, round, round], [round, round, inner, inner])
+        } else {
+            ([round, inner, inner, round], [inner, round, round, inner])
+        };
+        pill(renderer, piece(lead, at - LEVEL_GAP), lit_radius, lit);
+        pill(renderer, piece(at + LEVEL_GAP, length - 2.0), rest_radius, inactive);
+        // The thumb: a pill across the track, thinner while held.
+        let thumb = (if state.dragging { THUMB.1 } else { THUMB.0 }).max(1.0);
+        let reach = (thickness + 14.0).min((side - 4.0).max(thickness));
+        let thumb_bounds = if self.vertical {
             Rectangle::new(
-                Point::new(bounds.x, bounds.y + bounds.height - lit_length),
-                Size::new(side, lit_length),
+                Point::new(bounds.center_x() - reach / 2.0, bounds.y + bounds.height - at - thumb / 2.0),
+                Size::new(reach, thumb),
             )
         } else {
-            Rectangle::new(bounds.position(), Size::new(lit_length, side))
+            Rectangle::new(
+                Point::new(bounds.x + at - thumb / 2.0, bounds.center_y() - reach / 2.0),
+                Size::new(thumb, reach),
+            )
         };
-        // Full, it reaches the joined end and takes its corners.
-        let full = self.value >= 0.999;
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds: lit_bounds,
-                border: Border {
-                    radius: if full { self.corners(radius) } else { [radius; 4] }.into(),
-                    ..Border::default()
-                },
-                ..renderer::Quad::default()
-            },
-            lit,
-        );
-        // A knob at the lit part's end, like phones draw it, once it's past
-        // the icon.
-        if lit_length - side > 12.0 {
-        let (knob, at) = if self.vertical {
-            let knob = Size::new(side * 0.42, 4.0);
-            let y = bounds.y + bounds.height - lit_length + radius / 2.0 - knob.height / 2.0 + 2.0;
-            (knob, Point::new(bounds.center_x() - knob.width / 2.0, y))
-        } else {
-            let knob = Size::new(4.0, side * 0.42);
-            let x = bounds.x + lit_length - radius / 2.0 - knob.width / 2.0 - 2.0;
-            (knob, Point::new(x, bounds.center_y() - knob.height / 2.0))
-        };
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds: Rectangle::new(at, knob),
-                border: Border {
-                    radius: (knob.width.min(knob.height) / 2.0).into(),
-                    ..Border::default()
-                },
-                ..renderer::Quad::default()
-            },
-            Color { a: 0.55, ..on },
-        );
-        }
+        pill(renderer, thumb_bounds, [thumb / 2.0; 4], lit);
         let icon_layout = layout
             .children()
             .next()
@@ -934,39 +957,36 @@ impl<Message> Level<'_, Message> {
             Point::new(bounds.x + side + COMPACT_KNOB, bounds.center_y() - COMPACT_RAIL / 2.0),
             Size::new((bounds.width - side - 2.0 * COMPACT_KNOB).max(0.0), COMPACT_RAIL),
         );
-        let track: Color = if hovered { component.hover } else { component.base }.into();
-        let round = Border {
-            radius: (COMPACT_RAIL / 2.0).into(),
-            ..Border::default()
-        };
-        renderer.fill_quad(
-            renderer::Quad { bounds: rail, border: round, ..renderer::Quad::default() },
-            track,
-        );
+        let inactive = Color { a: 0.28, ..lit };
+        let round = COMPACT_RAIL / 2.0;
+        let inner = 2.0f32.min(round);
         let x = rail.x + rail.width * self.value;
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds: Rectangle::new(rail.position(), Size::new(x - rail.x, rail.height)),
-                border: round,
-                ..renderer::Quad::default()
-            },
+        // Material 3: the lit part and the rest, a gap on each side of a thin
+        // thumb that gets taller under the pointer.
+        pill(
+            renderer,
+            Rectangle::new(rail.position(), Size::new(x - LEVEL_GAP - rail.x, rail.height)),
+            [round, inner, inner, round],
             lit,
         );
-        let knob = if hovered { COMPACT_KNOB + 1.0 } else { COMPACT_KNOB };
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds: Rectangle::new(
-                    Point::new(x - knob, bounds.center_y() - knob),
-                    Size::new(2.0 * knob, 2.0 * knob),
-                ),
-                border: Border {
-                    radius: knob.into(),
-                    width: 2.0,
-                    color: lit,
-                },
-                ..renderer::Quad::default()
-            },
-            Color::from(cosmic.background(theme.transparent).base),
+        pill(
+            renderer,
+            Rectangle::new(
+                Point::new(x + LEVEL_GAP, rail.y),
+                Size::new(rail.x + rail.width - x - LEVEL_GAP, rail.height),
+            ),
+            [inner, round, round, inner],
+            inactive,
+        );
+        let reach = if hovered { 22.0 } else { 18.0 };
+        pill(
+            renderer,
+            Rectangle::new(
+                Point::new(x - THUMB.0 / 2.0, bounds.center_y() - reach / 2.0),
+                Size::new(THUMB.0, reach),
+            ),
+            [THUMB.0 / 2.0; 4],
+            lit,
         );
         let icon_layout = layout
             .children()

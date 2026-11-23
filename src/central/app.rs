@@ -510,7 +510,13 @@ impl App {
                 ));
             }
         }
+        // The power profile goes by the clock, not among the rest.
+        let mut power_tile = None;
         for (tile, state) in self.bar_tiles() {
+            if tile == Tile::Power {
+                power_tile = Some(state);
+                continue;
+            }
             let page = match tile {
                 Tile::Bluetooth => Page::Bluetooth,
                 Tile::Vpn => Page::Vpn,
@@ -588,6 +594,31 @@ impl App {
                 .on_right_press(Message::OpenAt(Page::Power))
                 .on_scroll(|delta| Message::ScrollBrightness(scroll_steps(delta)));
             icons.push(tip(area.into(), text));
+        }
+        // The power profile last, right before the clock: green when saving,
+        // yellow balanced, red at full performance; a little smaller than the
+        // rest, as its drawing fills its square, kept in a square as big.
+        if let Some(state) = power_tile {
+            let color: fn(&cosmic::Theme) -> iced::Color = match self.power.as_ref().map(|p| p.active.as_str()) {
+                Some("power-saver") => |_| iced::Color::from_rgb(0.30, 0.82, 0.50),
+                Some("performance") => |_| iced::Color::from_rgb(0.95, 0.35, 0.35),
+                _ => |_| iced::Color::from_rgb(0.96, 0.78, 0.25),
+            };
+            let glyph = size * 7 / 8;
+            let content: Element<'static, Message> = widget::container(
+                widget::icon::icon(icon(state.icon))
+                    .size(glyph)
+                    .class(theme::Svg::Custom(std::rc::Rc::new(move |th| {
+                        iced::widget::svg::Style { color: Some(color(th)) }
+                    }))),
+            )
+            .center(Length::Fixed(f32::from(size)))
+            .into();
+            let text = match &state.subtitle {
+                Some(subtitle) => format!("{} · {subtitle}", state.title),
+                None => state.title.to_owned(),
+            };
+            icons.push(at(tip(content, text), Page::Power));
         }
         // The clock last, as Windows 11's: the time over the date, smaller,
         // both centered.

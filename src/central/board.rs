@@ -437,7 +437,7 @@ impl App {
                 if placed.fit == Fit::Vertical {
                     let (value, change, release) = self.brightness_level()?;
                     let level = Level::new(
-                        widget::icon::icon(icon("display-brightness-symbolic")).size(16),
+                        widget::icon::icon(icon("display-brightness-symbolic")).size(13),
                         value,
                         change,
                     )
@@ -476,7 +476,7 @@ impl App {
             kind => kind.icon(),
         };
         let mut content = widget::row::with_capacity(3)
-            .push(widget::icon::icon(icon(icon_name)).size(18))
+            .push(widget::icon::icon(icon(icon_name)).size(14))
             .spacing(10)
             .align_y(Alignment::Center);
         if matches!(placed.fit, Fit::Pill | Fit::Horizontal) {
@@ -491,7 +491,7 @@ impl App {
         if placed.fit == Fit::Short {
             content = content
                 .push(widget::space::horizontal())
-                .push(widget::icon::icon(icon("go-next-symbolic")).size(14));
+                .push(widget::icon::icon(icon("go-next-symbolic")).size(11));
         }
         let content = widget::container(content).center_y(Length::Fill);
         let content = match placed.fit {
@@ -858,7 +858,7 @@ fn icon_tile<'a>(state: TileState) -> Element<'a, Message> {
         None => state.title.to_owned(),
     };
     let surface = Surface::new(
-        widget::container(widget::icon::icon(icon(state.icon)).size(18))
+        widget::container(widget::icon::icon(icon(state.icon)).size(14))
             .center(Length::Fill)
             .class(inherit_colors()),
         state.on,
@@ -884,7 +884,7 @@ fn short_tile<'a>(state: TileState) -> Element<'a, Message> {
         None => state.title.to_owned(),
     };
     let pill = split(
-        widget::icon::icon(icon(state.icon)).size(18).into(),
+        widget::icon::icon(icon(state.icon)).size(14).into(),
         true,
         state.on,
         state.toggle,

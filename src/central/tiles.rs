@@ -536,6 +536,11 @@ pub fn edit_class(selected: bool) -> theme::Button {
 const OWN_SYMBOLS: &[(&str, &[u8])] = &[
     ("system-shutdown-symbolic", include_bytes!("../../assets/central/icons/power-symbolic.svg")),
     ("emblem-system-symbolic", include_bytes!("../../assets/central/icons/settings-symbolic.svg")),
+    // The power profiles: a leaf, a gauge, a bolt (Adwaita's balanced is a
+    // pair of scales).
+    ("power-profile-power-saver-symbolic", include_bytes!("../../assets/central/icons/power-saver-symbolic.svg")),
+    ("power-profile-balanced-symbolic", include_bytes!("../../assets/central/icons/power-balanced-symbolic.svg")),
+    ("power-profile-performance-symbolic", include_bytes!("../../assets/central/icons/power-performance-symbolic.svg")),
 ];
 
 /// A symbolic icon by name. COSMIC's icon theme lacks some GNOME names, like
@@ -610,7 +615,7 @@ pub fn tile<'a>(
         text = text.push(widget::text::caption(subtitle).ellipsize(one_line()));
     }
     let content = widget::row::with_capacity(2)
-        .push(widget::icon::icon(icon(icon_name)).size(18))
+        .push(widget::icon::icon(icon(icon_name)).size(14))
         .push(text.width(Length::Fill))
         .spacing(12)
         .align_y(Alignment::Center);
@@ -643,7 +648,7 @@ pub fn split<'a>(
         .on_press(toggle)
         .on_right_press(Some(details.clone()));
     let end = Surface::new(
-        widget::container(widget::icon::icon(icon("go-next-symbolic")).size(16))
+        widget::container(widget::icon::icon(icon("go-next-symbolic")).size(13))
             .center(Length::Fill)
             .class(inherit_colors()),
         on,
@@ -663,7 +668,7 @@ pub fn split<'a>(
 /// end across or on top standing.
 pub fn slider_end<'a>(icon_name: &str, message: Message, standing: bool) -> Element<'a, Message> {
     let surface = Surface::new(
-        widget::container(widget::icon::icon(icon(icon_name)).size(16))
+        widget::container(widget::icon::icon(icon(icon_name)).size(13))
             .center(Length::Fill)
             .class(inherit_colors()),
         false,
@@ -735,6 +740,19 @@ mod tests {
         let handle = icon("emblem-system-symbolic");
         assert!(handle.symbolic);
         assert!(from_memory(&handle));
+    }
+
+    #[test]
+    fn the_power_profiles_are_ours_not_the_themes() {
+        for name in [
+            "power-profile-power-saver-symbolic",
+            "power-profile-balanced-symbolic",
+            "power-profile-performance-symbolic",
+        ] {
+            let handle = icon(name);
+            assert!(handle.symbolic);
+            assert!(from_memory(&handle));
+        }
     }
 
     #[test]
