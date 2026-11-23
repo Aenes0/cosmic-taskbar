@@ -29,9 +29,9 @@ mkdir -p "$apps"
 for id in io.github.Aenes0.CosmicTaskbar io.github.Aenes0.CosmicStart io.github.Aenes0.CosmicWorkspacesButton; do
     sed "s|@bindir@|$bindir|" "data/$id.desktop.in" > "$apps/$id.desktop"
 done
-# The Central's applets: Corner (Central + clock + show desktop), Monitor,
-# and the standalone Central / ShowDesktop entries. Custom Tray is omitted so
-# COSMIC's native Status Area applet is used directly in Panel Settings.
+# The Central's applets: Corner (integrated background apps + system bar icons
+# + Central + clock + show desktop), Monitor, and standalone entries. Custom
+# standalone Tray is omitted since background apps are integrated into Corner.
 central=io.github.Aenes0.CosmicCentral
 for id in "$central" "$central.ShowDesktop" "$central.Monitor" "$central.Corner"; do
     sed "s|@bindir@|$bindir|" "data/central/$id.desktop.in" > "$apps/$id.desktop"

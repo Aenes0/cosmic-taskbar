@@ -87,8 +87,13 @@ fi
 for f in "$panel/plugins_center" "$panel/plugins_wings"; do
     [ -f "$f" ] && sed -i -e "s|\"$theirs\"|\"$ours\"|" -e "s|\"$their_workspaces\"|\"$workspaces\"|" "$f"
 done
-# The corner's three applets (tray, Central, show desktop) become the Canto.
+# The corner's applets become the Canto (which now integrates background apps,
+# system bar icons, Central, clock, and show desktop), so remove the external
+# COSMIC Status Area applet when Canto is active to avoid duplicate tray icons.
 [ -f "$panel/plugins_wings" ] && corner_use "$panel/plugins_wings"
+if [ -f "$panel/plugins_wings" ] && grep -q "\"io.github.Aenes0.CosmicCentral.Corner\"" "$panel/plugins_wings"; then
+    sed -i '/"com\.system76\.CosmicAppletStatusArea",/d' "$panel/plugins_wings"
+fi
 # The bar never takes the keys, as on Windows: the compositor gives them to
 # every top layer that asks when it maps, so each restart of the panel took
 # them from the window in use. Its popups still get them (by their grab),

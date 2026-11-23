@@ -38,6 +38,7 @@ io.github.Aenes0.CosmicCentral
 io.github.Aenes0.CosmicCentral.Monitor
 io.github.Aenes0.CosmicStart
 io.github.Aenes0.CosmicStart.Menu
+io.github.Aenes0.CosmicTray
 "
 
 normalize_to_repo() {

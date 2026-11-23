@@ -1,9 +1,10 @@
 #!/bin/sh
 # Reinicia o cosmic-panel sem sair da sessão (cosmic-session o relança sozinho;
 # se atingir o limite de reinício do cosmic-session, sobe via systemd-run --user).
+systemctl --user stop cosmic-panel-manual.service 2>/dev/null || true
 old=$(pgrep -x cosmic-panel | head -1)
 if [ -n "$old" ]; then
-    kill "$old"
+    pkill -x cosmic-panel 2>/dev/null || true
     for i in 1 2 3 4 5; do
         sleep 1
         new=$(pgrep -x cosmic-panel | head -1)

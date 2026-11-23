@@ -1,5 +1,7 @@
 {
-    "power": "always",
-    "volume": "always",
     "peripherals": "never",
+    "volume": "always",
+    "power": "always",
+    "network": "always",
+    "camera": "active",
 }
