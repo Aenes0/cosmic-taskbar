@@ -1,0 +1,8 @@
+#!/bin/sh
+# Stub leve para o cosmic-session: as notificações (org.freedesktop.Notifications)
+# são atendidas diretamente por `cosmic-taskbar central --notifications` e os
+# cartões flutuantes por `central-panels.service`, sem depender do cosmic-cosmetics
+# nem do cosmic-notifications do sistema.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/cosmic-taskbar-notifications-stub.lock"
+flock -n 9 || exit 0
+exec sleep infinity

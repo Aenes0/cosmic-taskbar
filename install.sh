@@ -51,6 +51,7 @@ done
 for name in Clipboard Notifications Panels; do
     sed "s|@bindir@|$bindir|" "data/central/$central.$name.service.in" > "$dbus/$central.$name.service"
 done
+sed "s|@bindir@|$bindir|" "data/central/org.freedesktop.Notifications.service.in" > "$dbus/org.freedesktop.Notifications.service"
 # Isolated Alt+Tab / Super+Tab window switcher (`io.github.Aenes0.CosmicSwitcher`).
 sed "s|@bindir@|$bindir|" "data/switcher/cosmic-switcher.service.in" > "$units/cosmic-switcher.service"
 sed "s|@bindir@|$bindir|" "data/switcher/io.github.Aenes0.CosmicSwitcher.service.in" > "$dbus/io.github.Aenes0.CosmicSwitcher.service"

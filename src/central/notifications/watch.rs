@@ -35,7 +35,7 @@ enum Signal {
 
 /// Passing ones, kept out of the history: `transient` (true, or a number
 /// other than 0, as some apps send it) or the daemon's `osd` pills.
-fn skip_in_history(hints: &HashMap<String, zbus::zvariant::OwnedValue>) -> bool {
+pub(super) fn skip_in_history(hints: &HashMap<String, zbus::zvariant::OwnedValue>) -> bool {
     let transient = hints.get("transient").is_some_and(|value| match &**value {
         Value::Bool(b) => *b,
         Value::U8(n) => *n != 0,
@@ -55,13 +55,13 @@ fn skip_in_history(hints: &HashMap<String, zbus::zvariant::OwnedValue>) -> bool 
 
 /// The longest an app's text is kept, in characters: a message on the bus can
 /// be far larger, and the history is read by every applet at each change.
-const SHORT: usize = 256;
-const BODY: usize = 4096;
+pub(super) const SHORT: usize = 256;
+pub(super) const BODY: usize = 4096;
 /// The most buttons a notification keeps.
-const ACTIONS: usize = 8;
+pub(super) const ACTIONS: usize = 8;
 
 /// At most `max` characters.
-fn cap(text: String, max: usize) -> String {
+pub(super) fn cap(text: String, max: usize) -> String {
     match text.char_indices().nth(max) {
         Some((end, _)) => text[..end].to_owned(),
         None => text,
@@ -243,7 +243,7 @@ fn event(opened: &mut HashSet<u32>, signal: Signal) -> Option<Event> {
 /// The icon a notification shows, by name or as a file: its app's, from the
 /// app's desktop entry, as GNOME shows it; else the one it came with.
 /// Browsers send theirs as a `file://` URI, often to a file soon gone.
-fn app_icon(app: &str, desktop_entry: Option<&str>, icon: &str, image: Option<&str>) -> String {
+pub(super) fn app_icon(app: &str, desktop_entry: Option<&str>, icon: &str, image: Option<&str>) -> String {
     if let Some(icon) = desktop_icon(app, desktop_entry) {
         return icon;
     }
@@ -364,7 +364,7 @@ fn desktop_icon(app: &str, desktop_entry: Option<&str>) -> Option<String> {
 
 /// A body as text: without the markup some apps send (links, bold…), and
 /// with its entities read.
-fn plain(body: &str) -> String {
+pub(super) fn plain(body: &str) -> String {
     let mut text = String::with_capacity(body.len());
     let mut in_tag = false;
     for c in body.chars() {
