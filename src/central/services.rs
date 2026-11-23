@@ -2138,11 +2138,77 @@ fn user_dir(name: &str, under_home: &str) -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(under_home)))
 }
 
-/// Whether the unit is installed, where systemd looks for the user's own.
-/// Looked at again now and then, not each time the popup draws, so that it
-/// shows soon after it's installed. The applet runs on the host, where the
-/// file is; in a sandbox the path is the same, and with no access to it the
-/// tile only doesn't show.
+/// Whether the Iriun user unit is installed.
+pub fn iriun_installed() -> bool {
+    user_dir("CONFIG", ".config")
+        .is_some_and(|dir| dir.join("systemd/user").join(CAMERA_UNIT).exists())
+}
+
+/// Lists V4L2 capture cameras (built-in, USB, and virtual/Iriun), deduplicating
+/// metadata nodes (`index != 0`) and duplicate names.
+fn read_video_devices() -> Vec<VideoDevice> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/video4linux") else {
+        return Vec::new();
+    };
+    let mut nodes: Vec<(String, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            name.starts_with("video").then_some((name, e.path()))
+        })
+        .collect();
+    nodes.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut devices: Vec<VideoDevice> = Vec::new();
+    for (node, sys_path) in nodes {
+        // uvcvideo creates index=0 (capture) and index=1 (metadata): keep index=0 when present.
+        if let Ok(index) = std::fs::read_to_string(sys_path.join("index"))
+            && index.trim() != "0"
+        {
+            continue;
+        }
+        let Ok(raw_name) = std::fs::read_to_string(sys_path.join("name")) else {
+            continue;
+        };
+        let label = raw_name.trim();
+        if label.is_empty() {
+            continue;
+        }
+        let lower = label.to_lowercase();
+        // Skip metadata/IR/codec nodes that are not user webcams.
+        if lower.contains("metadata") || lower.contains("v4l2-codec") {
+            continue;
+        }
+        if devices.iter().any(|d| d.name == label) {
+            continue;
+        }
+        let is_virtual = lower.contains("iriun") || lower.contains("virtual") || lower.contains("obs");
+        devices.push(VideoDevice {
+            path: format!("/dev/{node}"),
+            name: label.to_owned(),
+            is_virtual,
+        });
+    }
+    // Hardware cameras first, then virtual/phone cameras.
+    devices.sort_by_key(|d| (d.is_virtual, d.path.clone()));
+    devices
+}
+
+/// Reads the physical camera privacy switch on Lenovo IdeaPad/Yoga laptops
+/// (`/sys/bus/platform/drivers/ideapad_acpi/*/camera_power`: `1` = on, `0` = off).
+fn read_camera_hw_switch() -> Option<bool> {
+    let entries = std::fs::read_dir("/sys/bus/platform/drivers/ideapad_acpi").ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path().join("camera_power");
+        if let Ok(val) = std::fs::read_to_string(path) {
+            return Some(val.trim() == "1");
+        }
+    }
+    None
+}
+
+/// Whether camera management is available: Iriun installed, any V4L2 camera
+/// present, or a hardware camera privacy switch detected (e.g. Lenovo Yoga 7i).
 pub fn camera_installed() -> bool {
     use std::{sync::Mutex, time::{Duration, Instant}};
     static CHECKED: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
@@ -2152,8 +2218,9 @@ pub fn camera_installed() -> bool {
     match *checked {
         Some((at, installed)) if at.elapsed() < Duration::from_secs(10) => installed,
         _ => {
-            let installed = user_dir("CONFIG", ".config")
-                .is_some_and(|dir| dir.join("systemd/user").join(CAMERA_UNIT).exists());
+            let installed = iriun_installed()
+                || !read_video_devices().is_empty()
+                || read_camera_hw_switch().is_some();
             *checked = Some((Instant::now(), installed));
             installed
         }
@@ -2193,11 +2260,23 @@ pub enum PcWindow {
     Shown,
 }
 
-/// The camera now: whether the unit runs, and, if so, its status.
+/// A detected V4L2 camera (built-in, USB, or virtual/Iriun).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoDevice {
+    pub path: String,
+    pub name: String,
+    pub is_virtual: bool,
+}
+
+/// The camera now: hardware cameras, physical privacy switch (Lenovo Yoga/IdeaPad),
+/// and optional Iriun phone-camera service status.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Camera {
+    pub iriun_installed: bool,
     pub on: bool,
     pub status: Option<CameraStatus>,
+    pub devices: Vec<VideoDevice>,
+    pub hw_switch: Option<bool>,
 }
 
 /// What `systemctl is-active` prints: on while starting too.
@@ -2244,9 +2323,20 @@ fn parse_camera_status(text: &[u8]) -> Option<CameraStatus> {
     })
 }
 
-/// Whether the unit runs and how it is. Off, the file is left alone: it may
-/// be from an earlier run.
+/// Reads hardware cameras, physical switch state, and (if installed) Iriun service status.
 pub async fn camera() -> Camera {
+    let devices = read_video_devices();
+    let hw_switch = read_camera_hw_switch();
+    let has_iriun = iriun_installed();
+    if !has_iriun {
+        return Camera {
+            iriun_installed: false,
+            on: false,
+            status: None,
+            devices,
+            hw_switch,
+        };
+    }
     let output = crate::central::host::command("systemctl", &[])
         .args(["--user", "is-active", CAMERA_UNIT])
         .output()
@@ -2260,14 +2350,26 @@ pub async fn camera() -> Camera {
         }
     };
     if !on {
-        return Camera { on, status: None };
+        return Camera {
+            iriun_installed: true,
+            on,
+            status: None,
+            devices,
+            hw_switch,
+        };
     }
     let path = user_dir("STATE", ".local/state").map(|dir| dir.join("iriun-adb/status.json"));
     let status = match path {
         Some(path) => crate::central::host::read(&path).await.as_deref().and_then(parse_camera_status),
         None => None,
     };
-    Camera { on, status: live_camera_status(status) }
+    Camera {
+        iriun_installed: true,
+        on,
+        status: live_camera_status(status),
+        devices,
+        hw_switch,
+    }
 }
 
 /// With the unit running, "stopped" is the last run's file, before the
@@ -2527,6 +2629,7 @@ output "HDMI-A-1" enabled=#false {
         let with = |window| Camera {
             on: true,
             status: Some(CameraStatus { pc_window: window, ..Default::default() }),
+            ..Camera::default()
         };
         assert!(camera_window_settled(&with(Some(PcWindow::Shown)), PcWindow::Shown));
         assert!(!camera_window_settled(&with(Some(PcWindow::Hidden)), PcWindow::Shown));
@@ -2534,7 +2637,7 @@ output "HDMI-A-1" enabled=#false {
         // No window any more: nothing to wait for.
         assert!(camera_window_settled(&with(None), PcWindow::Shown));
         // A file not read yet: wait.
-        assert!(!camera_window_settled(&Camera { on: true, status: None }, PcWindow::Shown));
+        assert!(!camera_window_settled(&Camera { on: true, status: None, ..Camera::default() }, PcWindow::Shown));
         assert!(camera_window_settled(&Camera::default(), PcWindow::Hidden));
     }
 

@@ -7,9 +7,17 @@
 # - Aplica todas as configs visuais do COSMIC e do fish + atalhos
 #
 # Uso:
-#   ./scripts/bootstrap-pc.sh
+#   ./scripts/bootstrap-pc.sh                -> instalacao padrao (sem IriunCam)
+#   ./scripts/bootstrap-pc.sh --with-iriun   -> inclui IriunCam (webcam via celular)
 set -e
 cd "$(dirname "$0")/.."
+
+WITH_IRIUN=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-iriun) WITH_IRIUN=1 ;;
+    esac
+done
 
 echo "[1/6] Instalando pacotes base e dependências de build/runtime..."
 # Build Rust + libs nativas (libudev-sys, wayland, libxkbcommon)
@@ -48,6 +56,18 @@ if ! command -v brave >/dev/null 2>&1 && ! pacman -Qi brave-bin >/dev/null 2>&1;
         yay -S --needed --noconfirm brave-bin
     else
         echo "Aviso: instale brave-bin pelo AUR manualmente (paru/yay não encontrado)."
+    fi
+fi
+
+if [ "$WITH_IRIUN" -eq 1 ]; then
+    echo "[Opcional] Instalando IriunCam (v4l2loopback + android-tools + iriunwebcam-bin)..."
+    sudo pacman -S --needed --noconfirm v4l2loopback-dkms android-tools || true
+    if command -v paru >/dev/null 2>&1; then
+        paru -S --needed --noconfirm iriunwebcam-bin || true
+    elif command -v yay >/dev/null 2>&1; then
+        yay -S --needed --noconfirm iriunwebcam-bin || true
+    else
+        echo "Aviso: instale iriunwebcam-bin pelo AUR manualmente (paru/yay nao encontrado)."
     fi
 fi
 

@@ -962,84 +962,204 @@ impl App {
         )
     }
 
-    /// The phone as a webcam: how each part is, what went wrong, and a
-    /// restart. Off, only that: the service's file may be from before.
+    /// Multi-camera management: hardware privacy switch (Lenovo Yoga/IdeaPad),
+    /// all detected V4L2 cameras (built-in, USB, virtual), synced mic privacy
+    /// toggle, and optional Iriun phone-camera controls when installed.
     pub fn camera_page(&self) -> Element<'_, Message> {
         let t = strings();
+        let tx = crate::central::texts::texts();
         let spacing = theme::spacing();
         let camera = &self.camera;
-        let mut body = Vec::new();
-        match &camera.status {
-            _ if !camera.on => body.push(note(t.camera_off)),
-            // Just started, or a file that doesn't read.
-            None => body.push(note(t.loading)),
-            Some(status) => {
-                if let Some(state) = status.state {
-                    body.push(padded_control(widget::text::heading(camera_state(state))).into());
-                }
-                if let Some(error) = &status.error {
-                    body.push(
-                        padded_control(
-                            widget::row::with_children(vec![
-                                widget::icon::icon(icon("dialog-warning-symbolic")).size(20).into(),
-                                widget::text::body(error.as_str())
-                                    .class(theme::Text::Custom(destructive))
-                                    .width(Length::Fill)
+        let mut body: Vec<Element<'_, Message>> = Vec::new();
+
+        // Hardware camera privacy switch (e.g. Lenovo Yoga 7i side switch).
+        if let Some(hw_on) = camera.hw_switch {
+            if hw_on {
+                body.push(
+                    padded_control(
+                        widget::row::with_children(vec![
+                            widget::icon::icon(icon("camera-web-symbolic")).size(20).into(),
+                            widget::column::with_children(vec![
+                                widget::text::body(tx.camera_hw_switch).into(),
+                                widget::text::caption(tx.camera_hw_on)
+                                    .class(theme::Text::Custom(dimmed))
                                     .into(),
                             ])
-                            .spacing(spacing.space_s)
-                            .align_y(Alignment::Center),
-                        )
-                        .into(),
-                    );
-                }
-                for (icon_name, label, on) in [
-                    ("computer-symbolic", t.camera_pc_iriun, status.pc_iriun),
-                    ("phone-symbolic", t.camera_phone_connected, status.phone_connected),
-                    ("camera-web-symbolic", t.camera_phone_iriun, status.phone_iriun),
-                    ("display-brightness-symbolic", t.camera_screen_off, status.screen_off),
-                ] {
-                    let mark = if on {
-                        check()
-                    } else {
-                        widget::text::body("—").class(theme::Text::Custom(dimmed)).into()
-                    };
-                    body.push(
-                        padded_control(
-                            widget::row::with_children(vec![
-                                widget::icon::icon(icon(icon_name)).size(20).into(),
-                                widget::text::body(label).width(Length::Fill).into(),
-                                mark,
+                            .width(Length::Fill)
+                            .into(),
+                            check(),
+                        ])
+                        .spacing(spacing.space_s)
+                        .align_y(Alignment::Center),
+                    )
+                    .into(),
+                );
+            } else {
+                body.push(
+                    padded_control(
+                        widget::row::with_children(vec![
+                            widget::icon::icon(icon("camera-disabled-symbolic")).size(20).into(),
+                            widget::column::with_children(vec![
+                                widget::text::body(tx.camera_hw_off)
+                                    .class(theme::Text::Custom(destructive))
+                                    .into(),
+                                widget::text::caption(tx.camera_hw_off_hint)
+                                    .class(theme::Text::Custom(dimmed))
+                                    .into(),
                             ])
-                            .spacing(spacing.space_s)
-                            .align_y(Alignment::Center),
-                        )
-                        .into(),
-                    );
-                }
+                            .width(Length::Fill)
+                            .into(),
+                        ])
+                        .spacing(spacing.space_s)
+                        .align_y(Alignment::Center),
+                    )
+                    .into(),
+                );
+            }
+            body.push(padded_control(widget::divider::horizontal::default()).into());
+        }
+
+        // Detected cameras (built-in, USB, virtual/Iriun).
+        body.push(section(tx.available_cameras));
+        if camera.devices.is_empty() {
+            body.push(note(tx.no_cameras));
+        } else {
+            let active_apps = (!self.privacy.camera.is_empty()).then(|| self.privacy.camera.join(", "));
+            for dev in &camera.devices {
+                let kind_label = if dev.is_virtual { tx.camera_virtual } else { tx.camera_hardware };
+                let sub = match &active_apps {
+                    Some(apps) => format!("{kind_label} · {} · {apps}", dev.path),
+                    None => format!("{kind_label} · {}", dev.path),
+                };
+                let dev_icon = if dev.is_virtual { "phone-symbolic" } else { "camera-web-symbolic" };
+                body.push(
+                    padded_control(
+                        widget::row::with_children(vec![
+                            widget::icon::icon(icon(dev_icon)).size(20).into(),
+                            widget::column::with_children(vec![
+                                widget::text::body(dev.name.clone()).into(),
+                                widget::text::caption(sub)
+                                    .class(theme::Text::Custom(dimmed))
+                                    .into(),
+                            ])
+                            .width(Length::Fill)
+                            .into(),
+                        ])
+                        .spacing(spacing.space_s)
+                        .align_y(Alignment::Center),
+                    )
+                    .into(),
+                );
             }
         }
-        if camera.on {
+
+        // Synced hardware/PipeWire microphone mute toggle right alongside camera privacy.
+        if let Some(muted) = self.microphone {
             body.push(padded_control(widget::divider::horizontal::default()).into());
-            // Iriun's window, kept out of sight, back on demand.
-            if let Some(window) = camera.status.as_ref().and_then(|s| s.pc_window) {
-                let (icon_name, label, show) = match window {
-                    services::PcWindow::Hidden => ("window-restore-symbolic", t.iriun_show_window, true),
-                    services::PcWindow::Shown => ("window-minimize-symbolic", t.iriun_hide_window, false),
-                };
+            let mic_icon = if muted {
+                "microphone-sensitivity-muted-symbolic"
+            } else {
+                "audio-input-microphone-symbolic"
+            };
+            let mic_sub = if muted { tx.mic_muted } else { tx.mic_active };
+            body.push(
+                padded_control(
+                    widget::row::with_children(vec![
+                        widget::icon::icon(icon(mic_icon)).size(20).into(),
+                        widget::column::with_children(vec![
+                            widget::text::body(t.microphone).into(),
+                            widget::text::caption(mic_sub)
+                                .class(theme::Text::Custom(dimmed))
+                                .into(),
+                        ])
+                        .width(Length::Fill)
+                        .into(),
+                        widget::toggler(!muted)
+                            .on_toggle(|_| Message::ToggleMicrophone)
+                            .into(),
+                    ])
+                    .spacing(spacing.space_s)
+                    .align_y(Alignment::Center),
+                )
+                .into(),
+            );
+        }
+
+        // Optional Iriun phone-as-webcam section (only shown when installed).
+        if camera.iriun_installed {
+            body.push(padded_control(widget::divider::horizontal::default()).into());
+            body.push(section(tx.iriun_section));
+            match &camera.status {
+                _ if !camera.on => body.push(note(t.camera_off)),
+                None => body.push(note(t.loading)),
+                Some(status) => {
+                    if let Some(state) = status.state {
+                        body.push(padded_control(widget::text::heading(camera_state(state))).into());
+                    }
+                    if let Some(error) = &status.error {
+                        body.push(
+                            padded_control(
+                                widget::row::with_children(vec![
+                                    widget::icon::icon(icon("dialog-warning-symbolic")).size(20).into(),
+                                    widget::text::body(error.as_str())
+                                        .class(theme::Text::Custom(destructive))
+                                        .width(Length::Fill)
+                                        .into(),
+                                ])
+                                .spacing(spacing.space_s)
+                                .align_y(Alignment::Center),
+                            )
+                            .into(),
+                        );
+                    }
+                    for (icon_name, label, on) in [
+                        ("computer-symbolic", t.camera_pc_iriun, status.pc_iriun),
+                        ("phone-symbolic", t.camera_phone_connected, status.phone_connected),
+                        ("camera-web-symbolic", t.camera_phone_iriun, status.phone_iriun),
+                        ("display-brightness-symbolic", t.camera_screen_off, status.screen_off),
+                    ] {
+                        let mark = if on {
+                            check()
+                        } else {
+                            widget::text::body("—").class(theme::Text::Custom(dimmed)).into()
+                        };
+                        body.push(
+                            padded_control(
+                                widget::row::with_children(vec![
+                                    widget::icon::icon(icon(icon_name)).size(20).into(),
+                                    widget::text::body(label).width(Length::Fill).into(),
+                                    mark,
+                                ])
+                                .spacing(spacing.space_s)
+                                .align_y(Alignment::Center),
+                            )
+                            .into(),
+                        );
+                    }
+                }
+            }
+            if camera.on {
+                if let Some(window) = camera.status.as_ref().and_then(|s| s.pc_window) {
+                    let (icon_name, label, show) = match window {
+                        services::PcWindow::Hidden => ("window-restore-symbolic", t.iriun_show_window, true),
+                        services::PcWindow::Shown => ("window-minimize-symbolic", t.iriun_hide_window, false),
+                    };
+                    body.push(
+                        item(icon_name, label.to_owned(), None, None)
+                            .on_press(Message::IriunWindow(show))
+                            .into(),
+                    );
+                }
                 body.push(
-                    item(icon_name, label.to_owned(), None, None)
-                        .on_press(Message::IriunWindow(show))
+                    item("system-reboot-symbolic", t.restart.to_owned(), None, None)
+                        .on_press(Message::RestartCamera)
                         .into(),
                 );
             }
-            body.push(
-                item("system-reboot-symbolic", t.restart.to_owned(), None, None)
-                    .on_press(Message::RestartCamera)
-                    .into(),
-            );
         }
-        self.page(t.camera, Some((camera.on, Message::ToggleCamera)), body, None)
+
+        let header_switch = camera.iriun_installed.then_some((camera.on, Message::ToggleCamera));
+        self.page(t.camera, header_switch, body, None)
     }
 
     pub fn session_page(&self) -> Element<'_, Message> {
@@ -2271,14 +2391,30 @@ impl App {
                 if !tile.available() {
                     return None;
                 }
-                // While on, how it's going: waiting for the phone, say.
-                let state = self.camera.status.as_ref().and_then(|s| s.state);
+                let tx = crate::central::texts::texts();
+                let hw_off = self.camera.hw_switch == Some(false);
+                let (tile_icon, subtitle, is_on) = if hw_off {
+                    ("camera-disabled-symbolic", Some(tx.camera_hw_off.to_owned()), false)
+                } else if self.camera.iriun_installed && self.camera.on {
+                    let state = self.camera.status.as_ref().and_then(|s| s.state);
+                    (tile.icon(), state.map(|s| camera_state(s).to_owned()), true)
+                } else if !self.privacy.camera.is_empty() {
+                    (tile.icon(), Some(self.privacy.camera.join(", ")), true)
+                } else {
+                    let sub = self.camera.devices.first().map(|d| d.name.clone());
+                    (tile.icon(), sub, false)
+                };
+                let primary = if self.camera.iriun_installed {
+                    Message::ToggleCamera
+                } else {
+                    Message::ShowPage(Page::Camera)
+                };
                 TileState::new(
-                    tile.icon(),
+                    tile_icon,
                     t.camera,
-                    state.filter(|_| self.camera.on).map(|state| camera_state(state).to_owned()),
-                    self.camera.on,
-                    Some(Message::ToggleCamera),
+                    subtitle,
+                    is_on,
+                    Some(primary),
                     Some(Message::ShowPage(Page::Camera)),
                 )
             }

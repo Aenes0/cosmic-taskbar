@@ -69,6 +69,17 @@ pub struct Texts {
     pub capacity_health: &'static str,
     pub cycles: &'static str,
     pub conservation_mode: &'static str,
+    pub available_cameras: &'static str,
+    pub no_cameras: &'static str,
+    pub camera_hw_switch: &'static str,
+    pub camera_hw_on: &'static str,
+    pub camera_hw_off: &'static str,
+    pub camera_hw_off_hint: &'static str,
+    pub camera_virtual: &'static str,
+    pub camera_hardware: &'static str,
+    pub iriun_section: &'static str,
+    pub mic_muted: &'static str,
+    pub mic_active: &'static str,
 }
 
 const PT: Texts = Texts {
@@ -137,6 +148,17 @@ const PT: Texts = Texts {
     capacity_health: "Capacidade / Saúde",
     cycles: "ciclos",
     conservation_mode: "Modo conservação (80%)",
+    available_cameras: "Câmeras disponíveis",
+    no_cameras: "Nenhuma câmera detectada",
+    camera_hw_switch: "Chave física da câmera",
+    camera_hw_on: "Ligada",
+    camera_hw_off: "Desligada (chave física)",
+    camera_hw_off_hint: "Ative a chave física da câmera no notebook para liberar o vídeo",
+    camera_virtual: "Câmera virtual",
+    camera_hardware: "Câmera integrada / USB",
+    iriun_section: "Celular como webcam (Iriun)",
+    mic_muted: "Mudo",
+    mic_active: "Ativo",
 };
 
 const EN: Texts = Texts {
@@ -205,6 +227,17 @@ const EN: Texts = Texts {
     capacity_health: "Capacity / Health",
     cycles: "cycles",
     conservation_mode: "Conservation mode (80%)",
+    available_cameras: "Available cameras",
+    no_cameras: "No cameras detected",
+    camera_hw_switch: "Hardware camera switch",
+    camera_hw_on: "Enabled",
+    camera_hw_off: "Disabled (hardware switch)",
+    camera_hw_off_hint: "Flip the laptop's physical camera switch to enable video",
+    camera_virtual: "Virtual camera",
+    camera_hardware: "Built-in / USB camera",
+    iriun_section: "Phone as webcam (Iriun)",
+    mic_muted: "Muted",
+    mic_active: "Active",
 };
 
 pub fn texts() -> &'static Texts {

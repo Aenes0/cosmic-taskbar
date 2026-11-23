@@ -2123,18 +2123,14 @@ impl cosmic::Application for App {
             Message::ToggleCamera => {
                 // At once, as the other tiles; then as it really is.
                 let verb = if self.camera.on { "stop" } else { "start" };
-                self.camera = services::Camera {
-                    on: !self.camera.on,
-                    status: None,
-                };
+                self.camera.on = !self.camera.on;
+                self.camera.status = None;
                 self.camera_busy += 1;
                 return camera_command(verb);
             }
             Message::RestartCamera => {
-                self.camera = services::Camera {
-                    on: true,
-                    status: None,
-                };
+                self.camera.on = true;
+                self.camera.status = None;
                 self.camera_busy += 1;
                 return camera_command("restart");
             }
