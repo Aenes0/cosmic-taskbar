@@ -47,6 +47,18 @@ pub struct Texts {
     pub no_background_apps: &'static str,
     pub show_on_bar: &'static str,
     pub system_bar_icons: &'static str,
+    pub wired: &'static str,
+    pub interface: &'static str,
+    pub ip_address: &'static str,
+    pub ipv6_address: &'static str,
+    pub gateway: &'static str,
+    pub dns: &'static str,
+    pub mac_address: &'static str,
+    pub security: &'static str,
+    pub security_wired: &'static str,
+    pub security_vpn: &'static str,
+    pub security_open: &'static str,
+    pub more_network: &'static str,
 }
 
 const PT: Texts = Texts {
@@ -93,6 +105,18 @@ const PT: Texts = Texts {
     no_background_apps: "Nenhum app em segundo plano",
     show_on_bar: "Mostrar na barra",
     system_bar_icons: "Ícones na barra",
+    wired: "Cabeada",
+    interface: "Interface",
+    ip_address: "Endereço IPv4",
+    ipv6_address: "Endereço IPv6",
+    gateway: "Gateway",
+    dns: "DNS",
+    mac_address: "Endereço MAC",
+    security: "Segurança",
+    security_wired: "Rede cabeada",
+    security_vpn: "Protegido via VPN",
+    security_open: "Aberta (sem criptografia)",
+    more_network: "Mais configurações de rede",
 };
 
 const EN: Texts = Texts {
@@ -139,6 +163,18 @@ const EN: Texts = Texts {
     no_background_apps: "No background apps",
     show_on_bar: "Show on the panel",
     system_bar_icons: "Panel icons",
+    wired: "Wired",
+    interface: "Interface",
+    ip_address: "IPv4 address",
+    ipv6_address: "IPv6 address",
+    gateway: "Gateway",
+    dns: "DNS",
+    mac_address: "MAC address",
+    security: "Security",
+    security_wired: "Wired network",
+    security_vpn: "Protected via VPN",
+    security_open: "Open (unencrypted)",
+    more_network: "More network settings",
 };
 
 pub fn texts() -> &'static Texts {

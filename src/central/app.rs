@@ -51,6 +51,7 @@ const SCREEN_MARGIN: f32 = 66.0;
 pub enum Page {
     Main,
     Edit,
+    Network,
     Wifi,
     Vpn,
     Bluetooth,
@@ -69,9 +70,10 @@ pub enum Page {
 
 impl Page {
     #[cfg(test)]
-    pub const ALL: [Page; 14] = [
+    pub const ALL: [Page; 15] = [
         Page::Main,
         Page::Edit,
+        Page::Network,
         Page::Wifi,
         Page::Vpn,
         Page::Bluetooth,
@@ -91,6 +93,7 @@ impl Page {
         match self {
             Page::Main => "main",
             Page::Edit => "edit",
+            Page::Network => "network",
             Page::Wifi => "wifi",
             Page::Vpn => "vpn",
             Page::Bluetooth => "bluetooth",
@@ -110,6 +113,7 @@ impl Page {
         Some(match name {
             "main" => Page::Main,
             "edit" => Page::Edit,
+            "network" => Page::Network,
             "wifi" => Page::Wifi,
             "vpn" => Page::Vpn,
             "bluetooth" => Page::Bluetooth,
@@ -497,7 +501,7 @@ impl App {
             button::custom(content)
                 .padding(icon_pad)
                 .class(theme::Button::AppletIcon)
-                .on_press(on_press)
+                .on_press_down(on_press)
                 .into()
         };
         // Each system icon has its own hover highlight; left click does NOT
@@ -647,7 +651,7 @@ impl App {
                 }
                 BarItem::Network => {
                     if shows(BarItem::Network) != Show::Never {
-                        icons.push(at(panel_icon(self.network_icon()), Page::Wifi));
+                        icons.push(at(panel_icon(self.network_icon()), Page::Network));
                     }
                 }
                 BarItem::Volume => {
@@ -2566,6 +2570,7 @@ impl cosmic::Application for App {
             // Its foot level with the panel's, by the bar.
             .align_y(Alignment::End)
             .into(),
+            Page::Network => pages::panel(self.network_page()),
             Page::Wifi => pages::panel(self.wifi_page()),
             Page::Vpn => pages::panel(self.vpn_page()),
             Page::Bluetooth => pages::panel(self.bluetooth_page()),

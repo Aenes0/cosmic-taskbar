@@ -25,10 +25,27 @@ use zbus::{
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Network {
     pub wifi_enabled: bool,
+    /// Whether this machine has a Wi-Fi adapter.
+    pub has_wifi: bool,
     /// Name and kind of the connection in use: `802-11-wireless`, `802-3-ethernet`…
     pub connection: Option<(String, String)>,
+    /// Details of the primary active connection (interface, IP, MAC, gateway, DNS, security).
+    pub details: Option<NetworkDetails>,
     /// The VPNs set up, WireGuard's too, the last used first.
     pub vpns: Vec<Vpn>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NetworkDetails {
+    pub name: String,
+    pub kind: String,
+    pub interface: String,
+    pub ipv4: Option<String>,
+    pub ipv6: Option<String>,
+    pub gateway: Option<String>,
+    pub dns: Vec<String>,
+    pub mac: Option<String>,
+    pub security: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -267,26 +284,183 @@ trait ActiveConnection {
     fn kind(&self) -> zbus::Result<String>;
     #[zbus(property)]
     fn connection(&self) -> zbus::Result<OwnedObjectPath>;
+    #[zbus(property)]
+    fn devices(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
+    #[zbus(property, name = "Ip4Config")]
+    fn ip4_config(&self) -> zbus::Result<OwnedObjectPath>;
+    #[zbus(property, name = "Ip6Config")]
+    fn ip6_config(&self) -> zbus::Result<OwnedObjectPath>;
+}
+
+#[zbus::proxy(
+    interface = "org.freedesktop.NetworkManager.IP4Config",
+    default_service = "org.freedesktop.NetworkManager"
+)]
+trait NmIp4Config {
+    #[zbus(property)]
+    fn address_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+    #[zbus(property)]
+    fn gateway(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn nameserver_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+}
+
+#[zbus::proxy(
+    interface = "org.freedesktop.NetworkManager.IP6Config",
+    default_service = "org.freedesktop.NetworkManager"
+)]
+trait NmIp6Config {
+    #[zbus(property)]
+    fn address_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
 }
 
 async fn network(conn: &zbus::Connection) -> zbus::Result<Network> {
     let nm = NetworkManagerProxy::new(conn).await?;
     let wifi_enabled = nm.wireless_enabled().await?;
+    let has_wifi = wifi_device(conn).await.ok().flatten().is_some();
+    let vpns = vpns(conn, &nm).await.unwrap_or_default();
+    let vpn_active = vpns.iter().any(|v| v.active.is_some());
     let primary = nm.primary_connection().await?;
-    let connection = if primary.as_str() == "/" {
-        None
+    let (connection, details) = if primary.as_str() == "/" {
+        (None, None)
     } else {
         let active = ActiveConnectionProxy::builder(conn)
             .path(primary)?
             .build()
             .await?;
-        Some((active.id().await?, active.kind().await?))
+        let name = active.id().await?;
+        let kind = active.kind().await?;
+        let details = read_network_details(conn, &active, &name, &kind, vpn_active).await;
+        (Some((name, kind)), Some(details))
     };
     Ok(Network {
         wifi_enabled,
+        has_wifi,
         connection,
-        vpns: vpns(conn, &nm).await.unwrap_or_default(),
+        details,
+        vpns,
     })
+}
+
+async fn read_network_details(
+    conn: &zbus::Connection,
+    active: &ActiveConnectionProxy<'_>,
+    name: &str,
+    kind: &str,
+    vpn_active: bool,
+) -> NetworkDetails {
+    let mut details = NetworkDetails {
+        name: name.to_owned(),
+        kind: kind.to_owned(),
+        ..NetworkDetails::default()
+    };
+    let devices = active.devices().await.unwrap_or_default();
+    if let Some(dev_path) = devices.first()
+        && let Ok(dev) = NmDeviceProxy::builder(conn)
+            .path(dev_path.clone())
+            .and_then(|b| Ok(b))
+    {
+        if let Ok(dev) = dev.build().await {
+            if let Ok(iface) = dev.interface().await {
+                details.interface = iface;
+            }
+            if let Ok(mac) = dev.hw_address().await
+                && !mac.is_empty()
+            {
+                details.mac = Some(mac);
+            }
+        }
+        // Wi-Fi security from active access point flags.
+        if kind == "802-11-wireless"
+            && let Ok(builder) = NmWirelessProxy::builder(conn).path(dev_path.clone())
+            && let Ok(wireless) = builder.build().await
+            && let Ok(ap_path) = wireless.active_access_point().await
+            && ap_path.as_str() != "/"
+            && let Ok(ap_builder) = NmAccessPointProxy::builder(conn).path(ap_path)
+            && let Ok(ap) = ap_builder.build().await
+        {
+            let rsn = ap.rsn_flags().await.unwrap_or(0);
+            let wpa = ap.wpa_flags().await.unwrap_or(0);
+            let flags = ap.flags().await.unwrap_or(0);
+            details.security = Some(wifi_security_label(flags, wpa, rsn));
+        }
+    }
+    if let Ok(ip4_path) = active.ip4_config().await
+        && ip4_path.as_str() != "/"
+        && let Ok(builder) = NmIp4ConfigProxy::builder(conn).path(ip4_path)
+        && let Ok(ip4) = builder.build().await
+    {
+        if let Ok(addrs) = ip4.address_data().await
+            && let Some(first) = addrs.first()
+            && let Some(addr) = first.get("address").and_then(|v| String::try_from(v.clone()).ok())
+        {
+            let prefix = first.get("prefix").and_then(|v| u32::try_from(v.clone()).ok());
+            details.ipv4 = Some(match prefix {
+                Some(p) => format!("{addr}/{p}"),
+                None => addr,
+            });
+        }
+        if let Ok(gw) = ip4.gateway().await
+            && !gw.is_empty()
+        {
+            details.gateway = Some(gw);
+        }
+        if let Ok(servers) = ip4.nameserver_data().await {
+            details.dns = servers
+                .into_iter()
+                .filter_map(|s| s.get("address").and_then(|v| String::try_from(v.clone()).ok()))
+                .collect();
+        }
+    }
+    if let Ok(ip6_path) = active.ip6_config().await
+        && ip6_path.as_str() != "/"
+        && let Ok(builder) = NmIp6ConfigProxy::builder(conn).path(ip6_path)
+        && let Ok(ip6) = builder.build().await
+        && let Ok(addrs) = ip6.address_data().await
+    {
+        let picked = addrs
+            .iter()
+            .filter_map(|entry| {
+                let addr = entry.get("address").and_then(|v| String::try_from(v.clone()).ok())?;
+                let prefix = entry.get("prefix").and_then(|v| u32::try_from(v.clone()).ok());
+                Some((addr, prefix))
+            })
+            .find(|(addr, _)| !addr.starts_with("fe80:"))
+            .or_else(|| {
+                addrs.first().and_then(|entry| {
+                    let addr = entry.get("address").and_then(|v| String::try_from(v.clone()).ok())?;
+                    let prefix = entry.get("prefix").and_then(|v| u32::try_from(v.clone()).ok());
+                    Some((addr, prefix))
+                })
+            });
+        if let Some((addr, prefix)) = picked {
+            details.ipv6 = Some(match prefix {
+                Some(p) => format!("{addr}/{p}"),
+                None => addr,
+            });
+        }
+    }
+    if vpn_active {
+        details.security = Some(crate::central::texts::texts().security_vpn.to_owned());
+    } else if details.security.is_none() && kind == "802-3-ethernet" {
+        details.security = Some(crate::central::texts::texts().security_wired.to_owned());
+    }
+    details
+}
+
+fn wifi_security_label(flags: u32, wpa_flags: u32, rsn_flags: u32) -> String {
+    // NM_802_11_AP_SEC_KEY_MGMT_SAE = 0x400 (WPA3)
+    if (rsn_flags & 0x400) != 0 {
+        "WPA3".to_owned()
+    } else if rsn_flags != 0 {
+        "WPA2".to_owned()
+    } else if wpa_flags != 0 {
+        "WPA".to_owned()
+    } else if (flags & 1) != 0 {
+        "WEP".to_owned()
+    } else {
+        crate::central::texts::texts().security_open.to_owned()
+    }
 }
 
 async fn vpns(conn: &zbus::Connection, nm: &NetworkManagerProxy<'_>) -> zbus::Result<Vec<Vpn>> {
@@ -357,6 +531,10 @@ trait NetworkManagerMethods {
 trait NmDevice {
     #[zbus(property)]
     fn device_type(&self) -> zbus::Result<u32>;
+    #[zbus(property)]
+    fn interface(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn hw_address(&self) -> zbus::Result<String>;
 }
 
 #[zbus::proxy(

@@ -393,6 +393,143 @@ impl App {
         column.into()
     }
 
+    pub fn network_page(&self) -> Element<'_, Message> {
+        let t = strings();
+        let tx = crate::central::texts::texts();
+        let spacing = theme::spacing();
+        let mut body: Vec<Element<'_, Message>> = Vec::new();
+
+        let detail_row = |label: &'static str, value: String| -> Element<'static, Message> {
+            padded_control(
+                widget::row::with_children(vec![
+                    widget::text::caption(label)
+                        .class(theme::Text::Custom(dimmed))
+                        .width(Length::Fill)
+                        .into(),
+                    widget::text::body(value).into(),
+                ])
+                .spacing(spacing.space_xs)
+                .align_y(Alignment::Center),
+            )
+            .into()
+        };
+
+        if let Some(details) = &self.network.details {
+            let kind_label = match details.kind.as_str() {
+                "802-3-ethernet" => tx.wired,
+                "802-11-wireless" => t.wifi,
+                "vpn" | "wireguard" => t.vpn,
+                _ => tx.network,
+            };
+            let subtitle = if details.interface.is_empty() {
+                format!("{kind_label} · {}", t.connected)
+            } else {
+                format!("{kind_label} · {} · {}", details.interface, t.connected)
+            };
+            body.push(
+                padded_control(
+                    widget::row::with_children(vec![
+                        widget::icon::icon(icon(self.network_icon())).size(20).into(),
+                        widget::column::with_children(vec![
+                            widget::text::body(details.name.clone())
+                                .font(cosmic::font::semibold())
+                                .into(),
+                            widget::text::caption(subtitle)
+                                .class(theme::Text::Custom(dimmed))
+                                .into(),
+                        ])
+                        .width(Length::Fill)
+                        .into(),
+                    ])
+                    .spacing(spacing.space_s)
+                    .align_y(Alignment::Center),
+                )
+                .into(),
+            );
+            if let Some(ip4) = &details.ipv4 {
+                body.push(detail_row(tx.ip_address, ip4.clone()));
+            }
+            if let Some(ip6) = &details.ipv6 {
+                body.push(detail_row(tx.ipv6_address, ip6.clone()));
+            }
+            if let Some(gw) = &details.gateway {
+                body.push(detail_row(tx.gateway, gw.clone()));
+            }
+            if !details.dns.is_empty() {
+                body.push(detail_row(tx.dns, details.dns.join(", ")));
+            }
+            if let Some(mac) = &details.mac {
+                body.push(detail_row(tx.mac_address, mac.clone()));
+            }
+            if let Some(sec) = &details.security {
+                body.push(detail_row(tx.security, sec.clone()));
+            }
+        } else {
+            body.push(note(t.disconnected));
+        }
+
+        // Wi-Fi entry only when a Wi-Fi adapter is present on this machine,
+        // switching between Network and Wi-Fi just like Windows.
+        if self.network.has_wifi {
+            body.push(padded_control(widget::divider::horizontal::default()).into());
+            let wifi_sub = match &self.network.connection {
+                Some((name, kind)) if kind == "802-11-wireless" => name.clone(),
+                _ if self.network.wifi_enabled => t.on.to_owned(),
+                _ => t.off.to_owned(),
+            };
+            let arrow: Element<'_, Message> = widget::icon::icon(icon("go-next-symbolic"))
+                .size(16)
+                .into();
+            body.push(
+                item(
+                    if self.network.wifi_enabled {
+                        "network-wireless-signal-good-symbolic"
+                    } else {
+                        "network-wireless-disabled-symbolic"
+                    },
+                    t.wifi.to_owned(),
+                    Some(wifi_sub),
+                    Some(arrow),
+                )
+                .on_press(Message::ShowPage(Page::Wifi))
+                .into(),
+            );
+        }
+
+        if !self.network.vpns.is_empty() {
+            if !self.network.has_wifi {
+                body.push(padded_control(widget::divider::horizontal::default()).into());
+            }
+            let active_vpns: Vec<&str> = self
+                .network
+                .vpns
+                .iter()
+                .filter(|v| v.active.is_some())
+                .map(|v| v.name.as_str())
+                .collect();
+            let vpn_sub = if active_vpns.is_empty() {
+                t.off.to_owned()
+            } else {
+                active_vpns.join(", ")
+            };
+            let arrow: Element<'_, Message> = widget::icon::icon(icon("go-next-symbolic"))
+                .size(16)
+                .into();
+            body.push(
+                item("network-vpn-symbolic", t.vpn.to_owned(), Some(vpn_sub), Some(arrow))
+                    .on_press(Message::ShowPage(Page::Vpn))
+                    .into(),
+            );
+        }
+
+        self.page(
+            tx.network,
+            None,
+            body,
+            Some((tx.more_network, "network")),
+        )
+    }
+
     pub fn wifi_page(&self) -> Element<'_, Message> {
         let t = strings();
         let mut body = Vec::new();
@@ -1791,16 +1928,28 @@ impl App {
                     matches!(&self.network.connection, Some((_, k)) if k == "802-3-ethernet");
                 let subtitle = match &self.network.connection {
                     Some((name, _)) => name.clone(),
-                    None if self.network.wifi_enabled => t.not_connected.to_owned(),
+                    None if self.network.has_wifi && self.network.wifi_enabled => {
+                        t.not_connected.to_owned()
+                    }
+                    None if !self.network.has_wifi => t.disconnected.to_owned(),
                     None => t.off.to_owned(),
                 };
+                let prefer_network = wired || !self.network.has_wifi;
                 TileState::new(
                     self.network_icon(),
-                    if wired { t.network } else { t.wifi },
+                    if prefer_network { t.network } else { t.wifi },
                     Some(subtitle),
-                    self.network.wifi_enabled || wired,
-                    Some(Message::ToggleWifi),
-                    Some(Message::ShowPage(Page::Wifi)),
+                    (self.network.has_wifi && self.network.wifi_enabled) || wired,
+                    Some(if self.network.has_wifi {
+                        Message::ToggleWifi
+                    } else {
+                        Message::ShowPage(Page::Network)
+                    }),
+                    Some(Message::ShowPage(if prefer_network {
+                        Page::Network
+                    } else {
+                        Page::Wifi
+                    })),
                 )
             }
             Tile::Vpn => {
