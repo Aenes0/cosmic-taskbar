@@ -298,18 +298,13 @@ impl Background {
         }
     }
 
-    /// The app's own action, with the token the compositor gives for it.
+    /// The app's own action, invoked directly over D-Bus (never stalled on
+    /// an xdg_activation token that cosmic-panel's nested compositor may not
+    /// deliver to embedded applets).
     pub fn activate(&self, id: usize) -> app::Task<Message> {
         let Some(state) = self.items.get(&id) else {
             return Task::none();
         };
-        if let Some(token_tx) = &self.token_tx {
-            let _ = token_tx.send(TokenRequest {
-                app_id: crate::central::tray::APP_ID.to_string(),
-                exec: format!("activate:{id}"),
-            });
-            return Task::none();
-        }
         activate(id, &state.item, None)
     }
 
@@ -325,14 +320,6 @@ impl Background {
                 Task::none()
             }
             TokenUpdate::ActivationToken { token, exec } => {
-                if let Some(id) = exec.strip_prefix("activate:") {
-                    if let Ok(id) = id.parse::<usize>()
-                        && let Some(state) = self.items.get(&id)
-                    {
-                        return activate(id, &state.item, token);
-                    }
-                    return Task::none();
-                }
                 let (Ok(id), Some(token)) = (exec.parse::<usize>(), token) else {
                     return Task::none();
                 };
