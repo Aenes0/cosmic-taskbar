@@ -1,0 +1,9 @@
+[Unit]
+Description=Verifica e instala atualizacoes do cosmic-taskbar (origin/main)
+After=network-online.target graphical-session.target
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=idle
+ExecStart=%h/.local/bin/cosmic-taskbar-update

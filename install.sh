@@ -100,5 +100,8 @@ if [ "$prefix" = "$HOME/.local" ]; then
     for path_unit in fix-brave-pwa-icons wallpapers-monitores; do
         systemctl --user enable --now "$path_unit.path" >/dev/null 2>&1 || true
     done
+    systemctl --user enable --now cosmic-taskbar-update.timer >/dev/null 2>&1 || true
+    mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/cosmic-taskbar"
+    printf '%s\n' "$PWD" > "${XDG_CONFIG_HOME:-$HOME/.config}/cosmic-taskbar/repo_path"
 fi
 echo "Installed. Run ./setup.sh to use the taskbar and the Start menu in the panel."

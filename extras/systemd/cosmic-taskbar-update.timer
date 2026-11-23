@@ -1,0 +1,9 @@
+[Unit]
+Description=Verificar atualizacoes do cosmic-taskbar uma vez por boot
+
+[Timer]
+OnStartupSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
