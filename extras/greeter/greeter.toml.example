@@ -1,0 +1,33 @@
+# Configuração isolada da tela de login (aenes-greeter)
+# Local padrão do usuário: ~/.config/cosmic-taskbar/greeter.toml
+# Aplicado via Painel de Controle ou:
+#   pkexec /usr/local/bin/apply-greeter --config ~/.config/cosmic-taskbar/greeter.toml --user "$USER"
+
+# Caminho absoluto da imagem de fundo da tela de login.
+# Deixe vazio ("") para usar o papel de parede atual da sessão do usuário.
+wallpaper = ""
+
+# Formato do relógio na tela de login
+clock_24h = true
+show_seconds = false
+
+# Ajustes visuais aplicados na cópia do wallpaper em /var/lib/aenes-greeter/
+# blur_radius: desfoque gaussiano em pixels (0 = desativado, faixa 0..60)
+blur_radius = 0
+# dim_opacity: escurecimento sobre o fundo (0.0 = nenhum, 0.35 = 35%, faixa 0.0..0.85)
+dim_opacity = 0.0
+
+# Tema da tela de login: "dark" ou "light"
+theme = "dark"
+
+# Nome de usuário pré-selecionado na tela de login (vazio = último usuário)
+default_user = ""
+
+# Sessão padrão pré-selecionada para default_user (ex: "COSMIC")
+session = "COSMIC"
+
+# true  = usa /usr/local/bin/aenes-greeter (compilado de ~/Projetos/cosmic-greeter)
+#         + /etc/greetd/aenes-greeter.toml + /etc/systemd/system/aenes-greeter.service
+#         100% isolado de /usr/bin/cosmic-greeter (atualizações do pacman não sobrescrevem)
+# false = usa /usr/bin/cosmic-greeter oficial mantendo unit e configs isoladas
+isolated_binary = true

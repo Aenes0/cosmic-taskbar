@@ -202,6 +202,8 @@ pub struct Settings {
     pub rest_watts: f64,
     /// The weather's details and days shown, not just now and the hours.
     pub weather_expanded: bool,
+    /// Background polling interval in seconds for the bar applet (1..=30).
+    pub poll_secs: u64,
 }
 
 impl Default for Settings {
@@ -216,6 +218,7 @@ impl Default for Settings {
             tariff: None,
             rest_watts: 0.0,
             weather_expanded: false,
+            poll_secs: 5,
         }
     }
 }
@@ -269,6 +272,7 @@ impl Settings {
             tariff: get::<f64>("tariff").filter(|t| *t > 0.0),
             rest_watts: get::<f64>("rest_watts").unwrap_or(0.0).max(0.0),
             weather_expanded: get::<bool>("weather_expanded").unwrap_or(false),
+            poll_secs: get::<u64>("poll_secs").unwrap_or(5).clamp(1, 30),
         }
     }
 
@@ -344,6 +348,11 @@ impl Settings {
         set("rest_watts", self.rest_watts);
     }
 
+    pub fn set_poll_secs(&mut self, secs: u64) {
+        self.poll_secs = secs.clamp(1, 30);
+        set("poll_secs", self.poll_secs);
+    }
+
     /// The order, the panels and the bar as they come.
     pub fn reset(&mut self) {
         let defaults = Settings::default();
@@ -353,7 +362,9 @@ impl Settings {
         self.bar_hidden.clear();
         self.bar_modes.clear();
         self.thermometer = defaults.thermometer;
+        self.poll_secs = defaults.poll_secs;
         set("bar_thermometer", self.thermometer.id());
+        set("poll_secs", self.poll_secs);
         save_panels("order", &self.order);
         save_panels("hidden", &[]);
         save_panels("folded", &[]);

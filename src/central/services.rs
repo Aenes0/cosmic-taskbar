@@ -2051,11 +2051,16 @@ pub fn touchpad() -> Option<Touchpad> {
     })
 }
 
-pub fn set_touchpad(enabled: bool) {
+pub fn set_touchpad_mode(mode: Touchpad) {
+    let label = match mode {
+        Touchpad::Enabled => "Enabled",
+        Touchpad::Disabled => "Disabled",
+        Touchpad::DisabledOnExternalMouse => "DisabledOnExternalMouse",
+    };
     let result = (|| {
         let (mut text, path) = touchpad_text().ok_or("no touchpad settings")?;
         let range = state_value(&text).ok_or("no state in the touchpad settings")?;
-        text.replace_range(range, if enabled { "Enabled" } else { "Disabled" });
+        text.replace_range(range, label);
         std::fs::create_dir_all(path.parent().ok_or("no directory")?).map_err(|e| e.to_string())?;
         // Whole, for cosmic-comp, which watches the file.
         let new = path.with_extension("new");
@@ -2066,6 +2071,14 @@ pub fn set_touchpad(enabled: bool) {
     if let Err(err) = result {
         tracing::warn!("cannot set the touchpad: {err}");
     }
+}
+
+pub fn set_touchpad(enabled: bool) {
+    set_touchpad_mode(if enabled {
+        Touchpad::Enabled
+    } else {
+        Touchpad::Disabled
+    });
 }
 
 /// When do not disturb ends by itself, in seconds since the epoch; 0 never.

@@ -30,7 +30,7 @@ if [ "$1" = "--undo" ]; then
     if [ -f "$center" ]; then
         sed -i "s|\"$start\",|\"com.system76.CosmicPanelAppButton\",\n    \"com.system76.CosmicPanelLauncherButton\",|" "$center"
     fi
-    [ -f "$custom" ] && sed -i "/cosmic-taskbar --tools/d; /cosmic-ext-applet-start --tools/d" "$custom"
+    [ -f "$custom" ] && sed -i "/cosmic-taskbar --tools/d; /cosmic-ext-applet-start --tools/d; /io\.github\.Aenes0\.CosmicSwitcher/d" "$custom"
     for f in "$panel/plugins_center" "$panel/plugins_wings"; do
         [ -f "$f" ] && sed -i -e "s|\"$ours\"|\"$theirs\"|" -e "s|\"$workspaces\"|\"$their_workspaces\"|" "$f"
     done
@@ -71,6 +71,26 @@ if ! grep -q "print-recorte" "$custom" 2>/dev/null; then
     else
         printf '{\n%s\n}\n' "$line" > "$custom"
     fi
+fi
+
+# Alt+Tab / Super+Tab: migrate legacy CosmicWorkspaces ShowSwitcherOn bindings
+# to our isolated `io.github.Aenes0.CosmicSwitcher` D-Bus service.
+if [ -f "$custom" ]; then
+    sed -i 's|com\.system76\.CosmicWorkspaces /com/system76/CosmicWorkspaces com\.system76\.CosmicWorkspaces ShowSwitcherOn|io.github.Aenes0.CosmicSwitcher /io/github/Aenes0/CosmicSwitcher io.github.Aenes0.CosmicSwitcher ShowSwitcherOn|g' "$custom"
+fi
+if ! grep -q "io.github.Aenes0.CosmicSwitcher" "$custom" 2>/dev/null; then
+    for entry in \
+        '    (modifiers: [Alt], key: "Tab", description: Some("aenes-switcher")): Spawn("busctl --user call io.github.Aenes0.CosmicSwitcher /io/github/Aenes0/CosmicSwitcher io.github.Aenes0.CosmicSwitcher ShowSwitcherOn bs false \"$COSMIC_ACTIVE_OUTPUT\""),' \
+        '    (modifiers: [Alt, Shift], key: "Tab", description: Some("aenes-switcher")): Spawn("busctl --user call io.github.Aenes0.CosmicSwitcher /io/github/Aenes0/CosmicSwitcher io.github.Aenes0.CosmicSwitcher ShowSwitcherOn bs true \"$COSMIC_ACTIVE_OUTPUT\""),' \
+        '    (modifiers: [Super], key: "Tab", description: Some("aenes-switcher")): Spawn("busctl --user call io.github.Aenes0.CosmicSwitcher /io/github/Aenes0/CosmicSwitcher io.github.Aenes0.CosmicSwitcher ShowSwitcherOn bs false \"$COSMIC_ACTIVE_OUTPUT\""),' \
+        '    (modifiers: [Super, Shift], key: "Tab", description: Some("aenes-switcher")): Spawn("busctl --user call io.github.Aenes0.CosmicSwitcher /io/github/Aenes0/CosmicSwitcher io.github.Aenes0.CosmicSwitcher ShowSwitcherOn bs true \"$COSMIC_ACTIVE_OUTPUT\""),'; do
+        if [ -s "$custom" ] && grep -q "}" "$custom"; then
+            last=$(grep -n "}" "$custom" | tail -1 | cut -d: -f1)
+            sed -i "${last}i\\$entry" "$custom"
+        else
+            printf '{\n%s\n}\n' "$entry" > "$custom"
+        fi
+    done
 fi
 
 # One button for both in the panel, where the launcher's was (or where

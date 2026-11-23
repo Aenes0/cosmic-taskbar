@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=io.github.Aenes0.CosmicSwitcher
+Exec=@bindir@/cosmic-taskbar switcher
+SystemdService=cosmic-switcher.service

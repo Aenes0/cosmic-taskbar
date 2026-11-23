@@ -51,6 +51,9 @@ done
 for name in Clipboard Notifications Panels; do
     sed "s|@bindir@|$bindir|" "data/central/$central.$name.service.in" > "$dbus/$central.$name.service"
 done
+# Isolated Alt+Tab / Super+Tab window switcher (`io.github.Aenes0.CosmicSwitcher`).
+sed "s|@bindir@|$bindir|" "data/switcher/cosmic-switcher.service.in" > "$units/cosmic-switcher.service"
+sed "s|@bindir@|$bindir|" "data/switcher/io.github.Aenes0.CosmicSwitcher.service.in" > "$dbus/io.github.Aenes0.CosmicSwitcher.service"
 
 # The Logitech devices' service: for the user, where it always had its unit
 # (in ~/.config, which wins over ~/.local/share); under a system prefix, with
@@ -93,7 +96,7 @@ if [ "$prefix" = "$HOME/.local" ]; then
         echo "Installed, but the user's systemd did not answer: the services start at the next login."
         exit 0
     fi
-    for unit in central-clipboard central-notifications central-panels logi-osd; do
+    for unit in central-clipboard central-notifications central-panels cosmic-switcher logi-osd; do
         systemctl --user enable "$unit.service" >/dev/null 2>&1 || true
         systemctl --user restart "$unit.service" || echo "could not restart $unit now; it starts at the next login"
     done

@@ -13,7 +13,7 @@ mod i18n;
 pub(crate) mod layout;
 mod latest;
 mod media;
-mod monitor;
+pub(crate) mod monitor;
 mod notifications;
 mod pages;
 mod panels;

@@ -7,13 +7,13 @@
 
 mod chart;
 mod dots;
-mod config;
+pub(crate) mod config;
 mod energy;
 mod gpu_share;
 mod panels;
 mod sample;
-mod texts;
-mod weather;
+pub(crate) mod texts;
+pub(crate) mod weather;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -274,10 +274,10 @@ impl Monitor {
             && !self.settings.is_folded(Panel::Processes)
     }
 
-    /// On the bar: what was chosen in the panel, which the host saves.
-    /// Hosted, the panel is where it is chosen: nothing to read again.
+    /// Reloads Monitor settings whenever another process (the hosted panel or
+    /// the Control Panel) modifies them on disk.
     fn settings_tick(&mut self) {
-        if self.hosted {
+        if self.editing {
             return;
         }
         let seen = config::modified();
@@ -286,6 +286,14 @@ impl Monitor {
             self.settings = Settings::load();
             self.bar_models = bar_models(&self.settings);
             self.thermometer_model = thermometer_model(&self.settings);
+            if !self.energy_settings {
+                self.tariff_input = self.settings.tariff.map(|t| decimal(t, 2)).unwrap_or_default();
+                self.rest_input = if self.settings.rest_watts > 0.0 {
+                    decimal(self.settings.rest_watts, 0)
+                } else {
+                    String::new()
+                };
+            }
         }
     }
 
@@ -541,6 +549,7 @@ impl Monitor {
             self.screen_height_known = true;
         }
         self.popup = Some(id);
+        self.settings_tick();
         let page = page.map_or_else(Task::none, |page| self.turn_to(page));
         // Fresh numbers, and the processes, at once; the weather, if it's old.
         let weather = self.weather_tick(false);
@@ -865,9 +874,13 @@ impl cosmic::Application for Monitor {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        // A second while looked at; five while not, for the bar and the
-        // energy, which counts all the time.
-        let every = if self.popup.is_some() { Duration::from_secs(1) } else { Duration::from_secs(5) };
+        // A second while looked at; configured interval (default 5s) while not,
+        // for the bar and the energy, which counts all the time.
+        let every = if self.popup.is_some() {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(self.settings.poll_secs.clamp(1, 30))
+        };
         Subscription::batch([
             iced::time::every(every).map(|_| Message::Tick),
             iced::time::every(WEATHER_TICK).map(|_| Message::WeatherTick),

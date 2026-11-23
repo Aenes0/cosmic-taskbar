@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Aenes COSMIC Taskbar</vendor>
+  <vendor_url>https://github.com/Aenes0/cosmic-taskbar</vendor_url>
+
+  <action id="io.github.Aenes0.CosmicGreeterApply">
+    <description>Apply isolated login screen (aenes-greeter) settings</description>
+    <description xml:lang="pt_BR">Aplicar configurações isoladas da tela de login (aenes-greeter)</description>
+    <message>Authentication is required to apply login screen settings</message>
+    <message xml:lang="pt_BR">Autenticação necessária para aplicar as configurações da tela de login</message>
+    <icon_name>preferences-desktop-display</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/apply-greeter</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">false</annotate>
+  </action>
+</policyconfig>

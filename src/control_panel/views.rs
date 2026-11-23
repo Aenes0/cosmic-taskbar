@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Views for the 6 sections of the native COSMIC Control Panel.
+//! Views for the sections of the native COSMIC Control Panel.
 
 use cosmic::{
     Element,
@@ -11,12 +11,14 @@ use cosmic::{
 
 use crate::central::{
     bar_spacing::BarSpacing,
-    services::{CameraState, PcWindow},
+    layout::Section as CentralSection,
+    monitor::config::{BarItem as MonitorBarItem, BarMode as MonitorBarMode},
+    services::{self, CameraState, PcWindow, Touchpad},
     tiles::{chip_class, icon, symbolic},
     widgets::card,
 };
 
-use super::{ControlPanel, Message, Section};
+use super::{ControlPanel, Message, Section, data};
 
 fn dimmed(theme: &cosmic::Theme) -> iced::widget::text::Style {
     let mut color = theme.cosmic().background(theme.transparent).on;
@@ -99,30 +101,56 @@ fn action_btn<'a>(label: &'a str, msg: Message, primary: bool) -> Element<'a, Me
         .into()
 }
 
+fn small_chip<'a>(label: &'a str, active: bool, msg: Message) -> Element<'a, Message> {
+    button::custom(widget::text::caption(label))
+        .padding([5, 10])
+        .class(chip_class(active))
+        .on_press(msg)
+        .into()
+}
+
+fn toggle_row<'a>(label: &'a str, value: bool, msg: Message) -> Element<'a, Message> {
+    widget::row::with_children(vec![
+        widget::text::body(label).width(Length::Fill).into(),
+        widget::toggler(value).on_toggle(move |_| msg.clone()).into(),
+    ])
+    .spacing(10)
+    .align_y(Alignment::Center)
+    .into()
+}
+
 pub fn view(app: &ControlPanel) -> Element<'_, Message> {
     let spacing = theme::spacing();
 
     // Left navigation sidebar
-    let mut nav_items: Vec<Element<'_, Message>> = Vec::with_capacity(Section::ALL.len() + 2);
+    let mut nav_items: Vec<Element<'_, Message>> = Vec::with_capacity(Section::ALL.len());
     for sec in Section::ALL {
         let selected = app.section == sec;
         let row = widget::row::with_children(vec![
-            widget::icon::icon(icon(sec.icon())).size(18).into(),
+            widget::icon::icon(icon(sec.icon())).size(17).into(),
             widget::text::body(sec.label()).into(),
         ])
         .spacing(10)
         .align_y(Alignment::Center);
         nav_items.push(
             button::custom(row)
-                .padding([10, 12])
+                .padding([8, 12])
                 .width(Length::Fill)
                 .class(chip_class(selected))
                 .on_press(Message::SelectSection(sec))
                 .into(),
         );
     }
-    nav_items.push(widget::space::vertical().height(Length::Fill).into());
-    nav_items.push(
+
+    let mut sidebar_footer: Vec<Element<'_, Message>> = Vec::new();
+    if app.busy {
+        sidebar_footer.push(
+            widget::text::caption("Executando ação...")
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+        );
+    }
+    sidebar_footer.push(
         button::custom(
             widget::row::with_children(vec![
                 widget::icon::icon(icon("view-refresh-symbolic")).size(16).into(),
@@ -138,10 +166,22 @@ pub fn view(app: &ControlPanel) -> Element<'_, Message> {
         .into(),
     );
 
-    let sidebar = widget::container(
+    let nav_list = widget::scrollable(
         widget::column::with_children(nav_items).spacing(spacing.space_xxs),
     )
-    .width(Length::Fixed(240.0))
+    .height(Length::Fill);
+
+    let sidebar = widget::container(
+        widget::column::with_children(vec![
+            nav_list.into(),
+            widget::column::with_children(sidebar_footer)
+                .spacing(spacing.space_xxs)
+                .into(),
+        ])
+        .spacing(spacing.space_xs)
+        .height(Length::Fill),
+    )
+    .width(Length::Fixed(248.0))
     .height(Length::Fill)
     .padding(spacing.space_s)
     .class(theme::Container::custom(|theme| {
@@ -196,9 +236,13 @@ pub fn view(app: &ControlPanel) -> Element<'_, Message> {
     let page_content = match app.section {
         Section::Power => power_view(app),
         Section::Bar => bar_view(app),
+        Section::Monitor => monitor_view(app),
+        Section::Central => central_view(app),
         Section::Camera => camera_view(app),
         Section::Network => network_view(app),
         Section::Displays => displays_view(app),
+        Section::Login => login_view(app),
+        Section::Optional => optional_view(app),
         Section::System => system_view(app),
     };
     main_col.push(page_content);
@@ -226,9 +270,24 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
     // Power profiles selector
     if let Some(power) = &app.power {
         let profile_defs = [
-            ("power-saver", "power-profile-power-saver-symbolic", "Economia", Color::from_rgb(0.30, 0.82, 0.50)),
-            ("balanced", "power-profile-balanced-symbolic", "Equilibrado", Color::from_rgb(0.96, 0.78, 0.25)),
-            ("performance", "power-profile-performance-symbolic", "Desempenho", Color::from_rgb(0.95, 0.35, 0.35)),
+            (
+                "power-saver",
+                "power-profile-power-saver-symbolic",
+                "Economia",
+                Color::from_rgb(0.30, 0.82, 0.50),
+            ),
+            (
+                "balanced",
+                "power-profile-balanced-symbolic",
+                "Equilibrado",
+                Color::from_rgb(0.96, 0.78, 0.25),
+            ),
+            (
+                "performance",
+                "power-profile-performance-symbolic",
+                "Desempenho",
+                Color::from_rgb(0.95, 0.35, 0.35),
+            ),
         ];
         let mut buttons = Vec::new();
         for (id, ico, label, col) in profile_defs {
@@ -275,7 +334,9 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
     items.push(card_box(
         widget::column::with_children(vec![
             widget::row::with_children(vec![
-                widget::text::heading("Motor de economia (economia-energia)").width(Length::Fill).into(),
+                widget::text::heading("Motor de economia (economia-energia)")
+                    .width(Length::Fill)
+                    .into(),
                 status_badge(app.snapshot.economia_energia_active, "Ativo", "Inativo"),
             ])
             .align_y(Alignment::Center)
@@ -358,31 +419,17 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
         }
         if let Some(cons) = bat.conservation_mode {
             rows.push(widget::divider::horizontal::default().into());
-            rows.push(
-                widget::row::with_children(vec![
-                    widget::text::body("Modo conservação Lenovo (limitar carga em 80%)")
-                        .width(Length::Fill)
-                        .into(),
-                    widget::toggler(cons)
-                        .on_toggle(|_| Message::ToggleConservationMode)
-                        .into(),
-                ])
-                .align_y(Alignment::Center)
-                .into(),
-            );
+            rows.push(toggle_row(
+                "Modo conservação Lenovo (limitar carga em 80%)",
+                cons,
+                Message::ToggleConservationMode,
+            ));
         }
-        rows.push(
-            widget::row::with_children(vec![
-                widget::text::body("Mostrar porcentagem da bateria na barra")
-                    .width(Length::Fill)
-                    .into(),
-                widget::toggler(app.show_percentage)
-                    .on_toggle(|_| Message::ToggleShowPercentage)
-                    .into(),
-            ])
-            .align_y(Alignment::Center)
-            .into(),
-        );
+        rows.push(toggle_row(
+            "Mostrar porcentagem da bateria na barra",
+            app.show_percentage,
+            Message::ToggleShowPercentage,
+        ));
         items.push(card_box(widget::column::with_children(rows).spacing(spacing.space_xs)));
     }
 
@@ -502,9 +549,11 @@ fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
     ];
     if app.tray_config.hidden.is_empty() {
         tray_rows.push(
-            widget::text::caption("Nenhum app oculto — novos apps aparecem na barra por padrão.")
-                .class(theme::Text::Custom(dimmed))
-                .into(),
+            widget::text::caption(
+                "Nenhum app oculto — novos apps aparecem na barra por padrão.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
         );
     } else {
         for key in &app.tray_config.hidden {
@@ -519,6 +568,433 @@ fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
         }
     }
     items.push(card_box(widget::column::with_children(tray_rows).spacing(spacing.space_xs)));
+
+    widget::column::with_children(items).spacing(spacing.space_m).into()
+}
+
+fn monitor_view(app: &ControlPanel) -> Element<'_, Message> {
+    let spacing = theme::spacing();
+    let mut items: Vec<Element<'_, Message>> = vec![
+        widget::row::with_children(vec![
+            widget::text::title3("Monitor (Painel da Esquerda)")
+                .width(Length::Fill)
+                .into(),
+            action_btn("Restaurar padrão", Message::MonitorReset, false),
+        ])
+        .align_y(Alignment::Center)
+        .into(),
+    ];
+
+    // 1. Metrics on the bar
+    let mut bar_rows: Vec<Element<'_, Message>> = vec![
+        widget::text::heading("Métricas exibidas na barra").into(),
+        widget::text::caption(
+            "Limite padrão: ≥ 70% de uso ou ≥ 65 °C (memória: ≥ 70%). Some 10 s após normalizar.",
+        )
+        .class(theme::Text::Custom(dimmed))
+        .into(),
+    ];
+    for item in MonitorBarItem::ALL {
+        let control: Element<'_, Message> = if item == MonitorBarItem::Power {
+            status_badge(true, "Sempre visível", "")
+        } else if item.has_modes() {
+            let current = app.monitor_settings.bar_mode(item);
+            widget::row::with_children(
+                MonitorBarMode::ALL
+                    .into_iter()
+                    .map(|mode| small_chip(mode.name(), current == mode, Message::MonitorBarMode(item, mode)))
+                    .collect::<Vec<_>>(),
+            )
+            .spacing(4)
+            .into()
+        } else {
+            widget::toggler(app.monitor_settings.shows_on_bar(item))
+                .on_toggle(move |_| Message::MonitorToggleBar(item))
+                .into()
+        };
+        bar_rows.push(
+            widget::row::with_children(vec![
+                widget::text::body(item.name()).width(Length::Fill).into(),
+                control,
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+    }
+
+    // Thermometer mode
+    let thermo_chips = widget::row::with_children(
+        MonitorBarMode::ALL
+            .into_iter()
+            .map(|mode| {
+                small_chip(
+                    mode.name(),
+                    app.monitor_settings.thermometer == mode,
+                    Message::MonitorThermometer(mode),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    bar_rows.push(
+        widget::row::with_children(vec![
+            widget::text::body("Termômetro (CPU e GPU)").width(Length::Fill).into(),
+            thermo_chips.into(),
+        ])
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into(),
+    );
+
+    bar_rows.push(widget::divider::horizontal::default().into());
+
+    // Background poll interval
+    let poll_chips = widget::row::with_children(
+        [(1u64, "1 s"), (2, "2 s"), (5, "5 s (padrão)"), (10, "10 s")]
+            .into_iter()
+            .map(|(secs, lbl)| {
+                small_chip(
+                    lbl,
+                    app.monitor_settings.poll_secs == secs,
+                    Message::MonitorPollSecs(secs),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    bar_rows.push(
+        widget::row::with_children(vec![
+            widget::text::body("Intervalo de leitura na barra (popup fechado)")
+                .width(Length::Fill)
+                .into(),
+            poll_chips.into(),
+        ])
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into(),
+    );
+    items.push(card_box(widget::column::with_children(bar_rows).spacing(spacing.space_xs)));
+
+    // 2. Cards order, visibility, and folding in left popup
+    let mut panel_rows: Vec<Element<'_, Message>> = vec![
+        widget::text::heading("Cartões do painel da esquerda").into(),
+        widget::text::caption("Reordene, recolha por padrão ou oculte cada cartão do Monitor.")
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+    ];
+    let last = app.monitor_settings.order.len().saturating_sub(1);
+    for (idx, panel) in app.monitor_settings.order.iter().copied().enumerate() {
+        let shown = !app.monitor_settings.hidden.contains(&panel);
+        let folded = app.monitor_settings.is_folded(panel);
+        let up_btn = button::icon(icon("go-up-symbolic"))
+            .icon_size(14)
+            .padding(4)
+            .class(theme::Button::Text)
+            .on_press_maybe((idx > 0).then_some(Message::MonitorShiftPanel(panel, false)));
+        let down_btn = button::icon(icon("go-down-symbolic"))
+            .icon_size(14)
+            .padding(4)
+            .class(theme::Button::Text)
+            .on_press_maybe((idx < last).then_some(Message::MonitorShiftPanel(panel, true)));
+        panel_rows.push(
+            widget::row::with_children(vec![
+                widget::text::body(panel.name()).width(Length::Fill).into(),
+                small_chip(
+                    if folded { "Recolhido" } else { "Expandido" },
+                    !folded,
+                    Message::MonitorToggleFold(panel),
+                ),
+                up_btn.into(),
+                down_btn.into(),
+                widget::toggler(shown)
+                    .on_toggle(move |_| Message::MonitorToggleHidden(panel))
+                    .into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+    }
+    items.push(card_box(widget::column::with_children(panel_rows).spacing(6)));
+
+    // 3. Weather location & display
+    let place = &app.weather_place;
+    let current_place = if place.detail.is_empty() {
+        format!("{} ({:.3}, {:.3})", place.name, place.lat, place.lon)
+    } else {
+        format!("{} — {} ({:.3}, {:.3})", place.name, place.detail, place.lat, place.lon)
+    };
+    let mut weather_rows: Vec<Element<'_, Message>> = vec![
+        widget::text::heading("Clima").into(),
+        kv_row("Local configurado", current_place),
+        widget::row::with_children(vec![
+            widget::text_input(
+                "Digite CEP (ex: 30330-330) ou nome da cidade".to_owned(),
+                app.weather_query.clone(),
+            )
+            .on_input(Message::WeatherQueryInput)
+            .on_submit(|_| Message::WeatherSearch)
+            .width(Length::Fill)
+            .into(),
+            action_btn("Buscar", Message::WeatherSearch, true),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    ];
+    if app.weather_searching {
+        weather_rows.push(
+            widget::text::caption("Procurando localidade...")
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+        );
+    } else if let Some(results) = &app.weather_results {
+        if results.is_empty() {
+            weather_rows.push(
+                widget::text::caption("Nenhum local encontrado para essa busca.")
+                    .class(theme::Text::Custom(dimmed))
+                    .into(),
+            );
+        } else {
+            for candidate in results {
+                let text = if candidate.detail.is_empty() {
+                    candidate.name.clone()
+                } else {
+                    format!("{} — {}", candidate.name, candidate.detail)
+                };
+                weather_rows.push(
+                    button::custom(widget::text::body(text))
+                        .padding([6, 10])
+                        .width(Length::Fill)
+                        .class(chip_class(false))
+                        .on_press(Message::WeatherPickPlace(candidate.clone()))
+                        .into(),
+                );
+            }
+        }
+    }
+    weather_rows.push(toggle_row(
+        "Expandir detalhes e previsão de 7 dias por padrão",
+        app.monitor_settings.weather_expanded,
+        Message::MonitorToggleWeatherExpanded,
+    ));
+    items.push(card_box(widget::column::with_children(weather_rows).spacing(spacing.space_xs)));
+
+    // 4. Energy tariff & base rest watts
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Cálculo de consumo elétrico").into(),
+            widget::row::with_children(vec![
+                widget::column::with_children(vec![
+                    widget::text::caption("Tarifa (R$ por kWh)")
+                        .class(theme::Text::Custom(dimmed))
+                        .into(),
+                    widget::text_input("0,95".to_owned(), app.tariff_input.clone())
+                        .on_input(Message::MonitorTariffInput)
+                        .width(Length::Fill)
+                        .into(),
+                ])
+                .spacing(4)
+                .width(Length::Fill)
+                .into(),
+                widget::column::with_children(vec![
+                    widget::text::caption("Resto do PC (W)")
+                        .class(theme::Text::Custom(dimmed))
+                        .into(),
+                    widget::text_input("40".to_owned(), app.rest_watts_input.clone())
+                        .on_input(Message::MonitorRestWattsInput)
+                        .width(Length::Fill)
+                        .into(),
+                ])
+                .spacing(4)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(12)
+            .into(),
+            widget::text::caption(
+                "Estimativa do restante do hardware (placa-mãe, RAM, SSDs, ventoinhas e perdas da fonte).",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    widget::column::with_children(items).spacing(spacing.space_m).into()
+}
+
+fn central_view(app: &ControlPanel) -> Element<'_, Message> {
+    let spacing = theme::spacing();
+    let mut items: Vec<Element<'_, Message>> = vec![
+        widget::row::with_children(vec![
+            widget::text::title3("Central (Painel da Direita)")
+                .width(Length::Fill)
+                .into(),
+            action_btn("Restaurar tiles padrão", Message::CentralResetTiles, false),
+        ])
+        .align_y(Alignment::Center)
+        .into(),
+    ];
+
+    // 1. Appearance & Do Not Disturb
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Aparência & Notificações").into(),
+            toggle_row(
+                "Modo Escuro (Dark Mode do COSMIC)",
+                app.dark_mode,
+                Message::CentralToggleDarkMode,
+            ),
+            toggle_row(
+                "Não Perturbe (Do Not Disturb)",
+                app.do_not_disturb,
+                Message::CentralToggleDnd,
+            ),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 2. Collapsible sections in Central
+    let section_name = |sec: CentralSection| match sec {
+        CentralSection::Notifications => "Notificações",
+        CentralSection::Media => "Reprodutor de Mídia",
+        CentralSection::Calendar => "Calendário",
+        CentralSection::Clipboard => "Área de transferência",
+    };
+    let mut sec_rows: Vec<Element<'_, Message>> = vec![
+        widget::text::heading("Seções recolhíveis da Central").into(),
+        widget::text::caption(
+            "Escolha quais seções abrem expandidas ou recolhidas por padrão no painel da direita.",
+        )
+        .class(theme::Text::Custom(dimmed))
+        .into(),
+    ];
+    for sec in CentralSection::ALL {
+        let expanded = !app.central_layout.is_folded(sec);
+        sec_rows.push(
+            widget::row::with_children(vec![
+                widget::icon::icon(icon(sec.icon())).size(16).into(),
+                widget::text::body(section_name(sec)).width(Length::Fill).into(),
+                status_badge(expanded, "Expandida", "Recolhida"),
+                widget::toggler(expanded)
+                    .on_toggle(move |_| Message::CentralToggleSectionFold(sec))
+                    .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+    }
+    items.push(card_box(widget::column::with_children(sec_rows).spacing(spacing.space_xs)));
+
+    // 3. Tiling (cosmic-comp)
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Ladrilhamento (Tiling)").into(),
+            toggle_row(
+                "Ladrilhar novos espaços de trabalho automaticamente",
+                app.tiling_config.new_workspaces_tile,
+                Message::CentralToggleNewWorkspacesTile,
+            ),
+            toggle_row(
+                "Destacar borda da janela ativa (Active Hint)",
+                app.tiling_config.active_hint,
+                Message::CentralToggleActiveHint,
+            ),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 4. Touchpad & Hot Edge
+    let mut input_rows: Vec<Element<'_, Message>> = vec![
+        widget::text::heading("Entrada & Extensões").into(),
+    ];
+    if let Some(tp) = app.touchpad {
+        let tp_chips = widget::row::with_children(vec![
+            small_chip(
+                "Ativado",
+                tp == Touchpad::Enabled,
+                Message::CentralSetTouchpad(Touchpad::Enabled),
+            ),
+            small_chip(
+                "Desligar c/ mouse",
+                tp == Touchpad::DisabledOnExternalMouse,
+                Message::CentralSetTouchpad(Touchpad::DisabledOnExternalMouse),
+            ),
+            small_chip(
+                "Desativado",
+                tp == Touchpad::Disabled,
+                Message::CentralSetTouchpad(Touchpad::Disabled),
+            ),
+        ])
+        .spacing(4);
+        input_rows.push(
+            widget::row::with_children(vec![
+                widget::text::body("Touchpad").width(Length::Fill).into(),
+                tp_chips.into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+    } else {
+        input_rows.push(
+            widget::text::caption("Nenhuma configuração de touchpad disponível neste sistema.")
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+        );
+    }
+    input_rows.push(widget::divider::horizontal::default().into());
+    if services::hot_edge_installed() {
+        input_rows.push(
+            widget::row::with_children(vec![
+                widget::text::body("Hot Edge (cosmic-ext-hot-edge)")
+                    .width(Length::Fill)
+                    .into(),
+                action_btn("Configurar", Message::CentralOpenHotEdge, false),
+                widget::toggler(app.hot_edge)
+                    .on_toggle(|_| Message::CentralToggleHotEdge)
+                    .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+    } else {
+        input_rows.push(
+            widget::row::with_children(vec![
+                widget::text::body("Hot Edge (cosmic-ext-hot-edge)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(false, "Instalado", "Não instalado"),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+    }
+    items.push(card_box(widget::column::with_children(input_rows).spacing(spacing.space_xs)));
+
+    // 5. Reset tiles layout
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Grade de atalhos rápidos (Tiles)").into(),
+            widget::text::caption(
+                "Restaura os botões rápidos da Central (Brilho, Wi-Fi, Não Perturbe, Bluetooth, Energia, Modo Escuro, etc.) para o arranjo padrão.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(vec![action_btn(
+                "Restaurar layout padrão dos tiles",
+                Message::CentralResetTiles,
+                false,
+            )])
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
 
     widget::column::with_children(items).spacing(spacing.space_m).into()
 }
@@ -542,7 +1018,9 @@ fn camera_view(app: &ControlPanel) -> Element<'_, Message> {
     if let Some(hw_on) = cam.hw_switch {
         priv_rows.push(
             widget::row::with_children(vec![
-                widget::text::body("Chave física da câmera (Lenovo)").width(Length::Fill).into(),
+                widget::text::body("Chave física da câmera (Lenovo)")
+                    .width(Length::Fill)
+                    .into(),
                 status_badge(hw_on, "Ligada", "Desligada"),
             ])
             .align_y(Alignment::Center)
@@ -602,7 +1080,11 @@ fn camera_view(app: &ControlPanel) -> Element<'_, Message> {
             widget::text::heading("IriunCam (celular como webcam — opcional)")
                 .width(Length::Fill)
                 .into(),
-            status_badge(cam.iriun_installed && cam.on, "Ativo", if cam.iriun_installed { "Desligado" } else { "Não instalado" }),
+            status_badge(
+                cam.iriun_installed && cam.on,
+                "Ativo",
+                if cam.iriun_installed { "Desligado" } else { "Não instalado" },
+            ),
         ])
         .align_y(Alignment::Center)
         .into(),
@@ -639,9 +1121,11 @@ fn camera_view(app: &ControlPanel) -> Element<'_, Message> {
         iriun_rows.push(widget::row::with_children(btns).spacing(8).into());
     } else {
         iriun_rows.push(
-            widget::text::caption("Pacote opcional — instale com ./scripts/bootstrap-pc.sh --with-iriun se desejar usar o celular como webcam.")
-                .class(theme::Text::Custom(dimmed))
-                .into(),
+            widget::text::caption(
+                "Pacote opcional — instale pela aba \"Pacotes & Opcionais\" ou com ./scripts/bootstrap-pc.sh --with-iriun.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
         );
     }
     items.push(card_box(widget::column::with_children(iriun_rows).spacing(spacing.space_xs)));
@@ -700,7 +1184,9 @@ fn network_view(app: &ControlPanel) -> Element<'_, Message> {
     net_rows.push(widget::divider::horizontal::default().into());
     net_rows.push(
         widget::row::with_children(vec![
-            widget::text::body("MAC Rotativo (mac-rotativo.timer)").width(Length::Fill).into(),
+            widget::text::body("MAC Rotativo (mac-rotativo.timer)")
+                .width(Length::Fill)
+                .into(),
             status_badge(app.snapshot.mac_rotativo_active, "Ativo", "Inativo"),
         ])
         .align_y(Alignment::Center)
@@ -730,7 +1216,11 @@ fn network_view(app: &ControlPanel) -> Element<'_, Message> {
                 widget::row::with_children(vec![
                     widget::text::body(vpn.name.as_str()).width(Length::Fill).into(),
                     status_badge(on, "Conectada", "Desconectada"),
-                    action_btn(if on { "Desconectar" } else { "Conectar" }, Message::ConnectVpn(i), !on),
+                    action_btn(
+                        if on { "Desconectar" } else { "Conectar" },
+                        Message::ConnectVpn(i),
+                        !on,
+                    ),
                 ])
                 .spacing(10)
                 .align_y(Alignment::Center)
@@ -768,7 +1258,11 @@ fn displays_view(app: &ControlPanel) -> Element<'_, Message> {
                     if is_primary {
                         status_badge(true, "Principal", "")
                     } else if d.enabled && d.ddc.is_some() {
-                        action_btn("Tornar principal", Message::SetPrimaryDisplay(d.name.clone()), false)
+                        action_btn(
+                            "Tornar principal",
+                            Message::SetPrimaryDisplay(d.name.clone()),
+                            false,
+                        )
                     } else {
                         widget::space::horizontal().width(Length::Shrink).into()
                     },
@@ -810,10 +1304,12 @@ fn displays_view(app: &ControlPanel) -> Element<'_, Message> {
                         widget::text::caption(format!("Brilho DDC: {pct:.0}%"))
                             .width(Length::Fixed(120.0))
                             .into(),
-                        widget::slider(0.0..=100.0, pct, move |v| Message::SetDdcBrightness(idx, v))
-                            .on_release(Message::ApplyDdcBrightness(idx))
-                            .width(Length::Fill)
-                            .into(),
+                        widget::slider(0.0..=100.0, pct, move |v| {
+                            Message::SetDdcBrightness(idx, v)
+                        })
+                        .on_release(Message::ApplyDdcBrightness(idx))
+                        .width(Length::Fill)
+                        .into(),
                     ])
                     .spacing(10)
                     .align_y(Alignment::Center)
@@ -847,12 +1343,452 @@ fn displays_view(app: &ControlPanel) -> Element<'_, Message> {
             .align_y(Alignment::Center)
             .into(),
             widget::row::with_children(vec![
-                widget::text::body("Recorte de tela (Super+Shift+S)").width(Length::Fill).into(),
+                widget::text::body("Recorte de tela (Super+Shift+S)")
+                    .width(Length::Fill)
+                    .into(),
                 action_btn("Abrir recorte", Message::RunScreenshot, false),
             ])
             .spacing(10)
             .align_y(Alignment::Center)
             .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    widget::column::with_children(items).spacing(spacing.space_m).into()
+}
+
+fn login_view(app: &ControlPanel) -> Element<'_, Message> {
+    let spacing = theme::spacing();
+    let g = &app.greeter;
+    let opt = &app.snapshot.optional;
+    let cfg_path = data::greeter_config_path();
+
+    let mut items: Vec<Element<'_, Message>> = vec![
+        widget::row::with_children(vec![
+            widget::text::title3("Tela de Login (Greeter)").width(Length::Fill).into(),
+            action_btn("Salvar rascunho", Message::GreeterSaveOnly, false),
+            action_btn("Aplicar na tela de login", Message::GreeterApply, true),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    ];
+
+    // Status card
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Greeter isolado (aenes-greeter)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    opt.greeter_service_enabled,
+                    "Serviço ativado",
+                    if opt.greeter_isolated_installed {
+                        "Instalado (inativo)"
+                    } else {
+                        "Usando padrão do sistema"
+                    },
+                ),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            kv_row("Arquivo de configuração", cfg_path.to_string_lossy().into_owned()),
+            widget::text::caption(
+                "Mantém o binário e as configs isolados em /usr/local/bin/aenes-greeter e /var/lib/aenes-greeter/ para que atualizações do pacman nunca sobrescrevam sua tela de login. Aplica no próximo logout/boot sem encerrar a sessão atual.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // Visual & wallpaper card
+    let theme_chips = widget::row::with_children(vec![
+        small_chip("Escuro (dark)", g.theme == "dark", Message::GreeterTheme("dark".to_owned())),
+        small_chip("Claro (light)", g.theme == "light", Message::GreeterTheme("light".to_owned())),
+    ])
+    .spacing(6);
+
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Aparência & Papel de parede").into(),
+            widget::row::with_children(vec![
+                widget::text::body("Tema da tela de login").width(Length::Fill).into(),
+                theme_chips.into(),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::column::with_children(vec![
+                widget::text::caption("Papel de parede (caminho absoluto ou vazio para usar o do usuário)")
+                    .class(theme::Text::Custom(dimmed))
+                    .into(),
+                widget::text_input(
+                    "/home/usuario/Imagens/wallpaper.jpg".to_owned(),
+                    g.wallpaper.clone(),
+                )
+                .on_input(Message::GreeterWallpaperInput)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(4)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::caption(format!("Desfoque (blur): {} px", g.blur_radius))
+                    .width(Length::Fixed(165.0))
+                    .into(),
+                widget::slider(0.0..=60.0, g.blur_radius as f32, |v| {
+                    Message::GreeterBlurRadius(v.round() as u32)
+                })
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::caption(format!("Escurecimento: {:.0}%", g.dim_opacity * 100.0))
+                    .width(Length::Fixed(165.0))
+                    .into(),
+                widget::slider(0.0..=85.0, (g.dim_opacity * 100.0).round(), |v| {
+                    Message::GreeterDimOpacity(v / 100.0)
+                })
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // Clock & session card
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Relógio, Usuário & Isolamento").into(),
+            toggle_row(
+                "Relógio no formato 24 horas",
+                g.clock_24h,
+                Message::GreeterToggleClock24h,
+            ),
+            toggle_row(
+                "Exibir segundos no relógio",
+                g.show_seconds,
+                Message::GreeterToggleShowSeconds,
+            ),
+            widget::divider::horizontal::default().into(),
+            widget::row::with_children(vec![
+                widget::column::with_children(vec![
+                    widget::text::caption("Usuário pré-selecionado (vazio = último usuário)")
+                        .class(theme::Text::Custom(dimmed))
+                        .into(),
+                    widget::text_input("alexandre".to_owned(), g.default_user.clone())
+                        .on_input(Message::GreeterDefaultUserInput)
+                        .width(Length::Fill)
+                        .into(),
+                ])
+                .spacing(4)
+                .width(Length::Fill)
+                .into(),
+                widget::column::with_children(vec![
+                    widget::text::caption("Sessão padrão")
+                        .class(theme::Text::Custom(dimmed))
+                        .into(),
+                    widget::text_input("COSMIC".to_owned(), g.session.clone())
+                        .on_input(Message::GreeterSessionInput)
+                        .width(Length::Fill)
+                        .into(),
+                ])
+                .spacing(4)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(12)
+            .into(),
+            widget::divider::horizontal::default().into(),
+            toggle_row(
+                "Usar binário isolado (/usr/local/bin/aenes-greeter)",
+                g.isolated_binary,
+                Message::GreeterToggleIsolatedBinary,
+            ),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    widget::column::with_children(items).spacing(spacing.space_m).into()
+}
+
+fn optional_view(app: &ControlPanel) -> Element<'_, Message> {
+    let spacing = theme::spacing();
+    let opt = &app.snapshot.optional;
+    let repo_dir = app
+        .snapshot
+        .repo
+        .path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "$HOME/Projetos/cosmic-taskbar".to_owned());
+
+    let mut items: Vec<Element<'_, Message>> = vec![
+        widget::text::title3("Pacotes & Opcionais").into(),
+        widget::text::caption(
+            "Componentes opcionais do ambiente: verifique o status de instalação e abra, habilite ou instale no terminal.",
+        )
+        .class(theme::Text::Custom(dimmed))
+        .into(),
+    ];
+
+    // 1. Alt+Tab / Win+Tab isolado (aenes-switcher)
+    let switcher_btn = if opt.switcher_active {
+        action_btn("Reiniciar serviço", Message::RestartUserUnit("cosmic-switcher.service"), false)
+    } else if opt.switcher_installed {
+        action_btn(
+            "Habilitar e iniciar",
+            Message::EnableUserUnit("cosmic-switcher.service"),
+            true,
+        )
+    } else {
+        action_btn(
+            "Instalar via repositório",
+            Message::OpenInTerminal(
+                "Instalar aenes-switcher",
+                format!("cd \"{repo_dir}\" && ./install.sh && ./setup.sh"),
+            ),
+            true,
+        )
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Alt+Tab / Win+Tab isolado (aenes-switcher)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    opt.switcher_active,
+                    "Ativo",
+                    if opt.switcher_installed { "Instalado (inativo)" } else { "Não instalado" },
+                ),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "Alternador de janelas próprio via D-Bus (io.github.Aenes0.CosmicSwitcher) sem depender de patches no cosmic-workspaces oficial.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(vec![switcher_btn]).into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 2. IriunCam
+    let iriun_btn = if opt.iriun_installed {
+        action_btn("Gerenciar em Câmeras", Message::SelectSection(Section::Camera), false)
+    } else {
+        action_btn(
+            "Instalar no terminal",
+            Message::OpenInTerminal(
+                "Instalar IriunCam",
+                format!("cd \"{repo_dir}\" && ./scripts/bootstrap-pc.sh --with-iriun"),
+            ),
+            true,
+        )
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("IriunCam (celular como webcam)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(opt.iriun_installed, "Instalado", "Não instalado"),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "Permite usar o smartphone como webcam via USB/ADB com v4l2loopback e controle integrado na Central.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(vec![iriun_btn]).into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 3. CoolerControl
+    let cooler_btn = if opt.coolercontrol_installed {
+        action_btn(
+            "Abrir CoolerControl",
+            Message::SpawnApp("coolercontrol", vec![], "CoolerControl"),
+            false,
+        )
+    } else {
+        action_btn(
+            "Instalar no terminal",
+            Message::OpenInTerminal(
+                "Instalar CoolerControl",
+                "if command -v paru >/dev/null 2>&1; then paru -S --needed coolercontrol; elif command -v yay >/dev/null 2>&1; then yay -S --needed coolercontrol; else echo 'Instale coolercontrol via AUR (paru/yay)'; fi".to_owned(),
+            ),
+            true,
+        )
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("CoolerControl (ventoinhas & curvas térmicas)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    opt.coolercontrol_active,
+                    "Ativo",
+                    if opt.coolercontrol_installed { "Instalado (serviço parado)" } else { "Não instalado" },
+                ),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "Integrado automaticamente ao daemon economia-energia em desktops para alternar perfis silencioso/equilibrado.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(vec![cooler_btn]).into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 4. Mission Center
+    let mc_btn = if opt.mission_center_installed {
+        if opt.mission_center_flatpak {
+            action_btn(
+                "Abrir Mission Center",
+                Message::SpawnApp(
+                    "flatpak",
+                    vec!["run", "io.missioncenter.MissionCenter"],
+                    "Mission Center",
+                ),
+                false,
+            )
+        } else {
+            action_btn(
+                "Abrir Mission Center",
+                Message::SpawnApp("missioncenter", vec![], "Mission Center"),
+                false,
+            )
+        }
+    } else {
+        action_btn(
+            "Instalar no terminal",
+            Message::OpenInTerminal(
+                "Instalar Mission Center",
+                "sudo pacman -S --needed mission-center || flatpak install -y flathub io.missioncenter.MissionCenter".to_owned(),
+            ),
+            true,
+        )
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Mission Center (gerenciador de tarefas)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(opt.mission_center_installed, "Instalado", "Não instalado"),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "Monitor de CPU, GPU, memória, discos e processos estilo Gerenciador de Tarefas do Windows.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(vec![mc_btn]).into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 5. Brave
+    let brave_btns: Vec<Element<'_, Message>> = if opt.brave_installed {
+        vec![
+            action_btn("Abrir Brave", Message::SpawnApp("brave", vec![], "Brave"), false),
+            action_btn("Corrigir ícones PWA", Message::RunBravePwaFix, false),
+        ]
+    } else {
+        vec![action_btn(
+            "Instalar no terminal",
+            Message::OpenInTerminal(
+                "Instalar Brave",
+                "if command -v paru >/dev/null 2>&1; then paru -S --needed brave-bin; elif command -v yay >/dev/null 2>&1; then yay -S --needed brave-bin; else sudo pacman -S --needed brave-bin; fi".to_owned(),
+            ),
+            true,
+        )]
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Brave Browser").width(Length::Fill).into(),
+                status_badge(opt.brave_installed, "Instalado", "Não instalado"),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "Navegador com suporte ao watcher automático de correção de ícones para Web Apps (PWAs).",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(brave_btns).spacing(8).into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 6. MAC Rotativo
+    let mac_btn = if opt.mac_rotativo_active {
+        action_btn(
+            "Desabilitar no terminal",
+            Message::OpenInTerminal(
+                "Desabilitar MAC Rotativo",
+                "sudo systemctl disable --now mac-rotativo.timer".to_owned(),
+            ),
+            false,
+        )
+    } else if opt.mac_rotativo_installed {
+        action_btn(
+            "Habilitar no terminal",
+            Message::OpenInTerminal(
+                "Habilitar MAC Rotativo",
+                "sudo systemctl enable --now mac-rotativo.timer".to_owned(),
+            ),
+            true,
+        )
+    } else {
+        action_btn(
+            "Ver status / configurar no terminal",
+            Message::OpenInTerminal(
+                "MAC Rotativo",
+                "systemctl status mac-rotativo.timer || echo 'mac-rotativo.timer não instalado em /etc/systemd/system/'".to_owned(),
+            ),
+            false,
+        )
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("MAC Rotativo (mac-rotativo.timer)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    opt.mac_rotativo_active,
+                    "Ativo",
+                    if opt.mac_rotativo_installed { "Instalado (inativo)" } else { "Não instalado" },
+                ),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "Timer systemd para rotação periódica de endereço MAC em interfaces de rede.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(vec![mac_btn]).into(),
         ])
         .spacing(spacing.space_xs),
     ));

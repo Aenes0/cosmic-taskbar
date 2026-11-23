@@ -1,0 +1,23 @@
+[Unit]
+Description=COSMIC Switcher (Alt+Tab / Super+Tab isolado de cosmic-workspaces)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+BusName=io.github.Aenes0.CosmicSwitcher
+ExecStart=@bindir@/cosmic-taskbar switcher
+WatchdogSec=20
+Restart=on-failure
+RestartSec=2
+Nice=5
+CPUWeight=40
+IOWeight=20
+MemoryHigh=200M
+MemoryMax=400M
+TasksMax=64
+OOMScoreAdjust=500
+
+[Install]
+WantedBy=graphical-session.target
