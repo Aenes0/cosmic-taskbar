@@ -488,8 +488,10 @@ impl App {
                 if shows(BarItem::Privacy) == Show::Never {
                     return None;
                 }
-                let count = usize::from(!self.privacy.camera.is_empty())
-                    + usize::from(!self.privacy.microphone.is_empty());
+                let camera_in_privacy =
+                    !self.privacy.camera.is_empty() && !active_tiles.contains_key(&Tile::Camera);
+                let count =
+                    usize::from(camera_in_privacy) + usize::from(!self.privacy.microphone.is_empty());
                 (count > 0).then_some(count as f32 * icon_unit)
             }
             BarItem::Notifications => {
@@ -746,7 +748,9 @@ impl App {
                 BarItem::Privacy => {
                     if shows(BarItem::Privacy) != Show::Never {
                         let privacy = &self.privacy;
-                        if !privacy.camera.is_empty() {
+                        // Avoid duplicating the camera icon when Tile::Camera is
+                        // already shown on the bar (it turns green itself when in use).
+                        if !privacy.camera.is_empty() && !active_tiles.contains_key(&Tile::Camera) {
                             let green: fn(&cosmic::Theme) -> iced::Color =
                                 |theme| theme.cosmic().success_color().into();
                             icons.push(at(
@@ -820,7 +824,14 @@ impl App {
                             Tile::Camera => Page::Camera,
                             _ => Page::Main,
                         };
-                        icons.push(at(panel_icon(state.icon), page));
+                        let glyph = if tile == Tile::Camera && !self.privacy.camera.is_empty() {
+                            let green: fn(&cosmic::Theme) -> iced::Color =
+                                |theme| theme.cosmic().success_color().into();
+                            colored(state.icon, Some(green))
+                        } else {
+                            panel_icon(state.icon)
+                        };
+                        icons.push(at(glyph, page));
                     }
                 }
                 BarItem::Network => {
