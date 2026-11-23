@@ -102,7 +102,7 @@ pub struct Panels {
     /// Asked before the screens were known.
     pending: Option<Request>,
     /// The panel that closed last, where, its page (for the Central), and when.
-    closed: Option<(Which, String, Option<&'static str>, Instant)>,
+    closed: Option<(Which, String, Option<String>, Instant)>,
     /// When a panel last opened.
     opened_at: Option<Instant>,
     /// The bar's edge, read once: moving the bar restarts its applets, not this.
@@ -174,15 +174,16 @@ impl Panels {
             .closed
             .as_ref()
             .filter(|(_, _, _, at)| at.elapsed() < JUST_CLOSED);
-        // Clicking the `^` shortcut while the Background page is open closes it
-        // on focus loss just before the D-Bus Open("background") arrives: do not reopen.
+        // Clicking the same bar icon (system page, `^`, or tray app) while its
+        // popup is open closes it on focus loss right before the D-Bus Open
+        // arrives: treat that as a toggle-close and do not reopen.
         if shown.is_none()
             && request.which == Which::Central
-            && request.page.as_deref() == Some(central::Page::Background.name())
+            && request.page.is_some()
             && recent_closed.is_some_and(|(which, output, page, _)| {
                 *which == Which::Central
                     && output.as_str() == request.output.as_str()
-                    && *page == Some(central::Page::Background.name())
+                    && page.as_deref() == request.page.as_deref()
             })
         {
             return Task::none();

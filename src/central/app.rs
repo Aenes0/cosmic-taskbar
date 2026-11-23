@@ -421,8 +421,9 @@ pub struct App {
     pub(crate) background_editing: bool,
     /// Where the back button in `Page::TrayMenu` returns to (`Main` by default).
     pub(crate) tray_menu_return: Option<Page>,
-    /// The page that was open right before closing (so the host can toggle `^`).
-    last_closed_page: Option<Page>,
+    /// The page (or `tray:<key>`) that was open right before closing (so the
+    /// host can toggle any icon closed on a second click).
+    last_closed_page: Option<String>,
     /// When an icon of a background app (or the `^` arrow) was last pressed on the bar.
     tray_pressed: Option<std::time::Instant>,
 }
@@ -504,11 +505,12 @@ impl App {
                 .on_press_down(on_press)
                 .into()
         };
-        // Each system icon has its own hover highlight; left click does NOT
-        // open the Central panel (only the clock does), while right click
-        // still opens the icon's own page.
+        // Each system icon has its own hover highlight and opens its own
+        // dedicated page on left or right click (never the main Central panel;
+        // only the clock opens Central). Clicking the same icon again toggles
+        // its popup closed.
         let at = |content: Element<'static, Message>, page: Page| -> Element<'static, Message> {
-            widget::mouse_area(icon_btn(content, Message::None))
+            widget::mouse_area(icon_btn(content, Message::OpenAt(page)))
                 .on_right_press(Message::OpenAt(page))
                 .into()
         };
@@ -575,9 +577,9 @@ impl App {
                         if !privacy.camera.is_empty() {
                             let green: fn(&cosmic::Theme) -> iced::Color =
                                 |theme| theme.cosmic().success_color().into();
-                            icons.push(icon_btn(
+                            icons.push(at(
                                 colored("camera-web-symbolic", Some(green)),
-                                Message::None,
+                                Page::Camera,
                             ));
                         }
                         if !privacy.microphone.is_empty() {
@@ -658,7 +660,7 @@ impl App {
                     if self.volume.is_some() && shows(BarItem::Volume) != Show::Never {
                         let area = widget::mouse_area(icon_btn(
                             panel_icon(self.volume_icon()),
-                            Message::None,
+                            Message::OpenAt(Page::Sound),
                         ))
                         .on_right_press(Message::OpenAt(Page::Sound))
                         .on_scroll(|delta| Message::ScrollVolume(scroll_steps(delta)))
@@ -692,7 +694,7 @@ impl App {
                         } else {
                             glyph
                         };
-                        let area = widget::mouse_area(icon_btn(content, Message::None))
+                        let area = widget::mouse_area(icon_btn(content, Message::OpenAt(Page::Power)))
                             .on_right_press(Message::OpenAt(Page::Power))
                             .on_scroll(|delta| Message::ScrollBrightness(scroll_steps(delta)));
                         icons.push(area.into());
@@ -825,8 +827,8 @@ impl App {
     fn close_popup(&mut self) -> app::Task<Message> {
         let seen = self.mark_seen();
         self.leave_edit(false);
+        self.last_closed_page = self.page_name();
         self.background.close();
-        self.last_closed_page = self.page;
         self.background_editing = false;
         self.tray_menu_return = None;
         self.page = None;
@@ -837,14 +839,21 @@ impl App {
         Task::batch([seen, destroy])
     }
 
-    /// The page currently shown, by its wire name.
-    pub(crate) fn page_name(&self) -> Option<&'static str> {
-        self.page.map(Page::name)
+    /// The page currently shown, by its wire name (including `tray:<key>`).
+    pub(crate) fn page_name(&self) -> Option<String> {
+        if self.page == Some(Page::TrayMenu) {
+            return self
+                .background
+                .open
+                .and_then(|id| self.background.key_of(id))
+                .map(|key| format!("tray:{key}"));
+        }
+        self.page.map(|p| p.name().to_owned())
     }
 
     /// The page that was shown right before the panel closed.
-    pub(crate) fn last_page_name(&self) -> Option<&'static str> {
-        self.last_closed_page.map(Page::name)
+    pub(crate) fn last_page_name(&self) -> Option<String> {
+        self.last_closed_page.clone()
     }
 
     /// The panel, for the panels' host: never on the bar, never opening by
@@ -1038,9 +1047,10 @@ impl App {
         wants_a11y(self.hosted, &self.tiles, |tile| self.panel_icons.get(BarItem::Tile(tile)) != Show::Never)
     }
 
-    /// Turns to a page while it shows.
+    /// Turns to a page while it shows; asking for the same page (or same tray
+    /// app menu) that is already open toggles the popup closed.
     pub(crate) fn turn_to(&mut self, page: &str) -> app::Task<Message> {
-        if page == Page::Background.name() && self.page == Some(Page::Background) {
+        if self.page_name().as_deref() == Some(page) {
             return self.close_popup();
         }
         if let Some(key) = page.strip_prefix("tray:") {
@@ -1608,8 +1618,8 @@ impl cosmic::Application for App {
                     self.closed_at = Some(std::time::Instant::now());
                     let seen = self.mark_seen();
                     self.leave_edit(false);
+                    self.last_closed_page = self.page_name();
                     self.background.close();
-                    self.last_closed_page = self.page;
                     self.background_editing = false;
                     self.tray_menu_return = None;
                     self.popup = None;
