@@ -121,9 +121,12 @@ impl Background {
             .map(|(id, _)| *id)
     }
 
-    /// Whether the app is only a menu: no action of its own.
+    /// Whether clicking the app should open its menu (true when `ItemIsMenu`
+    /// is set or the app exports a DBusMenu, as libappindicator/Electron and
+    /// many Qt tray apps treat `Activate(0, 0)` as a no-op).
     pub fn is_menu(&self, id: usize) -> Option<bool> {
-        Some(self.items.get(&id)?.item.is_menu())
+        let item = &self.items.get(&id)?.item;
+        Some(item.is_menu() || item.menu_proxy().is_some())
     }
 
     /// Whether the app shows on the bar: new apps show by default unless explicitly hidden.

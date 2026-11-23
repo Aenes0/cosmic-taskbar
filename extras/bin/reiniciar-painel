@@ -1,12 +1,23 @@
 #!/bin/sh
-# Reinicia o cosmic-panel sem sair da sessão (cosmic-session o relança sozinho).
+# Reinicia o cosmic-panel sem sair da sessão (cosmic-session o relança sozinho;
+# se atingir o limite de reinício do cosmic-session, sobe via systemd-run --user).
 old=$(pgrep -x cosmic-panel | head -1)
-[ -z "$old" ] && { echo "cosmic-panel nao esta rodando"; exit 1; }
-kill "$old"
-for i in 1 2 3 4 5 6 7 8 9 10; do
-    sleep 1
-    new=$(pgrep -x cosmic-panel | head -1)
-    [ -n "$new" ] && [ "$new" != "$old" ] && break
-done
+if [ -n "$old" ]; then
+    kill "$old"
+    for i in 1 2 3 4 5; do
+        sleep 1
+        new=$(pgrep -x cosmic-panel | head -1)
+        [ -n "$new" ] && [ "$new" != "$old" ] && break
+    done
+fi
+if [ -z "$new" ] || [ "$new" = "$old" ]; then
+    systemctl --user reset-failed cosmic-panel-manual.service 2>/dev/null || true
+    systemd-run --user --unit=cosmic-panel-manual --collect cosmic-panel >/dev/null 2>&1
+    for i in 1 2 3 4 5; do
+        sleep 1
+        new=$(pgrep -x cosmic-panel | head -1)
+        [ -n "$new" ] && [ "$new" != "$old" ] && break
+    done
+fi
 sleep 2
-echo "cosmic-panel: $old -> ${new:-nenhum}; applets: $(pgrep -fc 'cosmic-taskbar')"
+echo "cosmic-panel: ${old:-nenhum} -> ${new:-nenhum}; applets: $(pgrep -fc 'cosmic-taskbar')"
