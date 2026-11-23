@@ -2321,7 +2321,6 @@ impl App {
     /// and in edit mode lets the user reorder/hide background apps as well as
     /// reorder and configure every system bar icon.
     pub fn background_page(&self) -> Element<'_, Message> {
-        use crate::central::layout::BarItem;
         let tx = crate::central::texts::texts();
         let t = strings();
         let spacing = theme::spacing();
@@ -2493,40 +2492,6 @@ impl App {
                             .into(),
                         up,
                         down,
-                        choices.into(),
-                    ])
-                    .spacing(spacing.space_xxs)
-                    .align_y(Alignment::Center),
-                )
-                .into(),
-            );
-        }
-        // Clock stays anchored at the bar's end (toggleable Always / Never).
-        {
-            let item = BarItem::Clock;
-            let current = self.panel_icons.get(item);
-            let choices = widget::row::with_children(
-                item.choices()
-                    .iter()
-                    .map(|&show| -> Element<'_, Message> {
-                        button::custom(widget::text::caption(show.name()))
-                            .padding([4, 6])
-                            .class(chip_class(show == current))
-                            .on_press(Message::SetBarIcon(item, show))
-                            .into()
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .spacing(3)
-            .align_y(Alignment::Center);
-            body.push(
-                padded_control(
-                    widget::row::with_children(vec![
-                        widget::icon::icon(icon(item.icon())).size(16).into(),
-                        widget::text::body(item.name())
-                            .ellipsize(one_line())
-                            .width(Length::Fill)
-                            .into(),
                         choices.into(),
                     ])
                     .spacing(spacing.space_xxs)

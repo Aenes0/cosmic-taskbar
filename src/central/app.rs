@@ -434,8 +434,8 @@ impl App {
         self.bar_button(true)
     }
 
-    /// System bar items that can be shown and reordered on the bar (all
-    /// system items except the clock, which stays anchored at the bar's end).
+    /// System bar items that can be shown and reordered on the bar, including
+    /// the clock (so items like notifications or power can be placed after it).
     pub(crate) fn reorderable_bar_items(&self) -> Vec<BarItem> {
         let mut items = vec![BarItem::Privacy, BarItem::Notifications];
         for tile in Tile::ALL {
@@ -452,6 +452,7 @@ impl App {
         if self.tile_state(Tile::Power).is_some() {
             items.push(BarItem::Tile(Tile::Power));
         }
+        items.push(BarItem::Clock);
         items
     }
 
@@ -700,37 +701,36 @@ impl App {
                         icons.push(area.into());
                     }
                 }
-                BarItem::Clock => {}
+                BarItem::Clock => {
+                    if shows(BarItem::Clock) != Show::Never {
+                        let (time, date) = if self.clock.0.is_empty() {
+                            crate::central::calendar::bar_lines()
+                        } else {
+                            self.clock.clone()
+                        };
+                        let tight = iced::widget::text::LineHeight::Relative(1.05);
+                        let lines: Element<'_, Message> = widget::column::with_children(vec![
+                            widget::text::body(time).line_height(tight).into(),
+                            widget::text::caption(date).line_height(tight).into(),
+                        ])
+                        .align_x(Alignment::Center)
+                        .into();
+                        let button = button::custom(lines)
+                            .padding(if horizontal { [0, major] } else { [major, 0] })
+                            .class(theme::Button::AppletIcon);
+                        let clock_el: Element<'_, Message> = if in_corner {
+                            button.on_press_down(Message::CornerPress).into()
+                        } else {
+                            button.on_press(Message::None).into()
+                        };
+                        icons.push(clock_el);
+                    }
+                }
             }
         }
 
-        // The clock last, as Windows 11's: its own button, and the ONLY item
-        // whose left click opens the Central panel.
-        let clock: Option<Element<'_, Message>> = (shows(BarItem::Clock) != Show::Never).then(|| {
-            let (time, date) = if self.clock.0.is_empty() {
-                crate::central::calendar::bar_lines()
-            } else {
-                self.clock.clone()
-            };
-            let tight = iced::widget::text::LineHeight::Relative(1.05);
-            let lines: Element<'_, Message> = widget::column::with_children(vec![
-                widget::text::body(time).line_height(tight).into(),
-                widget::text::caption(date).line_height(tight).into(),
-            ])
-            .align_x(Alignment::Center)
-            .into();
-            let button = button::custom(lines)
-                .padding(if horizontal { [0, major] } else { [major, 0] })
-                .class(theme::Button::AppletIcon);
-            if in_corner {
-                button.on_press_down(Message::CornerPress).into()
-            } else {
-                button.on_press(Message::None).into()
-            }
-        });
-
         let item_gap = (self.bar_spacing.gap() / 2).max(1);
-        let icons: Element<'_, Message> = if horizontal {
+        if horizontal {
             widget::row::with_children(icons)
                 .spacing(item_gap)
                 .align_y(Alignment::Center)
@@ -740,17 +740,6 @@ impl App {
                 .spacing(item_gap)
                 .align_x(Alignment::Center)
                 .into()
-        };
-        match clock {
-            Some(clock) if horizontal => widget::row::with_children(vec![icons, clock])
-                .spacing(major / 2)
-                .align_y(Alignment::Center)
-                .into(),
-            Some(clock) => widget::column::with_children(vec![icons, clock])
-                .spacing(major / 2)
-                .align_x(Alignment::Center)
-                .into(),
-            None => icons,
         }
     }
 
