@@ -657,7 +657,12 @@ pub fn open_in_terminal(title: &str, shell_cmd: &str) -> String {
 
 pub fn spawn_app(program: &str, args: &[&str], label: &str) -> String {
     match std::process::Command::new(program).args(args).spawn() {
-        Ok(_) => format!("{label} iniciado."),
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                _ = child.wait();
+            });
+            format!("{label} iniciado.")
+        }
         Err(err) => format!("Não foi possível abrir {label}: {err}"),
     }
 }

@@ -29,6 +29,7 @@ use crate::logi::config as osd_config;
 use super::{
     ControlPanel, Message, Section, data,
     power_config::{self, PowerProfileKind, ProfileTuning},
+    screenshot_config::{self, OpenMode as ScreenshotOpenMode},
 };
 
 fn dimmed(theme: &cosmic::Theme) -> iced::widget::text::Style {
@@ -2442,15 +2443,163 @@ fn displays_view(app: &ControlPanel) -> Element<'_, Message> {
             .spacing(10)
             .align_y(Alignment::Center)
             .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // Screen snipping (Win+Shift+S / print-recorte)
+    let sc = &app.screenshot_config;
+    let mode_chips = widget::row::with_children(
+        ScreenshotOpenMode::ALL
+            .into_iter()
+            .map(|m| small_chip(m.label(), sc.open_mode == m, Message::ScreenshotOpenMode(m)))
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    let tool_chips = widget::row::with_children(
+        screenshot_config::SATTY_TOOLS
+            .iter()
+            .map(|&(id, lbl)| {
+                small_chip(
+                    lbl,
+                    sc.satty_tool == id,
+                    Message::ScreenshotSattyTool(id.to_owned()),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    let color_chips = widget::row::with_children(
+        screenshot_config::BORDER_COLOR_PRESETS
+            .iter()
+            .map(|&(hex, lbl)| {
+                small_chip(
+                    lbl,
+                    sc.border_color.eq_ignore_ascii_case(hex),
+                    Message::ScreenshotBorderColor(hex.to_owned()),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    let width_chips = widget::row::with_children(
+        [1u32, 2, 3, 4, 6]
+            .into_iter()
+            .map(|w| {
+                button::custom(widget::text::caption(format!("{w}px")))
+                    .padding([4, 9])
+                    .class(chip_class(sc.border_width == w))
+                    .on_press(Message::ScreenshotBorderWidth(w))
+                    .into()
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+    let timeout_chips = widget::row::with_children(
+        [(60u32, "1m"), (180, "3m"), (600, "10m"), (1800, "30m")]
+            .into_iter()
+            .map(|(s, lbl)| {
+                small_chip(lbl, sc.notify_timeout_secs == s, Message::ScreenshotTimeoutSecs(s))
+            })
+            .collect::<Vec<_>>(),
+    )
+    .spacing(4);
+
+    items.push(card_box(
+        widget::column::with_children(vec![
             widget::row::with_children(vec![
-                widget::text::body("Recorte de tela (Super+Shift+S)")
+                widget::text::heading("Recorte de tela (Win+Shift+S)")
                     .width(Length::Fill)
                     .into(),
-                action_btn("Abrir recorte", Message::RunScreenshot, false),
+                action_btn("Abrir pasta", Message::OpenScreenshotsDir, false),
+                action_btn("Restaurar padrão", Message::ScreenshotReset, false),
+                action_btn("Testar recorte", Message::RunScreenshot, true),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::column::with_children(vec![
+                widget::text::caption("Pasta de destino (vazio = ~/Imagens/Screenshots)")
+                    .class(theme::Text::Custom(dimmed))
+                    .into(),
+                widget::text_input(
+                    "Ex: ~/Imagens/Screenshots".to_owned(),
+                    sc.save_dir.clone(),
+                )
+                .on_input(Message::ScreenshotSaveDirInput)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(4)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Após capturar").width(Length::Fill).into(),
+                mode_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Ferramenta inicial do Satty").width(Length::Fill).into(),
+                tool_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Cor da borda de seleção").width(Length::Fill).into(),
+                color_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Espessura da borda").width(Length::Fill).into(),
+                width_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::caption(format!("Escurecimento do fundo: {}%", sc.overlay_opacity))
+                    .width(Length::Fixed(210.0))
+                    .into(),
+                widget::slider(0.0_f32..=85.0_f32, sc.overlay_opacity as f32, |v| {
+                    Message::ScreenshotOverlayOpacity(v.round() as u32)
+                })
+                .step(5.0_f32)
+                .width(Length::Fill)
+                .into(),
             ])
             .spacing(10)
             .align_y(Alignment::Center)
             .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Tempo de espera das ações da notificação")
+                    .width(Length::Fill)
+                    .into(),
+                timeout_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::divider::horizontal::default().into(),
+            toggle_row(
+                "Copiar captura automaticamente para a área de transferência",
+                sc.copy_clipboard,
+                Message::ScreenshotToggleCopy,
+            ),
+            toggle_row(
+                "Tocar som ao capturar",
+                sc.play_sound,
+                Message::ScreenshotToggleSound,
+            ),
+            kv_row(
+                "Arquivo de configuração",
+                screenshot_config::ScreenshotConfig::config_path()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         ])
         .spacing(spacing.space_xs),
     ));

@@ -9,9 +9,11 @@
 
 mod data;
 mod power_config;
+mod screenshot_config;
 mod views;
 
 use power_config::{CpuTopologyInfo, PowerProfileKind, PowerProfilesConfig};
+use screenshot_config::{OpenMode as ScreenshotOpenMode, ScreenshotConfig};
 
 use cosmic::{
     Element, Task, app,
@@ -230,6 +232,17 @@ pub enum Message {
     RunWallpapers,
     RunBravePwaFix,
     RunScreenshot,
+    OpenScreenshotsDir,
+    ScreenshotSaveDirInput(String),
+    ScreenshotToggleCopy,
+    ScreenshotOpenMode(ScreenshotOpenMode),
+    ScreenshotSattyTool(String),
+    ScreenshotBorderColor(String),
+    ScreenshotBorderWidth(u32),
+    ScreenshotOverlayOpacity(u32),
+    ScreenshotTimeoutSecs(u32),
+    ScreenshotToggleSound,
+    ScreenshotReset,
     RefreshDisplays,
     // Login (Greeter)
     GreeterWallpaperInput(String),
@@ -297,9 +310,10 @@ pub struct ControlPanel {
     power_config: PowerProfilesConfig,
     editing_profile: PowerProfileKind,
     cpu_topology: CpuTopologyInfo,
-    // Notifications & Devices OSD
+    // Notifications & Devices OSD & Screenshot
     notif_config: NotifConfig,
     osd_config: osd_config::Config,
+    screenshot_config: ScreenshotConfig,
     // Login (Greeter)
     greeter: data::GreeterConfig,
     busy: bool,
@@ -362,6 +376,12 @@ impl ControlPanel {
     fn persist_greeter_config(&mut self) {
         if let Err(err) = data::save_greeter_config(&self.greeter) {
             self.notice = Some(err);
+        }
+    }
+
+    fn persist_screenshot_config(&mut self) {
+        if let Err(err) = self.screenshot_config.save() {
+            self.notice = Some(format!("Falha ao salvar config de captura: {err}"));
         }
     }
 
@@ -447,6 +467,7 @@ impl cosmic::Application for ControlPanel {
             cpu_topology,
             notif_config: NotifConfig::load(),
             osd_config: osd_config::load_or_default(),
+            screenshot_config: ScreenshotConfig::load(),
             greeter: data::load_greeter_config(),
             busy: false,
             notice: None,
@@ -1231,7 +1252,61 @@ impl cosmic::Application for ControlPanel {
             Message::RunScreenshot => {
                 let home = std::env::var("HOME").unwrap_or_default();
                 let bin = std::path::PathBuf::from(&home).join(".local/bin/print-recorte");
-                _ = std::process::Command::new(bin).spawn();
+                self.notice = Some(data::spawn_app(
+                    &bin.to_string_lossy(),
+                    &[],
+                    "Recorte de tela",
+                ));
+            }
+            Message::OpenScreenshotsDir => {
+                let dir = self.screenshot_config.resolved_dir();
+                _ = std::fs::create_dir_all(&dir);
+                self.notice = Some(data::spawn_app(
+                    "xdg-open",
+                    &[&dir.to_string_lossy()],
+                    "Pasta de capturas",
+                ));
+            }
+            Message::ScreenshotSaveDirInput(val) => {
+                self.screenshot_config.save_dir = val;
+                self.persist_screenshot_config();
+            }
+            Message::ScreenshotToggleCopy => {
+                self.screenshot_config.copy_clipboard = !self.screenshot_config.copy_clipboard;
+                self.persist_screenshot_config();
+            }
+            Message::ScreenshotOpenMode(mode) => {
+                self.screenshot_config.open_mode = mode;
+                self.persist_screenshot_config();
+            }
+            Message::ScreenshotSattyTool(tool) => {
+                self.screenshot_config.satty_tool = tool;
+                self.persist_screenshot_config();
+            }
+            Message::ScreenshotBorderColor(color) => {
+                self.screenshot_config.border_color = color;
+                self.persist_screenshot_config();
+            }
+            Message::ScreenshotBorderWidth(w) => {
+                self.screenshot_config.border_width = w.clamp(1, 6);
+                self.persist_screenshot_config();
+            }
+            Message::ScreenshotOverlayOpacity(pct) => {
+                self.screenshot_config.overlay_opacity = pct.clamp(0, 85);
+                self.persist_screenshot_config();
+            }
+            Message::ScreenshotTimeoutSecs(secs) => {
+                self.screenshot_config.notify_timeout_secs = secs.clamp(30, 3600);
+                self.persist_screenshot_config();
+            }
+            Message::ScreenshotToggleSound => {
+                self.screenshot_config.play_sound = !self.screenshot_config.play_sound;
+                self.persist_screenshot_config();
+            }
+            Message::ScreenshotReset => {
+                self.screenshot_config = ScreenshotConfig::default();
+                self.persist_screenshot_config();
+                self.notice = Some("Configurações de recorte (Win+Shift+S) restauradas para o padrão.".to_owned());
             }
             Message::RefreshDisplays => {
                 self.displays = None;

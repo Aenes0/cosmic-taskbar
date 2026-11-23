@@ -16,7 +16,10 @@ pub mod place;
 pub mod service;
 mod watchdog;
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use cosmic::{
     Element, Task, app,
@@ -28,14 +31,27 @@ use cosmic::{
         keyboard::{self, Key, key::Named},
         platform_specific::{
             runtime::wayland::layer_surface::{IcedMargin, IcedOutput, SctkLayerSurfaceSettings},
-            shell::commands::layer_surface::{Anchor, KeyboardInteractivity, Layer, get_layer_surface},
+            shell::commands::layer_surface::{
+                Anchor, KeyboardInteractivity, Layer, destroy_layer_surface, get_layer_surface,
+            },
         },
         window,
     },
     widget,
 };
 
-use crate::central::{app as central, app::App, monitor, monitor::Monitor};
+use crate::central::{
+    app as central,
+    app::App,
+    monitor,
+    monitor::Monitor,
+    notifications::{
+        self,
+        config::{NotifConfig, NotifPosition},
+        toast::{self, Toast},
+    },
+    services::DO_NOT_DISTURB,
+};
 use place::{Request, Step, Which};
 
 pub const APP_ID: &str = "io.github.Aenes0.CosmicCentral.Panels";
@@ -76,6 +92,14 @@ pub enum Message {
     Nothing,
     /// Time to read the GPU for the bar's applets (see `monitor::share_gpu`).
     ShareGpu,
+    /// Notification history changed on D-Bus: check for new floating toasts.
+    NotificationsChanged,
+    /// Periodic expiry check while floating toasts are visible.
+    ToastTick,
+    /// Dismiss a floating toast card.
+    ToastDismiss(u32),
+    /// Invoke a notification action button from a floating toast card.
+    ToastInvoke(u32, String),
 }
 
 /// The panel showing: which, on which screen, its surface and since when.
@@ -115,6 +139,14 @@ pub struct Panels {
     whole_screen: bool,
     /// When the GPU's energy counter was last read for the applets.
     gpu_energy_at: Option<Instant>,
+    /// Active floating notification toasts (newest first).
+    toasts: Vec<Toast>,
+    /// Layer-shell surface currently hosting floating toasts and its anchor position.
+    toast_surface: Option<(window::Id, NotifPosition)>,
+    /// Notification IDs already seen so old history never pops up as toasts.
+    seen_toast_ids: HashSet<u32>,
+    /// Live user configuration for floating notification toasts.
+    notif_config: NotifConfig,
 }
 
 /// Starts the host, showing `request` once up.
@@ -291,6 +323,44 @@ impl Panels {
         }
     }
 
+    /// Creates, repositions, or destroys the floating toast layer surface to match `self.toasts`.
+    fn sync_toast_surface(&mut self) -> app::Task<Message> {
+        if self.toasts.is_empty() {
+            return match self.toast_surface.take() {
+                Some((id, _)) => destroy_layer_surface(id),
+                None => Task::none(),
+            };
+        }
+        let wanted_pos = self.notif_config.position;
+        if let Some((_, cur_pos)) = self.toast_surface
+            && cur_pos == wanted_pos
+        {
+            return Task::none();
+        }
+        let mut tasks = Vec::new();
+        if let Some((old_id, _)) = self.toast_surface.take() {
+            tasks.push(destroy_layer_surface(old_id));
+        }
+        let id = window::Id::unique();
+        let (anchor, margin) = toast::surface_placement(wanted_pos);
+        let surface = get_layer_surface(SctkLayerSurfaceSettings {
+            id,
+            layer: Layer::Overlay,
+            keyboard_interactivity: KeyboardInteractivity::None,
+            anchor,
+            output: IcedOutput::Active,
+            namespace: "central-notifications-toast".into(),
+            margin,
+            size: None,
+            exclusive_zone: 0,
+            size_limits: Limits::NONE.min_width(1.0).min_height(1.0),
+            ..Default::default()
+        });
+        self.toast_surface = Some((id, wanted_pos));
+        tasks.push(surface);
+        Task::batch(tasks)
+    }
+
     /// A panel that closed itself (it ran something, say) is no longer shown.
     fn follow_child(&mut self) {
         let Some(shown) = &self.shown else {
@@ -326,6 +396,7 @@ impl cosmic::Application for Panels {
         // (A layer surface blurs only with Auto::System: none is asked for;
         // measured, turning this off too changed nothing.)
         core.set_auto_blur(cosmic::core::Auto::Popup.into());
+        let initial_seen: HashSet<u32> = notifications::load().into_iter().map(|n| n.id).collect();
         let panels = Self {
             central: App::hosted(core.clone()),
             monitor: Monitor::hosted(core.clone()),
@@ -338,6 +409,10 @@ impl cosmic::Application for Panels {
             bar: bar_anchor(),
             whole_screen: std::env::var("COSMIC_PANELS_SURFACE").as_deref() == Ok("screen"),
             gpu_energy_at: None,
+            toasts: Vec::new(),
+            toast_surface: None,
+            seen_toast_ids: initial_seen,
+            notif_config: NotifConfig::load(),
         };
         // Which monitors have DDC, for the brightness sliders: found once,
         // well after starting, if not known from before (see DetectDdc).
@@ -433,6 +508,56 @@ impl cosmic::Application for Panels {
                     cosmic::action::app(Message::Nothing)
                 });
             }
+            Message::NotificationsChanged => {
+                self.notif_config = NotifConfig::load();
+                let dnd = DO_NOT_DISTURB.get();
+                let list = notifications::load();
+                let live_ids: HashSet<u32> = list
+                    .iter()
+                    .filter(|n| !n.restored)
+                    .map(|n| n.id)
+                    .collect();
+                // Remove toasts whose notification was already closed/dismissed.
+                self.toasts.retain(|t| live_ids.contains(&t.notification.id));
+                let mut added = false;
+                for n in list.into_iter().rev() {
+                    if n.restored || n.seen || self.seen_toast_ids.contains(&n.id) {
+                        continue;
+                    }
+                    self.seen_toast_ids.insert(n.id);
+                    if !dnd {
+                        self.toasts.retain(|t| t.notification.id != n.id);
+                        self.toasts.insert(0, Toast::new(n));
+                        added = true;
+                    }
+                }
+                self.toasts.truncate(toast::MAX_TOASTS);
+                if added || self.toast_surface.is_some() {
+                    return self.sync_toast_surface();
+                }
+            }
+            Message::ToastTick => {
+                let timeout = self.notif_config.timeout_secs;
+                let before = self.toasts.len();
+                self.toasts.retain(|t| !t.is_expired(timeout));
+                if self.toasts.len() != before {
+                    return self.sync_toast_surface();
+                }
+            }
+            Message::ToastDismiss(id) => {
+                self.toasts.retain(|t| t.notification.id != id);
+                return self.sync_toast_surface();
+            }
+            Message::ToastInvoke(id, action) => {
+                self.toasts.retain(|t| t.notification.id != id);
+                let sync = self.sync_toast_surface();
+                let invoke = Task::future(async move {
+                    notifications::invoke(id, action).await;
+                    notifications::dismiss(vec![id]).await;
+                    cosmic::action::app(Message::Nothing)
+                });
+                return Task::batch([sync, invoke]);
+            }
         }
         Task::none()
     }
@@ -461,6 +586,11 @@ impl cosmic::Application for Panels {
         ];
         // The GPU, read once here for every bar's applet, as often as they read.
         subscriptions.push(iced::time::every(monitor::SHARE_GPU_EVERY).map(|_| Message::ShareGpu));
+        // Always listen for incoming notifications to render customizable floating toasts.
+        subscriptions.push(notifications::subscription().map(|()| Message::NotificationsChanged));
+        if !self.toasts.is_empty() && self.notif_config.timeout_secs > 0 {
+            subscriptions.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::ToastTick));
+        }
         // Under systemd's watchdog only: the beat, from this loop.
         if let Some(period) = watchdog::period() {
             subscriptions.push(iced::time::every(period).map(|_| Message::Beat));
@@ -505,6 +635,22 @@ impl cosmic::Application for Panels {
     }
 
     fn view_window(&self, id: window::Id) -> Element<'_, Message> {
+        if self.toast_surface.is_some_and(|(tid, _)| tid == id) {
+            if self.toasts.is_empty() {
+                return widget::text("").into();
+            }
+            let stack = toast::view(
+                &self.toasts,
+                &self.notif_config,
+                Message::ToastDismiss,
+                Message::ToastInvoke,
+            );
+            return cosmic::widget::autosize::autosize(
+                stack,
+                widget::Id::new("central-toast-autosize"),
+            )
+            .into();
+        }
         let Some(shown) = self.shown.as_ref().filter(|s| s.id == id) else {
             return widget::text("").into();
         };

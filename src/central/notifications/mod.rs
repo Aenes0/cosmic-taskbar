@@ -13,6 +13,7 @@
 
 pub mod config;
 pub mod service;
+pub mod toast;
 mod watch;
 
 use std::{
@@ -30,6 +31,9 @@ pub struct Notification {
     pub body: String,
     /// Pairs of action key and label.
     pub actions: Vec<(String, String)>,
+    /// Optional image file path from the `image-path` hint (e.g. screenshot thumbnail).
+    #[serde(default)]
+    pub image_path: Option<String>,
     pub time: SystemTime,
     /// Kept from before the service started: the daemon has forgotten it, and
     /// its id may be another's now.
@@ -388,6 +392,7 @@ mod tests {
             summary: format!("summary {id}"),
             body: String::new(),
             actions: vec![("default".into(), "Open".into())],
+            image_path: None,
             time: SystemTime::UNIX_EPOCH,
             restored,
             seen: false,
@@ -609,6 +614,7 @@ mod tests {
             summary: "restored".into(),
             body: String::new(),
             actions: Vec::new(),
+            image_path: None,
             time: SystemTime::UNIX_EPOCH,
             restored: true,
             seen: true,
@@ -620,6 +626,7 @@ mod tests {
             summary: "fresh".into(),
             body: String::new(),
             actions: vec![("default".into(), "Open".into())],
+            image_path: None,
             time: SystemTime::UNIX_EPOCH,
             restored: false,
             seen: false,
@@ -638,6 +645,7 @@ mod tests {
             summary: "old".into(),
             body: String::new(),
             actions: vec![("default".into(), "Open".into())],
+            image_path: None,
             time: SystemTime::UNIX_EPOCH,
             restored: false,
             seen: true,
@@ -649,6 +657,7 @@ mod tests {
             summary: "other".into(),
             body: String::new(),
             actions: vec![("default".into(), "Open".into())],
+            image_path: None,
             time: SystemTime::UNIX_EPOCH,
             restored: false,
             seen: false,
@@ -660,6 +669,7 @@ mod tests {
             summary: "again".into(),
             body: String::new(),
             actions: vec![("default".into(), "Open".into())],
+            image_path: None,
             time: SystemTime::UNIX_EPOCH,
             restored: false,
             seen: false,
@@ -686,6 +696,7 @@ mod tests {
             summary: "kept from before".into(),
             body: String::new(),
             actions: Vec::new(),
+            image_path: None,
             time: SystemTime::UNIX_EPOCH,
             restored: true,
             seen: true,
@@ -697,6 +708,7 @@ mod tests {
             summary: "live".into(),
             body: String::new(),
             actions: vec![("default".into(), "Open".into())],
+            image_path: None,
             time: SystemTime::UNIX_EPOCH,
             restored: false,
             seen: false,
@@ -717,6 +729,7 @@ mod tests {
             summary: format!("summary {id}"),
             body: String::new(),
             actions: vec![("default".into(), "Open".into())],
+            image_path: None,
             time: std::time::SystemTime::UNIX_EPOCH,
             restored: false,
             seen: false,
@@ -747,6 +760,7 @@ mod tests {
             summary: format!("summary {id}"),
             body: String::new(),
             actions: vec![("default".into(), "Open".into())],
+            image_path: None,
             time: SystemTime::UNIX_EPOCH,
             restored: false,
             seen: false,
@@ -797,7 +811,8 @@ mod tests {
                 summary: "live".into(),
                 body: String::new(),
                 actions: vec![("default".into(), "Open".into())],
-                time: SystemTime::UNIX_EPOCH,
+                image_path: None,
+            time: SystemTime::UNIX_EPOCH,
                 restored: false,
                 seen: false,
             },
@@ -808,7 +823,8 @@ mod tests {
                 summary: "already restored".into(),
                 body: String::new(),
                 actions: vec![("default".into(), "Open".into())],
-                time: SystemTime::UNIX_EPOCH,
+                image_path: None,
+            time: SystemTime::UNIX_EPOCH,
                 restored: true,
                 seen: false,
             },
@@ -891,6 +907,7 @@ mod tests {
             summary: "summary 7".into(),
             body: String::new(),
             actions: vec![("default".into(), "Open".into())],
+            image_path: None,
             time: SystemTime::UNIX_EPOCH,
             restored: false,
             seen: false,

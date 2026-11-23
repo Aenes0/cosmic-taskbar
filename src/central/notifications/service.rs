@@ -236,6 +236,7 @@ mod tests {
             summary: format!("summary {id}"),
             body: String::new(),
             actions: Vec::new(),
+            image_path: None,
             time: std::time::SystemTime::UNIX_EPOCH,
             restored,
             seen: false,

@@ -1,0 +1,347 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+//! Floating Vulkan `layer-shell` notification toasts rendered by `central --panels`
+//! using 100% of the user's `NotifConfig` (duration, position, format, opacity,
+//! corner radius, accent & background colors, body lines, action buttons, and
+//! `image-path` thumbnails for `Win+Shift+S` screen captures).
+
+use std::time::{Duration, Instant};
+
+use cosmic::{
+    Element,
+    iced::{
+        self, Alignment, Background, Color, Length,
+        core::text::{Ellipsize, EllipsizeHeightLimit},
+        platform_specific::{
+            runtime::wayland::layer_surface::IcedMargin,
+            shell::commands::layer_surface::Anchor,
+        },
+    },
+    theme,
+    widget::{self, button},
+};
+
+use super::{
+    Notification,
+    config::{NotifConfig, NotifFormat, NotifPosition},
+};
+use crate::central::{tiles::icon, widgets::{card, readable}};
+
+/// Maximum simultaneous floating toasts stacked on screen.
+pub const MAX_TOASTS: usize = 4;
+/// Logical width of each toast card.
+pub const TOAST_WIDTH: f32 = 368.0;
+
+#[derive(Clone, Debug)]
+pub struct Toast {
+    pub notification: Notification,
+    pub shown_at: Instant,
+}
+
+impl Toast {
+    pub fn new(notification: Notification) -> Self {
+        Self {
+            notification,
+            shown_at: Instant::now(),
+        }
+    }
+
+    pub fn is_expired(&self, timeout_secs: u32) -> bool {
+        timeout_secs > 0 && self.shown_at.elapsed() >= Duration::from_secs(u64::from(timeout_secs))
+    }
+}
+
+/// Maps `NotifPosition` to Wayland `layer-shell` anchor + margins.
+pub fn surface_placement(position: NotifPosition) -> (Anchor, IcedMargin) {
+    match position {
+        NotifPosition::TopRight => (
+            Anchor::TOP | Anchor::RIGHT,
+            IcedMargin { top: 16, right: 16, bottom: 16, left: 16 },
+        ),
+        NotifPosition::TopCenter => (
+            Anchor::TOP,
+            IcedMargin { top: 16, right: 16, bottom: 16, left: 16 },
+        ),
+        NotifPosition::BottomRight => (
+            Anchor::BOTTOM | Anchor::RIGHT,
+            IcedMargin { top: 16, right: 16, bottom: 56, left: 16 },
+        ),
+        NotifPosition::BottomLeft => (
+            Anchor::BOTTOM | Anchor::LEFT,
+            IcedMargin { top: 16, right: 16, bottom: 56, left: 16 },
+        ),
+    }
+}
+
+fn toast_card_style(cfg: &NotifConfig) -> theme::Container<'static> {
+    let opacity = cfg.opacity.clamp(0.40, 1.00);
+    let radius = cfg.corner_radius.clamp(4.0, 24.0);
+    let bg_rgb = cfg.bg_rgb();
+    let accent_rgb = cfg.accent_rgb();
+    theme::Container::custom(move |theme| {
+        let cosmic = theme.cosmic();
+        let c = card(cosmic);
+        let (bg, fg) = match bg_rgb {
+            Some([r, g, b]) => {
+                let base = Color::from_rgb(r, g, b);
+                let fg = readable(c.on, base);
+                (Color::from_rgba(r, g, b, opacity), fg)
+            }
+            None => {
+                let mut base: Color = c.base.into();
+                base.a = opacity;
+                (base, c.on.into())
+            }
+        };
+        let mut border_color: Color = match accent_rgb {
+            Some([r, g, b]) => Color::from_rgb(r, g, b),
+            None => cosmic.accent_color().into(),
+        };
+        border_color.a = 0.75;
+        widget::container::Style {
+            background: Some(Background::Color(bg)),
+            text_color: Some(fg),
+            icon_color: Some(fg),
+            border: iced::Border {
+                radius: radius.into(),
+                width: 1.25,
+                color: border_color,
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                offset: iced::Vector::new(0.0, 6.0),
+                blur_radius: 18.0,
+            },
+            ..Default::default()
+        }
+    })
+}
+
+fn action_pill_style(accent_rgb: Option<[f32; 3]>) -> theme::Button {
+    let style = move |hovered: bool, theme: &cosmic::Theme| {
+        let cosmic = theme.cosmic();
+        let base: Color = match accent_rgb {
+            Some([r, g, b]) => Color::from_rgb(r, g, b),
+            None => cosmic.accent_color().into(),
+        };
+        let mut bg = base;
+        bg.a = if hovered { 0.36 } else { 0.22 };
+        button::Style {
+            background: Some(Background::Color(bg)),
+            border_radius: 8.0.into(),
+            border_width: 1.0,
+            border_color: Color { a: 0.55, ..base },
+            text_color: Some(cosmic.background(theme.transparent).on.into()),
+            icon_color: Some(cosmic.background(theme.transparent).on.into()),
+            ..button::Style::new()
+        }
+    };
+    theme::Button::Custom {
+        active: Box::new(move |_, theme| style(false, theme)),
+        disabled: Box::new(move |theme| style(false, theme)),
+        hovered: Box::new(move |_, theme| style(true, theme)),
+        pressed: Box::new(move |_, theme| style(true, theme)),
+    }
+}
+
+/// Renders the stack of active floating toast notifications.
+pub fn view<'a, M: Clone + 'static>(
+    toasts: &'a [Toast],
+    cfg: &'a NotifConfig,
+    on_dismiss: impl Fn(u32) -> M + Copy + 'a,
+    on_invoke: impl Fn(u32, String) -> M + Copy + 'a,
+) -> Element<'a, M> {
+    let gap = match cfg.format {
+        NotifFormat::Full => 10,
+        NotifFormat::Compact | NotifFormat::Minimal => 6,
+    };
+    let cards: Vec<Element<'a, M>> = toasts
+        .iter()
+        .map(|toast| render_one(&toast.notification, cfg, on_dismiss, on_invoke))
+        .collect();
+    widget::column::with_children(cards)
+        .spacing(gap)
+        .width(Length::Fixed(TOAST_WIDTH))
+        .into()
+}
+
+fn render_one<'a, M: Clone + 'static>(
+    n: &'a Notification,
+    cfg: &'a NotifConfig,
+    on_dismiss: impl Fn(u32) -> M + Copy + 'a,
+    on_invoke: impl Fn(u32, String) -> M + Copy + 'a,
+) -> Element<'a, M> {
+    let app_icon = if n.icon.starts_with('/') {
+        widget::icon::from_path(n.icon.clone().into())
+    } else if n.icon.is_empty() {
+        icon("preferences-system-notifications-symbolic")
+    } else {
+        widget::icon::from_name(n.icon.clone()).handle()
+    };
+    let one_line = || Ellipsize::End(EllipsizeHeightLimit::Lines(1));
+    let body_lines = || Ellipsize::End(EllipsizeHeightLimit::Lines(cfg.max_body_lines.clamp(1, 5) as usize));
+    let accent_rgb = cfg.accent_rgb();
+    let id = n.id;
+
+    let close_btn: Element<'a, M> = button::icon(icon("window-close-symbolic"))
+        .icon_size(14)
+        .padding(4)
+        .on_press(on_dismiss(id))
+        .into();
+
+    let pad = match cfg.format {
+        NotifFormat::Full => [12, 14],
+        NotifFormat::Compact => [8, 12],
+        NotifFormat::Minimal => [6, 10],
+    };
+
+    if cfg.format == NotifFormat::Minimal {
+        let title = if n.summary.is_empty() { &n.app } else { &n.summary };
+        let row = widget::row::with_children(vec![
+            widget::icon::icon(app_icon).size(18).into(),
+            widget::text::body(title)
+                .font(cosmic::font::semibold())
+                .ellipsize(one_line())
+                .width(Length::Fill)
+                .into(),
+            close_btn,
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center);
+        return widget::container(row)
+            .padding(pad)
+            .width(Length::Fixed(TOAST_WIDTH))
+            .class(toast_card_style(cfg))
+            .into();
+    }
+
+    let mut rows: Vec<Element<'a, M>> = Vec::new();
+
+    // Header: icon + app/summary + close
+    let header_title = if cfg.format == NotifFormat::Compact {
+        if n.summary.is_empty() {
+            n.app.as_str()
+        } else {
+            n.summary.as_str()
+        }
+    } else if n.app.is_empty() {
+        "Notificação"
+    } else {
+        n.app.as_str()
+    };
+
+    rows.push(
+        widget::row::with_children(vec![
+            widget::icon::icon(app_icon)
+                .size(if cfg.format == NotifFormat::Compact { 18 } else { 20 })
+                .into(),
+            widget::text::caption(header_title)
+                .font(cosmic::font::semibold())
+                .ellipsize(one_line())
+                .width(Length::Fill)
+                .into(),
+            close_btn,
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    );
+
+    if cfg.format == NotifFormat::Full && !n.summary.is_empty() {
+        rows.push(
+            widget::text::body(&n.summary)
+                .font(cosmic::font::semibold())
+                .ellipsize(one_line())
+                .into(),
+        );
+    }
+
+    if cfg.show_body && !n.body.is_empty() {
+        rows.push(
+            widget::text::caption(&n.body)
+                .ellipsize(body_lines())
+                .into(),
+        );
+    }
+
+    // Thumbnail preview when `image-path` hint is present (e.g. Win+Shift+S screenshot)
+    if let Some(path) = n.image_path.as_deref()
+        && std::path::Path::new(path).is_file()
+    {
+        let thumb_h = if cfg.format == NotifFormat::Compact { 100.0 } else { 150.0 };
+        let img = widget::image(widget::image::Handle::from_path(path))
+            .width(Length::Fill)
+            .height(Length::Fixed(thumb_h))
+            .content_fit(iced::ContentFit::Contain)
+            .border_radius(8.0);
+        let default_action = n
+            .actions
+            .iter()
+            .find(|(k, _)| k == "default")
+            .or_else(|| n.actions.first());
+        if let Some((key, _)) = default_action {
+            rows.push(
+                button::custom(img)
+                    .padding(0)
+                    .width(Length::Fill)
+                    .class(theme::Button::Text)
+                    .on_press(on_invoke(id, key.clone()))
+                    .into(),
+            );
+        } else {
+            rows.push(img.into());
+        }
+    }
+
+    // Action buttons (excluding duplicate "default" when named actions exist)
+    if cfg.show_actions && !n.actions.is_empty() {
+        let named: Vec<&(String, String)> = n
+            .actions
+            .iter()
+            .filter(|(k, l)| k != "default" && !l.is_empty())
+            .collect();
+        let to_show: Vec<&(String, String)> = if named.is_empty() {
+            n.actions.iter().filter(|(_, l)| !l.is_empty()).collect()
+        } else {
+            named
+        };
+        if !to_show.is_empty() {
+            let btns: Vec<Element<'a, M>> = to_show
+                .into_iter()
+                .take(3)
+                .map(|(key, label)| {
+                    button::custom(widget::text::caption(label.as_str()))
+                        .padding([5, 12])
+                        .class(action_pill_style(accent_rgb))
+                        .on_press(on_invoke(id, key.clone()))
+                        .into()
+                })
+                .collect();
+            rows.push(widget::row::with_children(btns).spacing(6).into());
+        }
+    }
+
+    widget::container(widget::column::with_children(rows).spacing(6))
+        .padding(pad)
+        .width(Length::Fixed(TOAST_WIDTH))
+        .class(toast_card_style(cfg))
+        .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn surface_placement_maps_all_positions() {
+        for pos in NotifPosition::ALL {
+            let (anchor, margin) = surface_placement(pos);
+            assert!(!anchor.is_empty());
+            assert!(margin.top >= 16);
+        }
+        let (bottom_anchor, bottom_margin) = surface_placement(NotifPosition::BottomRight);
+        assert!(bottom_anchor.contains(Anchor::BOTTOM));
+        assert!(bottom_anchor.contains(Anchor::RIGHT));
+        assert!(bottom_margin.bottom >= 48);
+    }
+}

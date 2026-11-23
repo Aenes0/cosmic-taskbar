@@ -125,6 +125,9 @@ async fn bus_signals(
                     let hint = |key: &str| {
                         hints.get(key).and_then(|v| String::try_from(v.clone()).ok())
                     };
+                    let image_path = hint("image-path")
+                        .map(|p| p.strip_prefix("file://").unwrap_or(&p).to_owned())
+                        .filter(|p| p.starts_with('/') && std::path::Path::new(p).is_file());
                     let notification = Notification {
                         id: 0,
                         icon: app_icon(
@@ -144,6 +147,7 @@ async fn bus_signals(
                             })
                             .take(ACTIONS)
                             .collect(),
+                        image_path,
                         time: SystemTime::now(),
                         restored: false,
                         seen: false,
@@ -441,6 +445,7 @@ mod tests {
             summary: "s".into(),
             body: "<b>hi</b> &amp; bye".into(),
             actions: Vec::new(),
+            image_path: None,
             time: SystemTime::UNIX_EPOCH,
             restored: true,
             seen: true,
