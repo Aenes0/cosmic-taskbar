@@ -59,6 +59,16 @@ pub struct Texts {
     pub security_vpn: &'static str,
     pub security_open: &'static str,
     pub more_network: &'static str,
+    pub charging_status: &'static str,
+    pub charging: &'static str,
+    pub discharging: &'static str,
+    pub fully_charged: &'static str,
+    pub plugged_not_charging: &'static str,
+    pub input_power: &'static str,
+    pub battery_voltage: &'static str,
+    pub capacity_health: &'static str,
+    pub cycles: &'static str,
+    pub conservation_mode: &'static str,
 }
 
 const PT: Texts = Texts {
@@ -117,6 +127,16 @@ const PT: Texts = Texts {
     security_vpn: "Protegido via VPN",
     security_open: "Aberta (sem criptografia)",
     more_network: "Mais configurações de rede",
+    charging_status: "Carregamento",
+    charging: "Carregando",
+    discharging: "Na bateria",
+    fully_charged: "Carregada",
+    plugged_not_charging: "Na tomada (pausado)",
+    input_power: "Entrada (USB-C / AC)",
+    battery_voltage: "Tensão da bateria",
+    capacity_health: "Capacidade / Saúde",
+    cycles: "ciclos",
+    conservation_mode: "Modo conservação (80%)",
 };
 
 const EN: Texts = Texts {
@@ -175,6 +195,16 @@ const EN: Texts = Texts {
     security_vpn: "Protected via VPN",
     security_open: "Open (unencrypted)",
     more_network: "More network settings",
+    charging_status: "Charging",
+    charging: "Charging",
+    discharging: "On battery",
+    fully_charged: "Fully charged",
+    plugged_not_charging: "Plugged in (paused)",
+    input_power: "Input (USB-C / AC)",
+    battery_voltage: "Battery voltage",
+    capacity_health: "Capacity / Health",
+    cycles: "cycles",
+    conservation_mode: "Conservation mode (80%)",
 };
 
 pub fn texts() -> &'static Texts {

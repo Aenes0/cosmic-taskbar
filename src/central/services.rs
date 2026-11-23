@@ -85,12 +85,45 @@ pub struct Peripheral {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChargerInfo {
+    pub online: bool,
+    /// Input voltage in Volts (e.g. 20.0 V via USB-C PD).
+    pub voltage_v: Option<f64>,
+    /// Input current in Amperes (e.g. 3.25 A).
+    pub current_a: Option<f64>,
+    /// Input power in Watts (direct or voltage * current).
+    pub power_w: Option<f64>,
+    /// Max negotiated USB-C PD voltage in Volts.
+    pub max_voltage_v: Option<f64>,
+    /// Max negotiated USB-C PD power in Watts.
+    pub max_power_w: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Battery {
     pub percentage: f64,
     pub charging: bool,
+    /// UPower state: 1=Charging, 2=Discharging, 3=Empty, 4=FullyCharged, 5=PendingCharge, 6=PendingDischarge.
+    pub state: u32,
     pub icon: String,
     /// Seconds until empty, or until full when charging, once UPower knows.
     pub time_left: Option<i64>,
+    /// Charge or discharge rate in Watts.
+    pub energy_rate_w: Option<f64>,
+    /// Current battery voltage in Volts.
+    pub voltage_v: Option<f64>,
+    /// Current stored energy in Wh.
+    pub energy_wh: Option<f64>,
+    /// Full charge capacity in Wh.
+    pub energy_full_wh: Option<f64>,
+    /// Battery health percentage (capacity vs design).
+    pub health_pct: Option<f64>,
+    /// Charge cycle count (from sysfs).
+    pub cycles: Option<u32>,
+    /// USB-C PD / AC input telemetry (from `/sys/class/power_supply/*`).
+    pub charger: Option<ChargerInfo>,
+    /// Lenovo IdeaPad/Yoga conservation mode (80% charge cap), when supported.
+    pub conservation_mode: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -836,6 +869,16 @@ trait Device {
     fn time_to_empty(&self) -> zbus::Result<i64>;
     #[zbus(property)]
     fn time_to_full(&self) -> zbus::Result<i64>;
+    #[zbus(property)]
+    fn energy_rate(&self) -> zbus::Result<f64>;
+    #[zbus(property)]
+    fn voltage(&self) -> zbus::Result<f64>;
+    #[zbus(property)]
+    fn energy(&self) -> zbus::Result<f64>;
+    #[zbus(property)]
+    fn energy_full(&self) -> zbus::Result<f64>;
+    #[zbus(property)]
+    fn capacity(&self) -> zbus::Result<f64>;
 }
 
 #[zbus::proxy(
@@ -907,6 +950,129 @@ async fn peripherals(conn: &zbus::Connection) -> zbus::Result<Vec<Peripheral>> {
     Ok(peripherals)
 }
 
+fn read_sysfs_f64(path: &std::path::Path) -> Option<f64> {
+    std::fs::read_to_string(path).ok()?.trim().parse::<f64>().ok()
+}
+
+fn read_sysfs_u32(path: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.trim().parse::<u32>().ok()
+}
+
+/// Reads battery cycle count and fallback voltage/capacity from `/sys/class/power_supply/BAT*`.
+fn read_sysfs_battery_extras() -> (Option<u32>, Option<f64>, Option<f64>) {
+    let Ok(entries) = std::fs::read_dir("/sys/class/power_supply") else {
+        return (None, None, None);
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let kind = std::fs::read_to_string(path.join("type")).unwrap_or_default();
+        if kind.trim() != "Battery" {
+            continue;
+        }
+        let scope = std::fs::read_to_string(path.join("scope")).unwrap_or_default();
+        if scope.trim().eq_ignore_ascii_case("Device") {
+            continue;
+        }
+        let cycles = read_sysfs_u32(&path.join("cycle_count")).filter(|&c| c > 0);
+        let voltage_v = read_sysfs_f64(&path.join("voltage_now")).map(|uv| uv / 1_000_000.0).filter(|&v| v > 0.5);
+        let health_pct = match (
+            read_sysfs_f64(&path.join("energy_full")).or_else(|| read_sysfs_f64(&path.join("charge_full"))),
+            read_sysfs_f64(&path.join("energy_full_design")).or_else(|| read_sysfs_f64(&path.join("charge_full_design"))),
+        ) {
+            (Some(full), Some(design)) if design > 0.0 => Some((full / design * 100.0).clamp(0.0, 100.0)),
+            _ => None,
+        };
+        return (cycles, voltage_v, health_pct);
+    }
+    (None, None, None)
+}
+
+/// Reads USB-C PD / AC input voltage, current, and power from `/sys/class/power_supply/*`
+/// (supports Lenovo Yoga 7i `ucsi-source-psy-*` USB-C PD and standard `Mains` AC supplies).
+fn read_charger_info() -> Option<ChargerInfo> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/power_supply") else {
+        return None;
+    };
+    let mut best: Option<ChargerInfo> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let kind = std::fs::read_to_string(path.join("type")).unwrap_or_default();
+        let kind = kind.trim();
+        if !matches!(kind, "USB" | "USB_PD" | "USB_PD_DRP" | "USB_C" | "Mains") {
+            continue;
+        }
+        let online = std::fs::read_to_string(path.join("online"))
+            .ok()
+            .is_some_and(|v| v.trim() == "1");
+        let voltage_v = read_sysfs_f64(&path.join("voltage_now"))
+            .map(|uv| uv / 1_000_000.0)
+            .filter(|&v| v > 0.5);
+        let current_a = read_sysfs_f64(&path.join("current_now"))
+            .map(|ua| ua.abs() / 1_000_000.0)
+            .filter(|&a| a > 0.01);
+        let max_voltage_v = read_sysfs_f64(&path.join("voltage_max"))
+            .map(|uv| uv / 1_000_000.0)
+            .filter(|&v| v > 0.5);
+        let max_current_a = read_sysfs_f64(&path.join("current_max"))
+            .map(|ua| ua.abs() / 1_000_000.0)
+            .filter(|&a| a > 0.01);
+        let power_w = read_sysfs_f64(&path.join("power_now"))
+            .map(|uw| uw.abs() / 1_000_000.0)
+            .filter(|&w| w > 0.1)
+            .or_else(|| match (voltage_v, current_a) {
+                (Some(v), Some(a)) => Some(v * a),
+                _ => None,
+            });
+        let max_power_w = match (max_voltage_v, max_current_a) {
+            (Some(v), Some(a)) => Some(v * a),
+            _ => None,
+        };
+        let candidate = ChargerInfo {
+            online,
+            voltage_v,
+            current_a,
+            power_w,
+            max_voltage_v,
+            max_power_w,
+        };
+        // Prefer an online supply with voltage/power telemetry (e.g. USB-C PD) over a bare Mains entry.
+        let score = |c: &ChargerInfo| -> u8 {
+            (u8::from(c.online) << 3)
+                | (u8::from(c.voltage_v.is_some()) << 2)
+                | (u8::from(c.power_w.is_some() || c.max_power_w.is_some()) << 1)
+                | u8::from(c.max_voltage_v.is_some())
+        };
+        if best.as_ref().is_none_or(|cur| score(&candidate) > score(cur)) {
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
+fn lenovo_conservation_path() -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir("/sys/bus/platform/drivers/ideapad_acpi").ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry.path().join("conservation_mode");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn read_conservation_mode() -> Option<bool> {
+    let path = lenovo_conservation_path()?;
+    let val = std::fs::read_to_string(path).ok()?;
+    Some(val.trim() == "1")
+}
+
+pub async fn set_conservation_mode(enabled: bool) -> std::io::Result<()> {
+    let Some(path) = lenovo_conservation_path() else {
+        return Ok(());
+    };
+    tokio::fs::write(path, if enabled { b"1\n" } else { b"0\n" }).await
+}
+
 async fn battery(conn: &zbus::Connection) -> zbus::Result<Option<Battery>> {
     let device = DeviceProxy::builder(conn)
         .cache_properties(zbus::proxy::CacheProperties::No)
@@ -916,18 +1082,45 @@ async fn battery(conn: &zbus::Connection) -> zbus::Result<Option<Battery>> {
         return Ok(None);
     }
     let state = device.state().await?;
-    // 1 charging, 2 discharging, 4 fully charged
+    // 1 charging, 2 discharging, 4 fully charged, 5 pending-charge (e.g. conservation mode)
     let time_left = match state {
         1 => device.time_to_full().await.ok(),
         2 => device.time_to_empty().await.ok(),
         _ => None,
     }
     .filter(|t| *t > 0);
+    let energy_rate_w = device.energy_rate().await.ok().filter(|&w| w > 0.05);
+    let (cycles, sysfs_voltage, sysfs_health) = read_sysfs_battery_extras();
+    let voltage_v = device
+        .voltage()
+        .await
+        .ok()
+        .filter(|&v| v > 0.5)
+        .or(sysfs_voltage);
+    let energy_wh = device.energy().await.ok().filter(|&e| e > 0.0);
+    let energy_full_wh = device.energy_full().await.ok().filter(|&e| e > 0.0);
+    let health_pct = device
+        .capacity()
+        .await
+        .ok()
+        .filter(|&c| c > 0.0 && c <= 100.0)
+        .or(sysfs_health);
+    let charger = read_charger_info();
+    let conservation_mode = read_conservation_mode();
     Ok(Some(Battery {
         percentage: device.percentage().await?,
         charging: matches!(state, 1 | 4),
+        state,
         icon: device.icon_name().await?,
         time_left,
+        energy_rate_w,
+        voltage_v,
+        energy_wh,
+        energy_full_wh,
+        health_pct,
+        cycles,
+        charger,
+        conservation_mode,
     }))
 }
 

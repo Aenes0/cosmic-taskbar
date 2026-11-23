@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Observa o power-profiles-daemon via D-Bus e aplica ajustes para cada perfil."""
+import os
+import signal
+import subprocess
+import sys
+
+from gi.repository import Gio, GLib
+
+BUS_NAME = "net.hadess.PowerProfiles"
+OBJ_PATH = "/net/hadess/PowerProfiles"
+IFACE = "net.hadess.PowerProfiles"
+PROPS_IFACE = "org.freedesktop.DBus.Properties"
+HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "economia-energia")
+VALID_PROFILES = {"power-saver", "balanced", "performance"}
+
+state = {"profile": None}
+
+
+def log(msg):
+    print(f"economia-energia-daemon: {msg}", flush=True)
+
+
+def apply_profile(profile):
+    if profile not in VALID_PROFILES:
+        log(f"perfil desconhecido ignorado: {profile}")
+        return
+    if state["profile"] == profile:
+        return
+    log(f"perfil={profile} -> {HELPER} {profile}")
+    res = subprocess.run([HELPER, profile], check=False)
+    if res.returncode != 0:
+        log(f"helper saiu com codigo {res.returncode}")
+    state["profile"] = profile
+
+
+def read_active_profile(conn):
+    try:
+        variant = conn.call_sync(
+            BUS_NAME,
+            OBJ_PATH,
+            PROPS_IFACE,
+            "Get",
+            GLib.Variant("(ss)", (IFACE, "ActiveProfile")),
+            GLib.VariantType("(v)"),
+            Gio.DBusCallFlags.NONE,
+            5000,
+            None,
+        )
+        return variant.unpack()[0]
+    except GLib.Error as err:
+        log(f"nao consegui ler ActiveProfile: {err}")
+        return None
+
+
+def on_properties_changed(conn, sender, path, iface, sig, params):
+    changed_iface, changed_props, _invalidated = params.unpack()
+    if changed_iface == IFACE and "ActiveProfile" in changed_props:
+        apply_profile(changed_props["ActiveProfile"])
+
+
+def on_name_appeared(conn, name, owner):
+    profile = read_active_profile(conn)
+    if profile is not None:
+        apply_profile(profile)
+
+
+def main():
+    conn = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+    conn.signal_subscribe(
+        BUS_NAME,
+        PROPS_IFACE,
+        "PropertiesChanged",
+        OBJ_PATH,
+        IFACE,
+        Gio.DBusSignalFlags.NONE,
+        on_properties_changed,
+    )
+    Gio.bus_watch_name_on_connection(
+        conn,
+        BUS_NAME,
+        Gio.BusNameWatcherFlags.NONE,
+        on_name_appeared,
+        None,
+    )
+
+    loop = GLib.MainLoop()
+    try:
+        from gi.repository import GLibUnix
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, sig, loop.quit)
+    except ImportError:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, loop.quit)
+    loop.run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

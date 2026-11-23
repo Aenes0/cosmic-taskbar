@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Ventoinhas por plano de energia, pelo CoolerControl.
+
+Canais da placa-mae (nct6798):
+- fan1 (Intakes): segue a temperatura da CPU a partir de 45 C em todos os planos
+  (calibrado para a curva real da fan1, que comeca a ganhar RPM acima de ~25% PWM).
+- fan2 (Radiator): perfil Mix (maximo entre CPU, GPU e NVMe) adequado a cada plano.
+- fan3 (Outtakes) e fan7 (Pump): nao sao alterados.
+
+Uso: economia-energia-ventoinhas power-saver | balanced | performance | off
+"""
+import glob
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+CONFIG = "/etc/coolercontrol/config.toml"
+BACKUP = CONFIG + ".bak-economia-energia"
+SERVICE = "coolercontrold.service"
+
+BOARD = "00a4da18625f56275c89e2fcd25a83c08c5ad3326452fa7e252fcc8a89c92493"
+CPU = "493d3808155f2e271d9fa420bdc778631ee43f6c01244088874f5305d331a4cb"
+GPU = "de527a213ba1433cea3f81789b22390d5f97baee4550f627798f8335a2e29001"
+NVME = "f2c2432f15eee4e13f381a7002e171f71d45664b88471b20f2d75a3f0017e0ad"
+
+PREFIX = "a55c0000-0000-4000-8000-0000000000"
+# Economia (power-saver)
+MIX_S, CPU_S, GPU_S, NVME_S, FUNC_S, INTAKE_S = (
+    PREFIX + s for s in ("a1", "c1", "c2", "c3", "f2", "i1")
+)
+# Equilibrado (balanced)
+MIX_B, CPU_B, GPU_B, NVME_B, FUNC_B, INTAKE_B = (
+    PREFIX + s for s in ("b1", "d1", "d2", "d3", "f3", "i2")
+)
+# Desempenho (performance)
+MIX_P, CPU_P, GPU_P, NVME_P, FUNC_P, INTAKE_P = (
+    PREFIX + s for s in ("p1", "e1", "e2", "e3", "f4", "i3")
+)
+OLD = (PREFIX + "55", PREFIX + "f1")
+OWNED = (
+    MIX_S, CPU_S, GPU_S, NVME_S, FUNC_S, INTAKE_S,
+    MIX_B, CPU_B, GPU_B, NVME_B, FUNC_B, INTAKE_B,
+    MIX_P, CPU_P, GPU_P, NVME_P, FUNC_P, INTAKE_P,
+) + OLD
+
+# Curvas do Radiator (fan2, Mix CPU/GPU/NVMe)
+CURVE_RAD_S = "[[0.0, 0], [64.0, 0], [65.0, 40], [75.0, 65], [85.0, 100], [100.0, 100]]"
+CURVE_RAD_B = "[[0.0, 0], [50.0, 0], [60.0, 25], [70.0, 45], [80.0, 75], [85.0, 100], [100.0, 100]]"
+CURVE_RAD_P = "[[0.0, 20], [45.0, 25], [55.0, 45], [65.0, 65], [75.0, 85], [80.0, 100], [100.0, 100]]"
+
+# Curvas dos Intakes (fan1, CPU a partir de 60 C em todos os planos)
+CURVE_IN_S = "[[0.0, 0], [59.0, 0], [60.0, 25], [70.0, 50], [80.0, 80], [85.0, 100], [100.0, 100]]"
+CURVE_IN_B = "[[0.0, 0], [59.0, 0], [60.0, 30], [70.0, 55], [78.0, 80], [82.0, 100], [100.0, 100]]"
+CURVE_IN_P = "[[0.0, 0], [59.0, 0], [60.0, 40], [70.0, 70], [76.0, 90], [80.0, 100], [100.0, 100]]"
+
+
+def graph(uid, name, curve, temp_name, device, func_uid="0"):
+    return f'''[[profiles]]
+uid = "{uid}"
+name = "{name}"
+p_type = "Graph"
+function_uid = "{func_uid}"
+speed_profile = {curve}
+temp_source = {{ temp_name = "{temp_name}", device_uid = "{device}" }}
+temp_min = 0.0
+temp_max = 100.0
+'''
+
+
+def func_block(uid, name, delay, deviance):
+    return f'''[[functions]]
+uid = "{uid}"
+name = "{name}"
+f_type = "Standard"
+duty_minimum = 2
+duty_maximum = 100
+step_size_min_decreasing = 0
+step_size_max_decreasing = 0
+response_delay = {delay}
+deviance = {deviance}
+only_downward = true
+threshold_hopping = true
+'''
+
+
+def mix_block(uid, name, func_uid, members):
+    joined = ", ".join(f'"{m}"' for m in members)
+    return f'''[[profiles]]
+uid = "{uid}"
+name = "{name}"
+p_type = "Mix"
+function_uid = "{func_uid}"
+member_profile_uids = [{joined}]
+mix_function_type = "Max"
+'''
+
+
+BLOCKS = "\n".join(
+    [
+        # Economia
+        func_block(FUNC_S, "Economia: suavizar", 10, 3.0),
+        graph(CPU_S, "Economia: CPU", CURVE_RAD_S, "temp1", CPU),
+        graph(GPU_S, "Economia: GPU", CURVE_RAD_S, "GPU Temp", GPU),
+        graph(NVME_S, "Economia: NVMe", CURVE_RAD_S, "temp1", NVME),
+        mix_block(MIX_S, "Economia: radiador", FUNC_S, (CPU_S, GPU_S, NVME_S)),
+        graph(INTAKE_S, "Economia: intakes (CPU 60C+)", CURVE_IN_S, "temp1", CPU, FUNC_S),
+        # Equilibrado
+        func_block(FUNC_B, "Equilibrado: suavizar", 5, 2.5),
+        graph(CPU_B, "Equilibrado: CPU", CURVE_RAD_B, "temp1", CPU),
+        graph(GPU_B, "Equilibrado: GPU", CURVE_RAD_B, "GPU Temp", GPU),
+        graph(NVME_B, "Equilibrado: NVMe", CURVE_RAD_B, "temp1", NVME),
+        mix_block(MIX_B, "Equilibrado: radiador", FUNC_B, (CPU_B, GPU_B, NVME_B)),
+        graph(INTAKE_B, "Equilibrado: intakes (CPU 60C+)", CURVE_IN_B, "temp1", CPU, FUNC_B),
+        # Desempenho
+        func_block(FUNC_P, "Desempenho: suavizar", 2, 2.0),
+        graph(CPU_P, "Desempenho: CPU", CURVE_RAD_P, "temp1", CPU),
+        graph(GPU_P, "Desempenho: GPU", CURVE_RAD_P, "GPU Temp", GPU),
+        graph(NVME_P, "Desempenho: NVMe", CURVE_RAD_P, "temp1", NVME),
+        mix_block(MIX_P, "Desempenho: radiador", FUNC_P, (CPU_P, GPU_P, NVME_P)),
+        graph(INTAKE_P, "Desempenho: intakes (CPU 60C+)", CURVE_IN_P, "temp1", CPU, FUNC_P),
+    ]
+)
+
+BLOCK_RE = re.compile(r"^\[\[(?:profiles|functions)\]\]\n.*?(?=^\[|\Z)", re.M | re.S)
+
+
+def without_owned(text):
+    def keep(match):
+        return "" if any(f'uid = "{uid}"' in match.group(0) for uid in OWNED) else match.group(0)
+
+    return BLOCK_RE.sub(keep, text)
+
+
+def with_profiles(text):
+    return without_owned(text).rstrip("\n") + "\n\n" + BLOCKS
+
+
+def assign(text, fan_profiles):
+    section = re.compile(rf"(^\[device-settings\.{BOARD}\]\n)(.*?)(?=^\[|\Z)", re.M | re.S)
+    found = section.search(text)
+    if not found:
+        return None
+    body = found.group(2)
+    for fan, profile in fan_profiles.items():
+        line = f'{fan} = {{ profile_uid = "{profile}" }}'
+        body, n = re.subn(rf"^{fan} = .*$", line, body, flags=re.M)
+        if not n:
+            body = body.rstrip("\n") + "\n" + line + "\n"
+    return text[: found.start(2)] + body + text[found.end(2) :]
+
+
+def bios_auto():
+    """Devolve fan1/fan2 a curva SmartFan da BIOS (pwm_enable 5)."""
+    for hwmon in glob.glob("/sys/class/hwmon/hwmon*"):
+        try:
+            with open(hwmon + "/name") as file:
+                if file.read().strip() != "nct6798":
+                    continue
+            for fan in ("fan1", "fan2"):
+                with open(f"{hwmon}/pwm{fan[3:]}_enable", "w") as file:
+                    file.write("5")
+        except OSError as error:
+            sys.stderr.write(f"ventoinhas: nao voltei {hwmon} para a BIOS: {error}\n")
+
+
+def service(action):
+    subprocess.run(["systemctl", action, SERVICE], check=False)
+
+
+MODE_MAP = {
+    "power-saver": {"fan1": INTAKE_S, "fan2": MIX_S},
+    "on": {"fan1": INTAKE_S, "fan2": MIX_S},
+    "balanced": {"fan1": INTAKE_B, "fan2": MIX_B},
+    "performance": {"fan1": INTAKE_P, "fan2": MIX_P},
+    "off": {"fan1": "0", "fan2": "0"},
+}
+
+
+def main(mode):
+    if mode not in MODE_MAP:
+        raise SystemExit("uso: economia-energia-ventoinhas power-saver | balanced | performance | off")
+    if not os.path.exists(CONFIG):
+        return
+    target = MODE_MAP[mode]
+    with open(CONFIG) as file:
+        old = file.read()
+    new = assign(with_profiles(old), target)
+    if new is None or new == old:
+        return
+    service("stop")
+    try:
+        if not os.path.exists(BACKUP):
+            shutil.copy2(CONFIG, BACKUP)
+        with open(CONFIG, "w") as file:
+            file.write(new)
+        checked = subprocess.run(["coolercontrold", "check"], capture_output=True, text=True)
+        if checked.returncode != 0:
+            with open(CONFIG, "w") as file:
+                file.write(old)
+            sys.stderr.write(checked.stdout + checked.stderr)
+            raise SystemExit("config nova nao validou; a antiga foi mantida")
+        if mode == "off":
+            bios_auto()
+    finally:
+        service("start")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1] if len(sys.argv) > 1 else "")

@@ -244,6 +244,7 @@ pub enum Message {
     /// The panel's screen's height, turned or not, from cosmic-randr.
     ScreenHeight(Option<i32>),
     ToggleShowPercentage,
+    ToggleConservationMode,
     SettingsChanged,
     Inhibited(Option<u32>),
     WifiNetworks(Option<WifiNetworks>),
@@ -2209,6 +2210,20 @@ impl cosmic::Application for App {
             Message::ToggleShowPercentage => {
                 self.show_percentage = !self.show_percentage;
                 SHOW_PERCENTAGE.set(self.show_percentage);
+            }
+            Message::ToggleConservationMode => {
+                if let Some(battery) = self.battery.as_mut()
+                    && let Some(current) = battery.conservation_mode
+                {
+                    let next = !current;
+                    battery.conservation_mode = Some(next);
+                    return Task::future(async move {
+                        if let Err(err) = services::set_conservation_mode(next).await {
+                            tracing::warn!("cannot set Lenovo conservation mode: {err}");
+                        }
+                        cosmic::action::app(Message::None)
+                    });
+                }
             }
             Message::Sinks(sinks) => self.sinks = sinks,
             Message::SetSink(name) => {

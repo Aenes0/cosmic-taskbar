@@ -1,0 +1,2 @@
+# Permite alternar o Modo Conservacao (limite de carga 80%) em notebooks Lenovo IdeaPad/Yoga sem pedir senha
+ACTION=="add|change", SUBSYSTEM=="platform", DRIVER=="ideapad_acpi", RUN+="/bin/sh -c 'chmod 0664 /sys%p/conservation_mode && chgrp wheel /sys%p/conservation_mode 2>/dev/null || chmod 0666 /sys%p/conservation_mode'"

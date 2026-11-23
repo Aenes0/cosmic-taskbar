@@ -14,8 +14,8 @@ cd "$(dirname "$0")/.."
 echo "[1/6] Instalando pacotes base e dependências de build/runtime..."
 # Build Rust + libs nativas (libudev-sys, wayland, libxkbcommon)
 BUILD_PKGS="base-devel pkgconf rust systemd-libs libxkbcommon wayland"
-# Runtime Central / Monitor / Audio / Clima / Mídia
-CENTRAL_PKGS="curl wireplumber pipewire libpulse xdg-utils xdg-user-dirs"
+# Runtime Central / Monitor / Audio / Clima / Mídia / Energia
+CENTRAL_PKGS="curl wireplumber pipewire libpulse xdg-utils xdg-user-dirs power-profiles-daemon iw"
 # Runtime print-recorte + print-preview
 PRINT_PKGS="grim slurp wl-clipboard satty libnotify python-gobject gtk4 gtk4-layer-shell"
 # Runtime wallpapers-monitores
@@ -51,12 +51,21 @@ if ! command -v brave >/dev/null 2>&1 && ! pacman -Qi brave-bin >/dev/null 2>&1;
     fi
 fi
 
-echo "[2/6] Regra udev para dispositivos Logitech (logi-osd)..."
+echo "[2/6] Regras udev (Logitech, RAPL, Lenovo Conservação) e gestão de energia..."
 if [ ! -e /etc/udev/rules.d/70-logi-osd.rules ] && [ ! -e /usr/lib/udev/rules.d/42-logitech-unify-permissions.rules ]; then
     sudo install -Dm0644 data/logi/70-logi-osd.rules /etc/udev/rules.d/70-logi-osd.rules
-    sudo udevadm control --reload
-    sudo udevadm trigger --subsystem-match=hidraw
 fi
+sudo install -Dm0644 extras/power/99-powercap.rules /etc/udev/rules.d/99-powercap.rules
+sudo install -Dm0644 extras/power/99-lenovo-conservation.rules /etc/udev/rules.d/99-lenovo-conservation.rules
+sudo udevadm control --reload
+sudo udevadm trigger --subsystem-match=hidraw --subsystem-match=powercap --subsystem-match=platform || true
+
+sudo install -Dm0755 extras/power/economia-energia /usr/local/bin/economia-energia
+sudo install -Dm0755 extras/power/economia-energia-daemon /usr/local/bin/economia-energia-daemon
+sudo install -Dm0755 extras/power/economia-energia-ventoinhas /usr/local/bin/economia-energia-ventoinhas
+sudo install -Dm0644 extras/power/economia-energia.service /etc/systemd/system/economia-energia.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now power-profiles-daemon.service economia-energia.service || true
 
 echo "[3/6] Configurando fish como shell padrão..."
 FISH_BIN="$(command -v fish || true)"

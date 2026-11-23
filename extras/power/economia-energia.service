@@ -1,0 +1,13 @@
+[Unit]
+Description=Ajustes extras por plano de energia (power-profiles-daemon)
+After=power-profiles-daemon.service systemd-modules-load.service coolercontrold.service
+Wants=power-profiles-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/economia-energia-daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

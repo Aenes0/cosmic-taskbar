@@ -664,25 +664,128 @@ impl App {
 
     pub fn power_page(&self) -> Element<'_, Message> {
         let t = strings();
+        let tx = crate::central::texts::texts();
+        let spacing = theme::spacing();
         let mut body = Vec::new();
+        let detail_row = |label: &'static str, value: String| -> Element<'static, Message> {
+            padded_control(
+                widget::row::with_children(vec![
+                    widget::text::caption(label)
+                        .class(theme::Text::Custom(dimmed))
+                        .width(Length::Fill)
+                        .into(),
+                    widget::text::body(value).into(),
+                ])
+                .spacing(spacing.space_xs)
+                .align_y(Alignment::Center),
+            )
+            .into()
+        };
         if self.battery.is_some() || !self.peripherals.is_empty() {
             body.push(padded_control(widget::text::heading(t.batteries)).into());
             let level = |percentage: f64| -> Element<'_, Message> {
                 widget::text::body(format!("{percentage:.0} %")).into()
             };
             if let Some(battery) = &self.battery {
+                let status_label = match battery.state {
+                    1 => tx.charging,
+                    2 => tx.discharging,
+                    4 => tx.fully_charged,
+                    5 | 6 => tx.plugged_not_charging,
+                    _ if battery.charging => tx.charging,
+                    _ => tx.discharging,
+                };
+                let mut subtitle = status_label.to_owned();
+                if let Some(left) = battery.time_left {
+                    let suffix = if battery.state == 1 { t.until_full } else { t.left };
+                    subtitle.push_str(&format!(" · {} {suffix}", crate::central::app::duration(left)));
+                }
                 body.push(
                     padded_control(
                         widget::row::with_children(vec![
                             widget::icon::icon(icon(&symbolic(&battery.icon))).size(20).into(),
-                            widget::text::body(t.this_computer).width(Length::Fill).into(),
+                            widget::column::with_children(vec![
+                                widget::text::body(t.this_computer)
+                                    .font(cosmic::font::semibold())
+                                    .into(),
+                                widget::text::caption(subtitle)
+                                    .class(theme::Text::Custom(dimmed))
+                                    .into(),
+                            ])
+                            .width(Length::Fill)
+                            .into(),
                             level(battery.percentage),
                         ])
-                        .spacing(theme::spacing().space_s)
+                        .spacing(spacing.space_s)
                         .align_y(Alignment::Center),
                     )
                     .into(),
                 );
+                // Charging status + live wattage (positive when charging, negative when discharging)
+                let rate_text = match battery.energy_rate_w {
+                    Some(w) if battery.state == 1 => format!("{status_label} (+{w:.1} W)"),
+                    Some(w) if battery.state == 2 => format!("{status_label} (-{w:.1} W)"),
+                    Some(w) => format!("{status_label} ({w:.1} W)"),
+                    None => status_label.to_owned(),
+                };
+                body.push(detail_row(tx.charging_status, rate_text));
+
+                // USB-C PD / AC input voltage, current & power when plugged in
+                if let Some(charger) = battery.charger.as_ref().filter(|c| c.online) {
+                    let mut parts = Vec::new();
+                    if let Some(v) = charger.voltage_v.or(charger.max_voltage_v) {
+                        parts.push(format!("{v:.1} V"));
+                    }
+                    if let Some(a) = charger.current_a {
+                        parts.push(format!("{a:.2} A"));
+                    }
+                    if let Some(w) = charger.power_w {
+                        parts.push(format!("{w:.1} W"));
+                    } else if let Some(max_w) = charger.max_power_w {
+                        parts.push(format!("máx. {max_w:.0} W"));
+                    }
+                    if !parts.is_empty() {
+                        body.push(detail_row(tx.input_power, parts.join(" · ")));
+                    }
+                }
+
+                // Battery pack voltage
+                if let Some(v) = battery.voltage_v {
+                    body.push(detail_row(tx.battery_voltage, format!("{v:.2} V")));
+                }
+
+                // Capacity, health & cycle count
+                let mut cap_parts = Vec::new();
+                if let (Some(now), Some(full)) = (battery.energy_wh, battery.energy_full_wh) {
+                    cap_parts.push(format!("{now:.1} / {full:.1} Wh"));
+                }
+                if let Some(health) = battery.health_pct {
+                    cap_parts.push(format!("{health:.0}%"));
+                }
+                if let Some(cycles) = battery.cycles {
+                    cap_parts.push(format!("{cycles} {}", tx.cycles));
+                }
+                if !cap_parts.is_empty() {
+                    body.push(detail_row(tx.capacity_health, cap_parts.join(" · ")));
+                }
+
+                // Lenovo IdeaPad/Yoga conservation mode (80% charge limit)
+                if let Some(conservation) = battery.conservation_mode {
+                    body.push(
+                        padded_control(
+                            widget::row::with_children(vec![
+                                widget::text::body(tx.conservation_mode)
+                                    .width(Length::Fill)
+                                    .into(),
+                                widget::toggler(conservation)
+                                    .on_toggle(|_| Message::ToggleConservationMode)
+                                    .into(),
+                            ])
+                            .align_y(Alignment::Center),
+                        )
+                        .into(),
+                    );
+                }
             }
             for peripheral in &self.peripherals {
                 body.push(
@@ -697,7 +800,7 @@ impl App {
                                 .into(),
                             level(peripheral.percentage),
                         ])
-                        .spacing(theme::spacing().space_s)
+                        .spacing(spacing.space_s)
                         .align_y(Alignment::Center),
                     )
                     .into(),
