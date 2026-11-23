@@ -6,11 +6,11 @@
 //! Its own applet, by the same program (a fork of cosmic-applet-status-area).
 
 pub(crate) mod components;
-mod config;
+pub(crate) mod config;
 mod dnd;
 mod identity;
 mod layout;
-mod subscriptions;
+pub(crate) mod subscriptions;
 
 /// The id it had as its own program: the panel's entry and the config keep it.
 pub const APP_ID: &str = "io.github.Aenes0.CosmicTray";

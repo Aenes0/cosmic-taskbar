@@ -18,6 +18,8 @@ use zbus::zvariant::OwnedObjectPath;
 use crate::central::{
     pages,
     audio::{self, Mixer, Privacy},
+    background::{self, Background},
+    tray::components::status_menu,
     bar_spacing::BarSpacing,
     i18n::strings,
     layout::{self, BarItem, Layout, PanelIcons, Section, Show},
@@ -59,11 +61,13 @@ pub enum Page {
     DoNotDisturb,
     Session,
     Camera,
+    /// A background app's own menu.
+    TrayMenu,
 }
 
 impl Page {
     #[cfg(test)]
-    pub const ALL: [Page; 12] = [
+    pub const ALL: [Page; 13] = [
         Page::Main,
         Page::Edit,
         Page::Wifi,
@@ -76,6 +80,7 @@ impl Page {
         Page::DoNotDisturb,
         Page::Session,
         Page::Camera,
+        Page::TrayMenu,
     ];
 
     /// What `from_name` takes.
@@ -93,6 +98,7 @@ impl Page {
             Page::DoNotDisturb => "dnd",
             Page::Session => "session",
             Page::Camera => "camera",
+            Page::TrayMenu => "tray",
         }
     }
 
@@ -110,6 +116,7 @@ impl Page {
             "dnd" => Page::DoNotDisturb,
             "session" => Page::Session,
             "camera" => Page::Camera,
+            "tray" => Page::TrayMenu,
             _ => return None,
         })
     }
@@ -146,6 +153,8 @@ pub enum Message {
     /// A right click on an icon of the bar: the popup, open on its page.
     OpenAt(Page),
     /// When an icon shows on the bar.
+    /// What the background apps say, ask or are asked.
+    Tray(background::Msg),
     SetBarIcon(BarItem, Show),
     ToggleFold(Section),
     /// An item's resize handle dragged this far across since pressed; let go.
@@ -395,6 +404,11 @@ pub struct App {
     /// moment before: it would pull the slider back, and reload the list
     /// under it.
     adjusting: Option<std::time::Instant>,
+    /// The background apps: their icons on the bar and in the panel, and
+    /// their menus as a page of it.
+    pub(crate) background: Background,
+    /// When an icon of a background app was last pressed on the bar.
+    tray_pressed: Option<std::time::Instant>,
 }
 
 impl App {
@@ -456,6 +470,25 @@ impl App {
         let at = |content: Element<'static, Message>, page: Page| -> Element<'static, Message> {
             widget::mouse_area(content).on_right_press(Message::OpenAt(page)).into()
         };
+        // The background apps picked for the bar, first: a click does what
+        // the app's icon does, a right click opens its menu in the panel.
+        for (id, handle, name) in self.background.on_bar() {
+            let symbolic = handle.symbolic;
+            let glyph = widget::icon::icon(handle).size(size);
+            let glyph = if symbolic {
+                glyph.class(theme::Svg::Custom(std::rc::Rc::new(|theme| {
+                    iced::widget::svg::Style {
+                        color: Some(theme.cosmic().background(theme.transparent).on.into()),
+                    }
+                })))
+            } else {
+                glyph
+            };
+            let area = widget::mouse_area(glyph)
+                .on_press(Message::Tray(background::Msg::BarPress(id)))
+                .on_right_press(Message::Tray(background::Msg::OpenMenu(id)));
+            icons.push(tip(area.into(), name));
+        }
         // Who is listening or watching, in the colors phones use.
         let privacy = &self.privacy;
         if shows(BarItem::Privacy) != Show::Never {
@@ -750,6 +783,7 @@ impl App {
     fn close_popup(&mut self) -> app::Task<Message> {
         let seen = self.mark_seen();
         self.leave_edit(false);
+        self.background.close();
         self.page = None;
         let destroy = match self.popup.take() {
             Some(id) => destroy_layer_surface(id),
@@ -780,6 +814,16 @@ impl App {
         }
         self.popup = Some(id);
         let opened = self.opened();
+        // On an app's menu, as a click on its icon on the bar: by the app's
+        // key, the ids here being each process's own.
+        if let Some(app) = page
+            .and_then(|page| page.strip_prefix("tray:"))
+            .and_then(|key| self.background.id_of(key))
+        {
+            self.page = Some(Page::TrayMenu);
+            self.background.open_menu(app);
+            return opened;
+        }
         // Opened on a page, as a right click on the bar's icon, or a preview
         // (what it picks or adds while editing kept).
         match page.and_then(Page::from_name).filter(|page| *page != Page::Main) {
@@ -806,10 +850,94 @@ impl App {
     /// as not to connect again at each opening: the accessibility protocol,
     /// when a tile needs it.
     pub(crate) fn lasting_subscription(&self) -> Subscription<Message> {
+        // The background apps' icons stay known, for the bar and the strip.
+        let tray = self.background.subscription(&self.core, self.tray_menu_shown()).map(Message::Tray);
         if self.wants_a11y() {
-            services::a11y_subscription().map(Message::A11y)
+            Subscription::batch([services::a11y_subscription().map(Message::A11y), tray])
         } else {
-            Subscription::none()
+            tray
+        }
+    }
+
+    /// The app whose menu shows, where it does: on the panel's own page.
+    fn tray_menu_shown(&self) -> Option<usize> {
+        self.background
+            .open
+            .filter(|_| self.hosted && self.page == Some(Page::TrayMenu))
+    }
+
+    /// Whether an icon of a background app was just pressed on the bar: the
+    /// press of the bar's own, which opens the panel, is not for this.
+    fn tray_just_pressed(&self) -> bool {
+        self.tray_pressed.is_some_and(|at| at.elapsed() < Duration::from_millis(250))
+    }
+
+    /// An app's menu, a page of the panel that shows.
+    fn open_tray_menu(&mut self, app: usize) -> app::Task<Message> {
+        self.background.open_menu(app);
+        cosmic::Application::update(self, Message::ShowPage(Page::TrayMenu))
+    }
+
+    /// What the background apps say, ask or are asked.
+    fn tray(&mut self, message: background::Msg) -> app::Task<Message> {
+        use background::Msg;
+        match message {
+            Msg::Watcher(event) => {
+                let task = self.background.event(event);
+                // The app whose menu shows went.
+                if self.page == Some(Page::TrayMenu) && self.background.open.is_none() {
+                    self.page = Some(Page::Main);
+                }
+                task
+            }
+            Msg::Menu((_, status_menu::Msg::CloseMenu)) => self.close_popup(),
+            Msg::Menu((id, message)) => self.background.menu(id, message),
+            Msg::Identity(id, key, title) => {
+                self.background.learn(id, &key, &title);
+                Task::none()
+            }
+            Msg::Config(config) => {
+                self.background.set_config(config);
+                Task::none()
+            }
+            Msg::Token(update) => self.background.token(update),
+            Msg::BarPress(id) => {
+                self.tray_pressed = Some(std::time::Instant::now());
+                self.tray(Msg::Activate(id))
+            }
+            Msg::Activate(id) => match self.background.is_menu(id) {
+                None => Task::none(),
+                Some(true) => self.tray(Msg::OpenMenu(id)),
+                Some(false) => {
+                    let activate = self.background.activate(id);
+                    if self.hosted {
+                        Task::batch([activate, self.close_popup()])
+                    } else {
+                        activate
+                    }
+                }
+            },
+            Msg::OpenMenu(id) => {
+                if self.popup.is_some() {
+                    return self.open_tray_menu(id);
+                }
+                // From the bar: the panels' host shows it, on the app's key.
+                let Some(key) = self.background.key_of(id).map(str::to_owned) else {
+                    return Task::none();
+                };
+                if self.hosted {
+                    return Task::none();
+                }
+                ask_host(crate::central::panels::service::open(
+                    Which::Central,
+                    panel_output(),
+                    format!("tray:{key}"),
+                ))
+            }
+            Msg::Toggle(id) => {
+                self.background.toggle(id);
+                Task::none()
+            }
         }
     }
 
@@ -822,6 +950,12 @@ impl App {
 
     /// Turns to a page while it shows.
     pub(crate) fn turn_to(&mut self, page: &str) -> app::Task<Message> {
+        if let Some(key) = page.strip_prefix("tray:") {
+            return match self.background.id_of(key) {
+                Some(app) => self.open_tray_menu(app),
+                None => Task::none(),
+            };
+        }
         match Page::from_name(page) {
             Some(page) => <Self as cosmic::Application>::update(self, Message::ShowPage(page)),
             None => Task::none(),
@@ -1210,6 +1344,7 @@ fn init_with(mut core: app::Core, corner: bool) -> (App, app::Task<Message>) {
         bar_spacing: BarSpacing::load(),
         panel_icons: PanelIcons::load(),
         layout: Layout::load(),
+        background: Background::load(),
         primary_display: layout::primary_display(),
         // As last read or set: the daemon is asked later, not now.
         brightness: services::remembered_brightness(),
@@ -1271,13 +1406,16 @@ impl cosmic::Application for App {
             }
             Message::PanelPress(id) => {
                 // The click that closed the popup, if COSMIC closed it first,
-                // isn't one to open it again.
-                if Some(id) == self.core.main_window_id() && !press_just_closed(self.closed_at) {
+                // isn't one to open it again; nor one on a background app's icon.
+                if Some(id) == self.core.main_window_id()
+                    && !press_just_closed(self.closed_at)
+                    && !self.tray_just_pressed()
+                {
                     return self.update(Message::TogglePopup);
                 }
             }
             Message::CornerPress => {
-                if !press_just_closed(self.closed_at) {
+                if !press_just_closed(self.closed_at) && !self.tray_just_pressed() {
                     return self.update(Message::TogglePopup);
                 }
             }
@@ -1297,6 +1435,7 @@ impl cosmic::Application for App {
                 return self.update(Message::Preview(page));
             }
             Message::SetBarIcon(item, show) => self.panel_icons.set(item, show),
+            Message::Tray(message) => return self.tray(message),
             Message::ToggleFold(section) => {
                 self.layout.toggle_fold(section);
                 // Opened with no room for it: the other panels on top fold.
@@ -1372,6 +1511,7 @@ impl cosmic::Application for App {
                     self.closed_at = Some(std::time::Instant::now());
                     let seen = self.mark_seen();
                     self.leave_edit(false);
+                    self.background.close();
                     self.popup = None;
                     self.page = None;
                     return seen;
@@ -1385,6 +1525,10 @@ impl cosmic::Application for App {
                 } else if page != Page::Edit && self.page == Some(Page::Edit) {
                     // Away from editing without saving: as it was.
                     self.leave_edit(false);
+                }
+                // Away from an app's menu: it's told it closed.
+                if page != Page::TrayMenu {
+                    self.background.close();
                 }
                 self.page = Some(page);
                 self.selected_tile = None;
@@ -2333,6 +2477,7 @@ impl cosmic::Application for App {
             Page::DoNotDisturb => pages::panel(self.dnd_page()),
             Page::Session => pages::panel(self.session_page()),
             Page::Camera => pages::panel(self.camera_page()),
+            Page::TrayMenu => pages::panel(self.tray_menu_page()),
         };
         // Editing is the main page in place: it fades, the others slide.
         let depth = if matches!(page, Page::Main | Page::Edit) { 0 } else { 1 };

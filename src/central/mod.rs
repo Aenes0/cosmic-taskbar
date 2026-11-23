@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod background;
 mod bar_spacing;
 mod board;
 mod calendar;

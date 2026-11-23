@@ -41,6 +41,8 @@ pub struct Texts {
     pub unfold: &'static str,
     pub bar_only: &'static str,
     pub on_bar: &'static str,
+    pub background_apps: &'static str,
+    pub show_on_bar: &'static str,
 }
 
 const PT: Texts = Texts {
@@ -81,6 +83,8 @@ const PT: Texts = Texts {
     unfold: "Expandir",
     bar_only: "Só na barra",
     on_bar: "Na barra",
+    background_apps: "Apps em segundo plano",
+    show_on_bar: "Mostrar na barra",
 };
 
 const EN: Texts = Texts {
@@ -121,6 +125,8 @@ const EN: Texts = Texts {
     unfold: "Unfold",
     bar_only: "Panel only",
     on_bar: "On the panel",
+    background_apps: "Background apps",
+    show_on_bar: "Show on the panel",
 };
 
 pub fn texts() -> &'static Texts {

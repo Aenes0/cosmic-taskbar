@@ -24,6 +24,13 @@ use crate::central::{
     },
 };
 
+use crate::central::{background::Msg as BackgroundMsg, tray::components::status_menu};
+
+/// Icons of background apps in a row of their strip.
+const BACKGROUND_COLUMNS: usize = 9;
+/// One of those icons' buttons, a side.
+const BACKGROUND_BUTTON: f32 = 34.0;
+
 /// A row of a page: icon, title, maybe a subtitle, maybe something at the end.
 fn item<'a>(
     icon_name: &str,
@@ -1661,18 +1668,23 @@ impl App {
         }
     }
 
-    /// A thick slider, as phones have them, with a round arrow to its page.
-    fn slider_row(level: Level<'static, Message>, more: Message) -> Element<'static, Message> {
-        let level = level.height(36.0);
+    /// A slider as the volume's, beside what's playing: its icon, a thin rail
+    /// with a thumb, the percentage, and a round arrow to its page.
+    fn slider_row(level: Level<'static, Message>, value: f32, more: Message) -> Element<'static, Message> {
+        let spacing = theme::spacing();
         // As tall as the slider, in the middle of the grid's taller row.
         widget::container(
             widget::row::with_children(vec![
-                level.joined().into(),
-                crate::central::tiles::slider_end("go-next-symbolic", more, false),
+                level.compact().into(),
+                widget::text::caption(format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0))
+                    .width(Length::Fixed(36.0))
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .into(),
+                circle_button("go-next-symbolic", more, 32.0).into(),
             ])
-            .spacing(2)
-            .height(Length::Fixed(36.0))
-            .align_y(Alignment::Center),
+            .spacing(spacing.space_xs)
+            .align_y(Alignment::Center)
+            .padding([0, spacing.space_xxs]),
         )
         .center_y(Length::Fill)
         .into()
@@ -1681,24 +1693,28 @@ impl App {
     /// The main monitor's brightness, over DDC; or the screen's, as COSMIC
     /// sets it. The arrow leads to every monitor's.
     pub(crate) fn brightness_slider(&self) -> Option<Element<'_, Message>> {
-        let brightness_icon = || widget::icon::icon(icon("display-brightness-symbolic")).size(20);
+        let brightness_icon = || widget::icon::icon(icon("display-brightness-symbolic")).size(16);
         if let Some((index, (_, current, max))) =
             self.primary_display_index().and_then(|i| Some((i, self.displays.as_ref()?[i].ddc?)))
         {
+            let value = current as f32 / max.max(1) as f32;
             return Some(Self::slider_row(
-                Level::new(brightness_icon(), current as f32 / max.max(1) as f32, move |level| {
+                Level::new(brightness_icon(), value, move |level| {
                     Message::SetDdcBrightness(index, level * 100.0)
                 })
                 .on_release(Message::ApplyDdcBrightness(index)),
+                value,
                 Message::ShowPage(Page::Displays),
             ));
         }
         let (current, max) = self.brightness?;
+        let value = current as f32 / max.max(1) as f32;
         Some(Self::slider_row(
-            Level::new(brightness_icon(), current as f32 / max.max(1) as f32, |level| {
+            Level::new(brightness_icon(), value, |level| {
                 Message::SetBrightness(level * 100.0)
             })
             .on_release(Message::AdjustDone),
+            value,
             Message::ShowPage(Page::Displays),
         ))
     }
@@ -2053,5 +2069,106 @@ fn sink_icon(name: &str) -> &'static str {
         "audio-headphones-symbolic"
     } else {
         "audio-speakers-symbolic"
+    }
+}
+
+/// An app of the background as a button: a click does what its icon does,
+/// a right click opens its menu, here, in the panel.
+fn background_icon(id: usize, state: &status_menu::State) -> Element<'static, Message> {
+    let name = state
+        .identity
+        .label()
+        .unwrap_or(crate::central::texts::texts().background_apps)
+        .to_owned();
+    let button = button::custom(
+        widget::container(widget::icon::icon(state.icon_handle().clone()).size(20))
+            .center(Length::Fill),
+    )
+    .width(Length::Fixed(BACKGROUND_BUTTON))
+    .height(Length::Fixed(BACKGROUND_BUTTON))
+    .padding(0)
+    .class(chip_class(false))
+    .on_press(Message::Tray(BackgroundMsg::Activate(id)));
+    let area = widget::mouse_area(button).on_right_press(Message::Tray(BackgroundMsg::OpenMenu(id)));
+    widget::tooltip(area, widget::text::body(name), widget::tooltip::Position::Bottom).into()
+}
+
+impl App {
+    /// The background apps as a strip of icons, when there are any.
+    pub(crate) fn background_panel(&self) -> Option<Element<'_, Message>> {
+        if self.background.is_empty() {
+            return None;
+        }
+        let tx = crate::central::texts::texts();
+        let spacing = theme::spacing();
+        let apps: Vec<(usize, &status_menu::State)> = self.background.apps().collect();
+        let rows: Vec<Element<'_, Message>> = apps
+            .chunks(BACKGROUND_COLUMNS)
+            .map(|chunk| {
+                widget::row::with_children(
+                    chunk.iter().map(|(id, state)| background_icon(*id, state)).collect::<Vec<_>>(),
+                )
+                .spacing(spacing.space_xxs)
+                .into()
+            })
+            .collect();
+        let content = widget::column::with_children(vec![
+            widget::text::caption(tx.background_apps)
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+            widget::column::with_children(rows).spacing(spacing.space_xxs).into(),
+        ])
+        .spacing(spacing.space_xs)
+        .padding(spacing.space_m);
+        Some(panel(content))
+    }
+
+    /// About how tall the strip is, with the gap before it: nothing if empty.
+    pub(crate) fn background_height(&self) -> f32 {
+        let apps = self.background.apps().count();
+        if apps == 0 {
+            return 0.0;
+        }
+        let rows = apps.div_ceil(BACKGROUND_COLUMNS) as f32;
+        let spacing = theme::spacing();
+        2.0 * f32::from(spacing.space_m)
+            + 18.0
+            + f32::from(spacing.space_xs)
+            + rows * BACKGROUND_BUTTON
+            + (rows - 1.0) * f32::from(spacing.space_xxs)
+            + PANEL_GAP
+    }
+
+    /// A background app's own menu, a page of the panel: its items, and
+    /// whether it shows on the bar.
+    pub fn tray_menu_page(&self) -> Element<'_, Message> {
+        let tx = crate::central::texts::texts();
+        let t = strings();
+        let found = self
+            .background
+            .open
+            .and_then(|id| Some((id, self.background.menu_state(id)?)));
+        let Some((id, state)) = found else {
+            return self.page(tx.background_apps, None, vec![note(t.loading)], None);
+        };
+        let show = padded_control(
+            widget::row::with_children(vec![
+                widget::text::body(tx.show_on_bar).width(Length::Fill).into(),
+                widget::toggler(self.background.is_visible(id))
+                    .on_toggle(move |_| Message::Tray(BackgroundMsg::Toggle(id)))
+                    .into(),
+            ])
+            .align_y(Alignment::Center),
+        );
+        let body: Vec<Element<'_, Message>> = vec![
+            state
+                .popup_view()
+                .map(move |message| Message::Tray(BackgroundMsg::Menu((id, message))))
+                .into(),
+            padded_control(widget::divider::horizontal::default()).into(),
+            show.into(),
+        ];
+        let title = state.identity.label().unwrap_or(tx.background_apps);
+        self.page(title, None, body, None)
     }
 }

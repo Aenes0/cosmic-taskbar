@@ -615,7 +615,7 @@ pub fn tile<'a>(
         text = text.push(widget::text::caption(subtitle).ellipsize(one_line()));
     }
     let content = widget::row::with_capacity(2)
-        .push(widget::icon::icon(icon(icon_name)).size(14))
+        .push(widget::icon::icon(icon(icon_name)).size(16))
         .push(text.width(Length::Fill))
         .spacing(12)
         .align_y(Alignment::Center);
@@ -648,7 +648,7 @@ pub fn split<'a>(
         .on_press(toggle)
         .on_right_press(Some(details.clone()));
     let end = Surface::new(
-        widget::container(widget::icon::icon(icon("go-next-symbolic")).size(13))
+        widget::container(widget::icon::icon(icon("go-next-symbolic")).size(14))
             .center(Length::Fill)
             .class(inherit_colors()),
         on,
@@ -668,7 +668,7 @@ pub fn split<'a>(
 /// end across or on top standing.
 pub fn slider_end<'a>(icon_name: &str, message: Message, standing: bool) -> Element<'a, Message> {
     let surface = Surface::new(
-        widget::container(widget::icon::icon(icon(icon_name)).size(13))
+        widget::container(widget::icon::icon(icon(icon_name)).size(14))
             .center(Length::Fill)
             .class(inherit_colors()),
         false,

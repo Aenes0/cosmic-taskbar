@@ -179,6 +179,9 @@ impl App {
                 bottom.push(self.new_bubble(bubbles));
             }
         }
+        if let Some(strip) = self.background_panel() {
+            bottom.push(strip);
+        }
         bottom.push(panel(self.media_panel()));
         widget::column::with_children(vec![
             top.into(),
@@ -230,6 +233,7 @@ impl App {
         if editing {
             height += 44.0 + PANEL_GAP;
         }
+        height += self.background_height();
         // What's playing: whole, a line of it, or that nothing plays; the
         // volume under it.
         let media = match self.shown_media() {
@@ -437,7 +441,7 @@ impl App {
                 if placed.fit == Fit::Vertical {
                     let (value, change, release) = self.brightness_level()?;
                     let level = Level::new(
-                        widget::icon::icon(icon("display-brightness-symbolic")).size(13),
+                        widget::icon::icon(icon("display-brightness-symbolic")).size(14),
                         value,
                         change,
                     )
@@ -476,7 +480,7 @@ impl App {
             kind => kind.icon(),
         };
         let mut content = widget::row::with_capacity(3)
-            .push(widget::icon::icon(icon(icon_name)).size(14))
+            .push(widget::icon::icon(icon(icon_name)).size(16))
             .spacing(10)
             .align_y(Alignment::Center);
         if matches!(placed.fit, Fit::Pill | Fit::Horizontal) {
@@ -491,7 +495,7 @@ impl App {
         if placed.fit == Fit::Short {
             content = content
                 .push(widget::space::horizontal())
-                .push(widget::icon::icon(icon("go-next-symbolic")).size(11));
+                .push(widget::icon::icon(icon("go-next-symbolic")).size(12));
         }
         let content = widget::container(content).center_y(Length::Fill);
         let content = match placed.fit {
@@ -767,6 +771,28 @@ impl App {
         items.push(small_grid(cards, 60.0, 4));
         items.push(widget::divider::horizontal::default().into());
 
+        // Background apps (the tray's): which show on the bar, as phones'
+        // and Windows' tray settings have it; each one is a switch.
+        if !self.background.is_empty() {
+            items.push(widget::text::heading(tx.background_apps).into());
+            for (id, state) in self.background.apps() {
+                let name = state.identity.label().unwrap_or(tx.background_apps);
+                items.push(
+                    widget::row::with_children(vec![
+                        widget::icon::icon(state.icon_handle().clone()).size(20).into(),
+                        widget::text::body(name).width(Length::Fill).into(),
+                        widget::toggler(self.background.is_visible(id))
+                            .on_toggle(move |_| Message::Tray(crate::central::background::Msg::Toggle(id)))
+                            .into(),
+                    ])
+                    .spacing(spacing.space_xs)
+                    .align_y(Alignment::Center)
+                    .into(),
+                );
+            }
+            items.push(widget::divider::horizontal::default().into());
+        }
+
         // Further apart on a big screen.
         items.push(widget::text::heading(t.bar_spacing).into());
         items.push(
@@ -858,7 +884,7 @@ fn icon_tile<'a>(state: TileState) -> Element<'a, Message> {
         None => state.title.to_owned(),
     };
     let surface = Surface::new(
-        widget::container(widget::icon::icon(icon(state.icon)).size(14))
+        widget::container(widget::icon::icon(icon(state.icon)).size(16))
             .center(Length::Fill)
             .class(inherit_colors()),
         state.on,
@@ -884,7 +910,7 @@ fn short_tile<'a>(state: TileState) -> Element<'a, Message> {
         None => state.title.to_owned(),
     };
     let pill = split(
-        widget::icon::icon(icon(state.icon)).size(14).into(),
+        widget::icon::icon(icon(state.icon)).size(16).into(),
         true,
         state.on,
         state.toggle,

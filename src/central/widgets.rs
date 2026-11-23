@@ -637,7 +637,7 @@ const COMPACT_RAIL: f32 = 4.0;
 /// Material 3's slider, delicate: the track's thickness, the gap between it
 /// and the thumb, how far before the icon's square ends the track starts, and
 /// how far the thumb's center stops short of the far end.
-const LEVEL_RAIL: f32 = 10.0;
+const LEVEL_RAIL: f32 = 6.0;
 const LEVEL_GAP: f32 = 5.0;
 const LEVEL_LEAD: f32 = 4.0;
 const LEVEL_END: f32 = 4.0;
@@ -858,7 +858,7 @@ impl<Message: Clone> Widget<Message, cosmic::Theme, cosmic::Renderer> for Level<
         pill(renderer, piece(at + LEVEL_GAP, length - 2.0), rest_radius, inactive);
         // The thumb: a pill across the track, thinner while held.
         let thumb = (if state.dragging { THUMB.1 } else { THUMB.0 }).max(1.0);
-        let reach = (thickness + 14.0).min((side - 4.0).max(thickness));
+        let reach = (thickness + 12.0).min((side - 4.0).max(thickness));
         let thumb_bounds = if self.vertical {
             Rectangle::new(
                 Point::new(bounds.center_x() - reach / 2.0, bounds.y + bounds.height - at - thumb / 2.0),
