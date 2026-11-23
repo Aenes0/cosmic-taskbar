@@ -28,8 +28,6 @@ use crate::central::{background::Msg as BackgroundMsg, tray::components::status_
 
 /// Icons of background apps in a row of their strip.
 const BACKGROUND_COLUMNS: usize = 9;
-/// Icons of background apps in a row of the dedicated background page.
-const BACKGROUND_PAGE_COLUMNS: usize = 5;
 /// One of those icons' buttons, a side.
 const BACKGROUND_BUTTON: f32 = 34.0;
 
@@ -2106,42 +2104,6 @@ fn background_icon(id: usize, state: &status_menu::State) -> Element<'static, Me
     widget::tooltip(area, widget::text::body(name), widget::tooltip::Position::Bottom).into()
 }
 
-/// An app on the dedicated background page: icon + short name, clickable
-/// with left button to activate and right button for its menu.
-fn background_tile(id: usize, state: &status_menu::State) -> Element<'static, Message> {
-    let name = state
-        .identity
-        .label()
-        .unwrap_or(crate::central::texts::texts().background_apps)
-        .to_owned();
-    let one_line =
-        || iced::core::text::Ellipsize::End(iced::core::text::EllipsizeHeightLimit::Lines(1));
-    let content = widget::column::with_children(vec![
-        widget::icon::icon(state.icon_handle().clone()).size(24).into(),
-        widget::text::caption(name.clone())
-            .align_x(iced::alignment::Horizontal::Center)
-            .ellipsize(one_line())
-            .width(Length::Fill)
-            .into(),
-    ])
-    .spacing(4)
-    .align_x(Alignment::Center);
-    let button = button::custom(widget::container(content).center(Length::Fill))
-        .width(Length::Fill)
-        .height(Length::Fixed(64.0))
-        .padding([6, 4])
-        .class(chip_class(false))
-        .on_press(Message::Tray(BackgroundMsg::Activate(id)));
-    let area = widget::mouse_area(button).on_right_press(Message::Tray(BackgroundMsg::OpenMenu(id)));
-    widget::container(widget::tooltip(
-        area,
-        widget::text::body(name),
-        widget::tooltip::Position::Bottom,
-    ))
-    .width(Length::Fill)
-    .into()
-}
-
 impl App {
     /// The background apps as a strip of icons, when there are any.
     pub(crate) fn background_panel(&self) -> Option<Element<'_, Message>> {
@@ -2259,23 +2221,21 @@ impl App {
                 body.push(note(tx.no_background_apps));
             } else {
                 let rows: Vec<Element<'_, Message>> = apps
-                    .chunks(BACKGROUND_PAGE_COLUMNS)
+                    .chunks(BACKGROUND_COLUMNS)
                     .map(|chunk| {
-                        let mut cells: Vec<Element<'_, Message>> = chunk
-                            .iter()
-                            .map(|(id, state)| background_tile(*id, state))
-                            .collect();
-                        while cells.len() < BACKGROUND_PAGE_COLUMNS {
-                            cells.push(widget::space::horizontal().width(Length::Fill).into());
-                        }
-                        widget::row::with_children(cells)
-                            .spacing(spacing.space_xs)
-                            .into()
+                        widget::row::with_children(
+                            chunk
+                                .iter()
+                                .map(|(id, state)| background_icon(*id, state))
+                                .collect::<Vec<_>>(),
+                        )
+                        .spacing(spacing.space_xxs)
+                        .into()
                     })
                     .collect();
                 body.push(
                     widget::container(
-                        widget::column::with_children(rows).spacing(spacing.space_xs),
+                        widget::column::with_children(rows).spacing(spacing.space_xxs),
                     )
                     .padding([spacing.space_xs, spacing.space_m, spacing.space_m, spacing.space_m])
                     .into(),
