@@ -1388,7 +1388,16 @@ impl cosmic::Application for Monitor {
         .padding(if horizontal { [0, major] } else { [major, 0] })
         .class(theme::Button::AppletIcon)
         .on_press(Message::None);
-        applet.autosize_window(button).into()
+        let mut limits = iced::Limits::NONE.min_width(1.0).min_height(1.0);
+        if let Some(b) = applet.suggested_bounds {
+            if b.width as i32 > 0 {
+                limits = limits.max_width(b.width);
+            }
+            if b.height as i32 > 0 {
+                limits = limits.max_height(b.height);
+            }
+        }
+        applet.autosize_window(button).limits(limits).into()
     }
 
     fn view_window(&self, id: window::Id) -> Element<'_, Message> {

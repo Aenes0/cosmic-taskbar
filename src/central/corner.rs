@@ -135,6 +135,15 @@ impl cosmic::Application for Corner {
         } else {
             widget::column::with_children(parts).align_x(iced::Alignment::Center).into()
         };
-        self.core.applet.autosize_window(line).into()
+        let mut limits = iced::Limits::NONE.min_width(1.0).min_height(1.0);
+        if let Some(b) = self.core.applet.suggested_bounds {
+            if b.width as i32 > 0 {
+                limits = limits.max_width(b.width);
+            }
+            if b.height as i32 > 0 {
+                limits = limits.max_height(b.height);
+            }
+        }
+        self.core.applet.autosize_window(line).limits(limits).into()
     }
 }
