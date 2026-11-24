@@ -1093,6 +1093,43 @@ pub async fn enable_user_unit(unit: &'static str) -> String {
     }
 }
 
+pub async fn run_shell_action(label: &str, cmd: &str, privileged: bool) -> String {
+    let output = if privileged {
+        Command::new("pkexec").args(["sh", "-c", cmd]).output().await
+    } else {
+        Command::new("sh").args(["-c", cmd]).output().await
+    };
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let detail = stdout
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .map(str::trim)
+                .unwrap_or("concluído");
+            format!("✓ {label}: {detail}")
+        }
+        Ok(out) => {
+            let code = out.status.code().unwrap_or(-1);
+            if privileged && (code == 126 || code == 127) {
+                return format!("Cancelado ({label}): autenticação não concluída.");
+            }
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let detail = stderr
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .or_else(|| stdout.lines().rev().find(|l| !l.trim().is_empty()))
+                .map(str::trim)
+                .unwrap_or("falha ao executar");
+            format!("✗ {label}: {detail} (código {code})")
+        }
+        Err(err) => format!("✗ {label}: erro ao executar ({err})"),
+    }
+}
+
 pub fn open_in_terminal(title: &str, shell_cmd: &str) -> String {
     let wrapped = format!(
         "{shell_cmd}; echo; printf 'Pressione Enter para fechar... '; read -r _"

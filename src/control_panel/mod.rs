@@ -279,8 +279,9 @@ pub enum Message {
     GreeterTestLock,
     GreeterSaveOnly,
     GreeterApply,
-    // Optional packages
+    // Optional packages & Security/Power/Backup actions
     OpenInTerminal(&'static str, String),
+    RunAction(&'static str, String, bool),
     SpawnApp(&'static str, Vec<&'static str>, &'static str),
     EnableUserUnit(&'static str),
     // System & Updates
@@ -629,10 +630,29 @@ impl cosmic::Application for ControlPanel {
             }
             // Power
             Message::SetPowerProfile(profile) => {
+                self.busy = true;
+                self.notice = Some(format!("Alterando plano de energia para {profile}..."));
                 return Task::future(async move {
                     let msg = match services::set_power_profile(profile.clone()).await {
-                        Ok(()) => format!("Plano de energia alterado para {profile}."),
-                        Err(err) => format!("Falha ao alterar plano: {err}"),
+                        Ok(()) => format!("✓ Plano de energia alterado para {profile}."),
+                        Err(err) => {
+                            let has_offline = std::fs::read_to_string("/sys/devices/system/cpu/offline")
+                                .is_ok_and(|s| !s.trim().is_empty());
+                            if has_offline {
+                                let online_cmd = "for c in /sys/devices/system/cpu/cpu[1-9]*/online; do [ -w \"$c\" ] && echo 1 > \"$c\" 2>/dev/null || true; done";
+                                let _ = tokio::process::Command::new("pkexec")
+                                    .args(["sh", "-c", online_cmd])
+                                    .status()
+                                    .await;
+                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                match services::set_power_profile(profile.clone()).await {
+                                    Ok(()) => format!("✓ CPUs reativadas e plano alterado para {profile}."),
+                                    Err(err2) => format!("✗ Falha ao alterar plano: {err2}"),
+                                }
+                            } else {
+                                format!("✗ Falha ao alterar plano: {err}")
+                            }
+                        }
                     };
                     cosmic::action::app(Message::ActionDone(msg))
                 });
@@ -1462,9 +1482,17 @@ impl cosmic::Application for ControlPanel {
                     cosmic::action::app(Message::ActionDone(msg))
                 });
             }
-            // Optional packages
+            // Optional packages & Security/Power/Backup actions
             Message::OpenInTerminal(title, cmd) => {
                 self.notice = Some(data::open_in_terminal(title, &cmd));
+            }
+            Message::RunAction(label, cmd, privileged) => {
+                self.busy = true;
+                self.notice = Some(format!("Executando: {label}..."));
+                return Task::future(async move {
+                    let msg = data::run_shell_action(label, &cmd, privileged).await;
+                    cosmic::action::app(Message::ActionDone(msg))
+                });
             }
             Message::SpawnApp(program, args, label) => {
                 self.notice = Some(data::spawn_app(program, &args, label));
@@ -1546,6 +1574,7 @@ impl cosmic::Application for ControlPanel {
             Message::ActionDone(msg) => {
                 self.busy = false;
                 self.notice = Some(msg);
+                self.cpu_topology = power_config::detect_cpu_topology();
                 return Task::future(async {
                     cosmic::action::app(Message::SnapshotLoaded(data::load_snapshot().await))
                 });

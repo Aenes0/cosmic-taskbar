@@ -932,7 +932,7 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "$HOME/Projetos/cosmic-taskbar".to_owned());
-    let install_power_cmd = format!("sudo \"{repo_dir}/extras/power/install-economia-energia.sh\"");
+    let install_power_cmd = format!("\"{repo_dir}/extras/power/install-economia-energia.sh\"");
     let rule_row = |label: &'static str, ok: bool, ok_lbl: &'static str, off_lbl: &'static str| {
         widget::row::with_children(vec![
             widget::text::body(label).width(Length::Fill).into(),
@@ -949,8 +949,8 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
                     .width(Length::Fill)
                     .into(),
                 action_btn(
-                    "Instalar / Atualizar (sudo)",
-                    Message::OpenInTerminal("Instalar economia-energia e regras", install_power_cmd),
+                    "Instalar / Atualizar",
+                    Message::RunAction("Instalar economia-energia e regras", install_power_cmd, true),
                     !snap.economia_energia_active,
                 ),
             ])
@@ -1103,7 +1103,7 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
                 status_badge(sec.networking_enabled, "Conectada", "CORTADA"),
                 action_btn(
                     killswitch_label,
-                    Message::OpenInTerminal("Kill Switch de Rede", killswitch_cmd),
+                    Message::RunAction("Kill Switch de Rede", killswitch_cmd, false),
                     !sec.networking_enabled,
                 ),
             ])
@@ -1141,9 +1141,10 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
             widget::row::with_children(vec![
                 action_btn(
                     "Ativar UFW restrito",
-                    Message::OpenInTerminal(
+                    Message::RunAction(
                         "Firewall UFW Restrito",
-                        format!("sudo {harden_script} --firewall-strict"),
+                        format!("{harden_script} --firewall-strict"),
+                        true,
                     ),
                     !sec.ufw_active,
                 ),
@@ -1179,9 +1180,9 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
         "Ativar bloqueio trackers/malware"
     };
     let hosts_btn_cmd = if sec.hosts_adblock_active {
-        format!("sudo {harden_script} --hosts-undo")
+        format!("{harden_script} --hosts-undo")
     } else {
-        format!("sudo {harden_script} --hosts-adblock")
+        format!("{harden_script} --hosts-adblock")
     };
     items.push(card_box(
         widget::column::with_children(vec![
@@ -1229,7 +1230,7 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
                 status_badge(sec.hosts_adblock_active, "Ativo", "Desativado"),
                 action_btn(
                     hosts_btn_lbl,
-                    Message::OpenInTerminal("Hosts Anti-Tracker", hosts_btn_cmd),
+                    Message::RunAction("Hosts Anti-Tracker", hosts_btn_cmd, true),
                     false,
                 ),
             ])
@@ -1239,25 +1240,28 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
             widget::row::with_children(vec![
                 action_btn(
                     "Quad9 DoT (malware-block)",
-                    Message::OpenInTerminal(
+                    Message::RunAction(
                         "DNS Quad9 DoT",
-                        format!("sudo {harden_script} --dns quad9"),
+                        format!("{harden_script} --dns quad9"),
+                        true,
                     ),
                     false,
                 ),
                 action_btn(
                     "Cloudflare DoT (1.1.1.1)",
-                    Message::OpenInTerminal(
+                    Message::RunAction(
                         "DNS Cloudflare DoT",
-                        format!("sudo {harden_script} --dns cloudflare"),
+                        format!("{harden_script} --dns cloudflare"),
+                        true,
                     ),
                     false,
                 ),
                 action_btn(
                     "Mullvad DoT (zero-log)",
-                    Message::OpenInTerminal(
+                    Message::RunAction(
                         "DNS Mullvad DoT",
-                        format!("sudo {harden_script} --dns mullvad"),
+                        format!("{harden_script} --dns mullvad"),
+                        true,
                     ),
                     false,
                 ),
@@ -1275,9 +1279,9 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
         "Ativar timer MAC"
     };
     let mac_toggle_cmd = if snap.mac_rotativo_active {
-        "sudo systemctl disable --now mac-rotativo.timer".to_owned()
+        "systemctl disable --now mac-rotativo.timer".to_owned()
     } else {
-        "sudo systemctl enable --now mac-rotativo.timer".to_owned()
+        "systemctl enable --now mac-rotativo.timer".to_owned()
     };
     let nm_btn_label = if sec.nm_privacy_conf {
         "Remover privacidade NM"
@@ -1285,9 +1289,9 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
         "Ativar privacidade NM (sem telemetria + MAC/IPv6)"
     };
     let nm_btn_cmd = if sec.nm_privacy_conf {
-        format!("sudo {harden_script} --nm-privacy-undo")
+        format!("{harden_script} --nm-privacy-undo")
     } else {
-        format!("sudo {harden_script} --nm-privacy")
+        format!("{harden_script} --nm-privacy")
     };
     items.push(card_box(
         widget::column::with_children(vec![
@@ -1320,20 +1324,21 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
             widget::row::with_children(vec![
                 action_btn(
                     "Rotacionar MAC agora",
-                    Message::OpenInTerminal(
+                    Message::RunAction(
                         "Rotacionar MAC",
-                        "sudo systemctl start mac-rotativo.service && ip -brief link".to_owned(),
+                        "systemctl start mac-rotativo.service && echo 'MAC rotacionado.'".to_owned(),
+                        true,
                     ),
                     true,
                 ),
                 action_btn(
                     mac_toggle_label,
-                    Message::OpenInTerminal("MAC Rotativo timer", mac_toggle_cmd),
+                    Message::RunAction("MAC Rotativo timer", mac_toggle_cmd, true),
                     false,
                 ),
                 action_btn(
                     nm_btn_label,
-                    Message::OpenInTerminal("Privacidade NetworkManager", nm_btn_cmd),
+                    Message::RunAction("Privacidade NetworkManager", nm_btn_cmd, true),
                     !sec.nm_privacy_conf,
                 ),
             ])
@@ -1394,18 +1399,20 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
             ),
             widget::row::with_children(vec![
                 action_btn(
-                    "Aplicar Hardening Completo (sudo)",
-                    Message::OpenInTerminal(
+                    "Aplicar Hardening Completo",
+                    Message::RunAction(
                         "Hardening Kernel",
-                        format!("sudo {harden_script} --kernel"),
+                        format!("{harden_script} --kernel"),
+                        true,
                     ),
                     !sec.kernel_hardening_conf,
                 ),
                 action_btn(
                     "Reverter sysctl",
-                    Message::OpenInTerminal(
+                    Message::RunAction(
                         "Reverter Hardening",
-                        format!("sudo {harden_script} --kernel-undo"),
+                        format!("{harden_script} --kernel-undo"),
+                        true,
                     ),
                     false,
                 ),
@@ -1434,7 +1441,7 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
             status_badge(active, "Ativo", "Desativado"),
             action_btn(
                 btn_lbl,
-                Message::OpenInTerminal(title, format!("sudo {harden_script} {flag} {next_mode}")),
+                Message::RunAction(title, format!("{harden_script} {flag} {next_mode}"), true),
                 false,
             ),
         ])
@@ -1448,9 +1455,9 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
         "Ativar USBGuard (permite USBs atuais)"
     };
     let usbguard_cmd = if sec.usbguard_active {
-        format!("sudo {harden_script} --usbguard-disable")
+        format!("{harden_script} --usbguard-disable")
     } else {
-        format!("sudo {harden_script} --usbguard-setup")
+        format!("{harden_script} --usbguard-setup")
     };
     items.push(card_box(
         widget::column::with_children(vec![
@@ -1547,7 +1554,7 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
                 ),
                 action_btn(
                     usbguard_lbl,
-                    Message::OpenInTerminal("USBGuard BadUSB", usbguard_cmd),
+                    Message::RunAction("USBGuard BadUSB", usbguard_cmd, true),
                     false,
                 ),
             ])
@@ -1580,18 +1587,20 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
             ),
             widget::row::with_children(vec![
                 action_btn(
-                    "Aplicar Blindagem Completa (sudo)",
-                    Message::OpenInTerminal(
+                    "Aplicar Blindagem Completa",
+                    Message::RunAction(
                         "Blindagem Completa",
-                        format!("sudo {harden_script} --kernel && sudo {harden_script} --kernel-armor && sudo {harden_script} --nm-privacy"),
+                        format!("{harden_script} --kernel && {harden_script} --kernel-armor && {harden_script} --nm-privacy"),
+                        true,
                     ),
                     !(sec.kernel_armor_conf && sec.nocoredump_conf && sec.blacklist_modules_conf),
                 ),
                 action_btn(
                     "Reverter Blindagem",
-                    Message::OpenInTerminal(
+                    Message::RunAction(
                         "Reverter Blindagem",
-                        format!("sudo {harden_script} --kernel-armor-undo"),
+                        format!("{harden_script} --kernel-armor-undo"),
+                        true,
                     ),
                     false,
                 ),
@@ -1609,9 +1618,9 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
         "Ativar Bluetooth"
     };
     let bt_cmd = if sec.bluetooth_active {
-        "sudo systemctl stop bluetooth.service".to_owned()
+        "systemctl stop bluetooth.service && echo 'Bluetooth desativado.'".to_owned()
     } else {
-        "sudo systemctl start bluetooth.service".to_owned()
+        "systemctl start bluetooth.service && echo 'Bluetooth ativado.'".to_owned()
     };
     items.push(card_box(
         widget::column::with_children(vec![
@@ -1626,7 +1635,7 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
                 status_badge(!sec.bluetooth_active, "Desligado", "Ativo"),
                 action_btn(
                     bt_label,
-                    Message::OpenInTerminal("Bluetooth Service", bt_cmd),
+                    Message::RunAction("Bluetooth Service", bt_cmd, true),
                     false,
                 ),
             ])
@@ -1726,7 +1735,7 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
                 action_btn("Bloquear agora", Message::GreeterTestLock, true),
                 action_btn(
                     "Limpar rastros (Clipboard + Recentes + Miniaturas)",
-                    Message::OpenInTerminal("Limpeza de Rastros", clean_traces_cmd),
+                    Message::RunAction("Limpeza de Rastros", clean_traces_cmd, false),
                     false,
                 ),
                 action_btn(

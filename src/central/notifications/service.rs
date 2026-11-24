@@ -118,12 +118,19 @@ impl FdoNotifications {
                 let tone = hint_str("x-tom").unwrap_or_else(|| "normal".to_owned());
                 let dots_on = hint_i32("x-pontos");
                 let dots_total = hint_i32("x-pontos-total");
+                let effective_body = if !body.is_empty() {
+                    body.clone()
+                } else if dots_total == 0 && hints.contains_key("value") {
+                    format!("{}%", hint_i32("value").clamp(0, 100))
+                } else {
+                    String::new()
+                };
                 let timeout_ms = if expire_timeout > 0 { expire_timeout } else { 1400 };
                 _ = Service::osd(
                     hist.signal_emitter(),
                     &app_icon,
                     &summary,
-                    &body,
+                    &effective_body,
                     &tone,
                     dots_on,
                     dots_total,
