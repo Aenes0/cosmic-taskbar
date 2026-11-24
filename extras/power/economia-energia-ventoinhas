@@ -141,7 +141,7 @@ def assign(text, fan_profiles):
     section = re.compile(rf"(^\[device-settings\.{BOARD}\]\n)(.*?)(?=^\[|\Z)", re.M | re.S)
     found = section.search(text)
     if not found:
-        return None
+        raise SystemExit("config do CoolerControl sem a secao da placa-mae (nct6798)")
     body = found.group(2)
     for fan, profile in fan_profiles.items():
         line = f'{fan} = {{ profile_uid = "{profile}" }}'
@@ -187,7 +187,7 @@ def main(mode):
     with open(CONFIG) as file:
         old = file.read()
     new = assign(with_profiles(old), target)
-    if new is None or new == old:
+    if new == old:
         return
     service("stop")
     try:

@@ -2,6 +2,8 @@
 # Build and install for the current user (default) or under another prefix:
 #   ./install.sh                      -> ~/.local (includes in-session aenes-greeter)
 #   ./install.sh --with-boot-greeter  -> also installs/enables boot login screen (sudo)
+#   ./install.sh --with-power         -> also installs/enables economia-energia.service (sudo)
+#   ./install.sh --with-all           -> enables both --with-boot-greeter and --with-power
 #   sudo ./install.sh /usr            -> system wide
 #
 # One program, cosmic-taskbar, for every part; each part still runs in a
@@ -12,11 +14,17 @@ set -e
 cd "$(dirname "$0")"
 prefix=""
 with_boot_greeter=0
+with_power=0
 for arg in "$@"; do
     case "$arg" in
         --with-boot-greeter) with_boot_greeter=1 ;;
+        --with-power) with_power=1 ;;
+        --with-all)
+            with_boot_greeter=1
+            with_power=1
+            ;;
         -h|--help)
-            echo "Uso: ./install.sh [PREFIX] [--with-boot-greeter]"
+            echo "Uso: ./install.sh [PREFIX] [--with-boot-greeter] [--with-power] [--with-all]"
             exit 0
             ;;
         *)
@@ -147,7 +155,19 @@ if [ "$with_boot_greeter" -eq 1 ] && [ -x "extras/greeter/apply-greeter.sh" ]; t
     fi
 fi
 
+if [ "$with_power" -eq 1 ] && [ -x "extras/power/install-economia-energia.sh" ]; then
+    echo "Installing economia-energia.service..."
+    if [ "$(id -u)" -eq 0 ]; then
+        ./extras/power/install-economia-energia.sh
+    else
+        sudo ./extras/power/install-economia-energia.sh
+    fi
+fi
+
 echo "Installed. Run ./setup.sh to use the taskbar and the Start menu in the panel."
 if [ "$with_boot_greeter" -eq 0 ] && [ "$prefix" = "$HOME/.local" ] && ! systemctl is-enabled --quiet aenes-greeter.service 2>/dev/null; then
-    echo "Tip: run ./install.sh --with-boot-greeter (or use Control Panel > Tela de Login) to also enable the custom login screen at boot."
+    echo "Tip: run ./install.sh --with-boot-greeter (or --with-all) to also enable the custom login screen at boot."
+fi
+if [ "$with_power" -eq 0 ] && [ "$prefix" = "$HOME/.local" ] && ! systemctl is-enabled --quiet economia-energia.service 2>/dev/null; then
+    echo "Tip: run ./install.sh --with-power (or --with-all) to also install economia-energia.service."
 fi

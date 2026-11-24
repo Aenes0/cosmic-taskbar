@@ -6,17 +6,25 @@
 #    (and Super+A, Super+/) opens it, Super+X its tools (Win+X), and its
 #    button takes the place of the launcher's and the library's in the panel;
 #  - the workspaces' button with the taskbar's zoom, where COSMIC's is.
-#   ./setup.sh                      -> use them (offers boot greeter if interactive)
+#   ./setup.sh                      -> use them (offers boot greeter & power daemon if interactive)
 #   ./setup.sh --with-boot-greeter  -> also enable custom boot login screen (sudo)
+#   ./setup.sh --with-power         -> also install economia-energia.service (sudo)
+#   ./setup.sh --with-all           -> enables both
 #   ./setup.sh --undo               -> back to COSMIC's own
 set -e
 script_dir="$(dirname "$0")"
 with_boot_greeter=0
+with_power=0
 undo_mode=0
 for arg in "$@"; do
     case "$arg" in
         --undo) undo_mode=1 ;;
         --with-boot-greeter) with_boot_greeter=1 ;;
+        --with-power) with_power=1 ;;
+        --with-all)
+            with_boot_greeter=1
+            with_power=1
+            ;;
     esac
 done
 bin="${BIN:-$HOME/.local/bin/cosmic-taskbar}"
@@ -147,6 +155,20 @@ if [ -x "$script_dir/extras/greeter/apply-greeter.sh" ]; then
         case "$ans" in
             s|S|y|Y|sim|SIM)
                 sudo "$script_dir/extras/greeter/apply-greeter.sh" --user "${USER:-$(id -un)}"
+                ;;
+        esac
+    fi
+fi
+
+if [ -x "$script_dir/extras/power/install-economia-energia.sh" ]; then
+    if [ "$with_power" -eq 1 ]; then
+        sudo "$script_dir/extras/power/install-economia-energia.sh"
+    elif [ -t 0 ] && ! systemctl is-enabled --quiet economia-energia.service 2>/dev/null; then
+        printf 'Instalar também o daemon economia-energia.service (requer sudo)? [s/N] '
+        read -r ans
+        case "$ans" in
+            s|S|y|Y|sim|SIM)
+                sudo "$script_dir/extras/power/install-economia-energia.sh"
                 ;;
         esac
     fi
