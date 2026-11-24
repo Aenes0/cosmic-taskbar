@@ -71,7 +71,7 @@ Uso: apply-greeter.sh [opções]
 Opções:
   --config <caminho>   Caminho para greeter.toml (padrão: ~/.config/cosmic-taskbar/greeter.toml)
   --user <usuario>     Usuário dono do greeter.toml (detectado via SUDO_USER/PKEXEC_UID)
-  --source <pasta>     Repositório do cosmic-greeter customizado (padrão: ~/Projetos/cosmic-greeter)
+  --source <pasta>     Pasta do aenes-greeter (padrão: greeter/ dentro do cosmic-taskbar)
   --rebuild            Força recompilação de /usr/local/bin/aenes-greeter
   --install-only       Instala apenas /usr/local/bin/apply-greeter e política Polkit
   --restore            Desativa aenes-greeter.service e reativa cosmic-greeter.service oficial
@@ -924,7 +924,15 @@ require_root
 TARGET_USER="$(resolve_target_user)"
 TARGET_HOME="$(get_user_home "$TARGET_USER")"
 [ -n "$CONFIG_FILE" ] || CONFIG_FILE="$TARGET_HOME/.config/cosmic-taskbar/greeter.toml"
-[ -n "$SOURCE_DIR" ] || SOURCE_DIR="$TARGET_HOME/Projetos/cosmic-greeter"
+if [ -z "$SOURCE_DIR" ]; then
+    if [ -f "$SCRIPT_DIR/../../greeter/Cargo.toml" ]; then
+        SOURCE_DIR="$(readlink -f "$SCRIPT_DIR/../../greeter")"
+    elif [ -f "$TARGET_HOME/Projetos/cosmic-taskbar/greeter/Cargo.toml" ]; then
+        SOURCE_DIR="$TARGET_HOME/Projetos/cosmic-taskbar/greeter"
+    else
+        SOURCE_DIR="$TARGET_HOME/Projetos/cosmic-greeter"
+    fi
+fi
 GREETER_USER="$(detect_greeter_user)"
 ACTIVE_GREETER_BIN="/usr/bin/cosmic-greeter"
 APPLIED_WALLPAPER=""

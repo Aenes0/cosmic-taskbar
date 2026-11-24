@@ -1,0 +1,153 @@
+use cosmic::iced::Subscription;
+use cosmic::iced::futures::channel::mpsc;
+use cosmic::iced::futures::{SinkExt, StreamExt};
+use logind_zbus::manager::{InhibitType, ManagerProxy};
+use logind_zbus::session::SessionProxy;
+use std::any::TypeId;
+use std::error::Error;
+use std::os::fd::OwnedFd;
+use std::sync::Arc;
+use zbus::Connection;
+
+use crate::common;
+use crate::locker::Message;
+
+/// Checks whether logind (either elogind or systemd-logind) is reachable on the system bus.
+pub fn is_available() -> bool {
+    fn ping() -> zbus::Result<()> {
+        let connection = zbus::blocking::Connection::system()?;
+        connection.call_method(
+            Some("org.freedesktop.login1"),
+            "/org/freedesktop/login1",
+            Some("org.freedesktop.DBus.Peer"),
+            "Ping",
+            &(),
+        )?;
+        Ok(())
+    }
+    if let Err(err) = ping() {
+        tracing::info!("logind not available: {}", err);
+        false
+    } else {
+        true
+    }
+}
+
+pub async fn power_off() -> zbus::Result<()> {
+    let connection = Connection::system().await?;
+    let manager = ManagerProxy::new(&connection).await?;
+    manager.power_off(false).await
+}
+
+pub async fn reboot() -> zbus::Result<()> {
+    let connection = Connection::system().await?;
+    let manager = ManagerProxy::new(&connection).await?;
+    manager.reboot(false).await
+}
+
+pub async fn suspend() -> zbus::Result<()> {
+    let connection = Connection::system().await?;
+    let manager = ManagerProxy::new(&connection).await?;
+    manager.suspend(false).await
+}
+
+async fn inhibit(manager: &ManagerProxy<'_>) -> zbus::Result<OwnedFd> {
+    let what = InhibitType::Sleep;
+    let who = "COSMIC Greeter";
+    let why = "COSMIC Greeter needs to display a lock screen";
+    let mode = "delay";
+    //TODO: update logind-zbus to fix inhibit signature
+    let fd: zbus::zvariant::OwnedFd = manager
+        .inner()
+        .call("Inhibit", &(what, who, why, mode))
+        .await?;
+    // Have to convert to std type to avoid leaking zbus dependency
+    Ok(fd.into())
+}
+
+pub fn subscription() -> Subscription<Message> {
+    struct LogindSubscription;
+
+    Subscription::run_with(TypeId::of::<LogindSubscription>(), |_| {
+        cosmic::iced::stream::channel(16, |mut msg_tx| async move {
+            match handler(&mut msg_tx).await {
+                Ok(()) => {}
+                Err(err) => {
+                    tracing::warn!("logind error: {}", err);
+                    //TODO: send error
+                }
+            }
+
+            std::process::exit(1);
+        })
+    })
+}
+
+//TODO: use never type?
+pub async fn handler(msg_tx: &mut mpsc::Sender<Message>) -> Result<(), Box<dyn Error>> {
+    let connection = Connection::system().await?;
+    let manager = ManagerProxy::new(&connection).await?;
+    let session_path = manager
+        .get_session_by_PID(std::os::unix::process::parent_id())
+        .await?;
+    let session = SessionProxy::builder(&connection)
+        .path(&session_path)?
+        .build()
+        .await?;
+
+    let mut inhibit_opt = Some(inhibit(&manager).await?);
+    let mut prepare_for_sleep = manager.receive_prepare_for_sleep().await?;
+    let mut lock = session.receive_lock().await?;
+    let mut unlock = session.receive_unlock().await?;
+
+    loop {
+        // Waits until a signal has been received and forwards immediately (0ms latency)
+        tokio::select!(
+            signal_opt = prepare_for_sleep.next() => {
+                match signal_opt {
+                    Some(signal) => match signal.args() {
+                        Ok(args) => {
+                            if args.start {
+                                tracing::info!("logind prepare for sleep");
+                                if let Some(inhibit) = inhibit_opt.take() {
+                                    msg_tx.send(Message::Inhibit(Arc::new(inhibit))).await?;
+                                }
+                                msg_tx.send(Message::Lock).await?;
+                            } else {
+                                tracing::info!("logind resume");
+                                if inhibit_opt.is_none() {
+                                    inhibit_opt = Some(inhibit(&manager).await?);
+                                }
+                                // Immediately update time when resuming from sleep.
+                                msg_tx.send(Message::Common(common::Message::Tick)).await?;
+                            }
+                        },
+                        Err(err) => {
+                            tracing::warn!("logind prepare to sleep invalid data: {}", err);
+                        }
+                    },
+                    None => {
+                        tracing::warn!("logind prepare to sleep stream ended");
+                        return Err("logind prepare_for_sleep stream ended".into());
+                    }
+                }
+            },
+            signal_opt = lock.next() => {
+                if signal_opt.is_none() {
+                    tracing::warn!("logind lock stream ended");
+                    return Err("logind lock stream ended".into());
+                }
+                tracing::info!("logind lock");
+                msg_tx.send(Message::Lock).await?;
+            },
+            signal_opt = unlock.next() => {
+                if signal_opt.is_none() {
+                    tracing::warn!("logind unlock stream ended");
+                    return Err("logind unlock stream ended".into());
+                }
+                tracing::info!("logind unlock");
+                msg_tx.send(Message::Unlock).await?;
+            }
+        );
+    }
+}

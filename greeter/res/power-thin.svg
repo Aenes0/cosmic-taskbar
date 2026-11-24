@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22" width="22" height="22">
+  <!-- Ícone ⏻ fino próprio do cosmic-greeter: haste de 2 px e anel de 1 px (raio 7,5),
+       aberto em cima. Cor indiferente: o tema recolore o ícone inteiro. -->
+  <rect x="10" y="3" width="2" height="7" fill="#fff"/>
+  <path d="M 9 3.77 A 7.5 7.5 0 1 0 13 3.77" fill="none" stroke="#fff" stroke-width="1"/>
+</svg>

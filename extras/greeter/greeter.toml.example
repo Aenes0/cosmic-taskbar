@@ -26,7 +26,7 @@ default_user = ""
 # Sessão padrão pré-selecionada para default_user (ex: "COSMIC")
 session = "COSMIC"
 
-# true  = usa /usr/local/bin/aenes-greeter (compilado de ~/Projetos/cosmic-greeter)
+# true  = usa /usr/local/bin/aenes-greeter (compilado de greeter/ no cosmic-taskbar)
 #         + /etc/greetd/aenes-greeter.toml + /etc/systemd/system/aenes-greeter.service
 #         100% isolado de /usr/bin/cosmic-greeter (atualizações do pacman não sobrescrevem)
 # false = usa /usr/bin/cosmic-greeter oficial mantendo unit e configs isoladas

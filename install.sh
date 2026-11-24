@@ -16,6 +16,16 @@ bindir="$prefix/bin"
 cargo build --release
 install -Dm0755 "target/release/$bin" "$bindir/$bin"
 
+# Greeter & Lockscreen customizado (aenes-greeter), absorvido em greeter/.
+# Instalado em ~/.local/bin/aenes-greeter com symlink cosmic-greeter para que
+# o lockscreen da sessão use nossa versão sem tocar em /usr/bin/cosmic-greeter.
+if [ -f "greeter/Cargo.toml" ]; then
+    cargo build --release --manifest-path greeter/Cargo.toml --bin cosmic-greeter
+    greeter_target="${CARGO_TARGET_DIR:-greeter/target}"
+    install -Dm0755 "$greeter_target/release/cosmic-greeter" "$bindir/aenes-greeter"
+    ln -sf "aenes-greeter" "$bindir/cosmic-greeter"
+fi
+
 # The programs this one replaces were called by these names, by shortcuts,
 # panel entries and units they set up: the old names stay as links, and the
 # program takes the part its name says, with the arguments it always had.
