@@ -9,13 +9,12 @@ use std::time::{Instant, SystemTime};
 
 use cosmic::{
     Element,
-    iced::{self, Alignment, Background, Length},
+    iced::{self, Alignment, Background, Color, Length},
     theme, widget,
 };
 
-use super::row::{self, BtnStyle, Tone};
-use crate::central::tiles::chip_class;
-use crate::central::widgets::card;
+use super::row::{self, Btn, BtnStyle, Tone};
+use crate::central::tiles::icon;
 use crate::control_panel::health;
 use crate::control_panel::power_config::PowerProfileKind;
 use alerts::{Alert, AlertAction, AlertInput, AlertTone, SECURITY_RECOMMENDED, ago, ahead, alerts, span};
@@ -25,7 +24,13 @@ use crate::control_panel::{ControlPanel, Message, Section};
 const AMBER_FROM_PCT: f32 = 70.0;
 const BAR_HEIGHT: f32 = 6.0;
 const CARD_PADDING: u16 = 16;
+const CARD_RADIUS: f32 = 14.0;
+const GRID_GAP: f32 = 12.0;
 const RECENT_SHOWN: usize = 3;
+/// Altura dos cartões de estado: a grade do mockup estica os vizinhos até o mais alto, e o iced
+/// não faz isso; a 1ª fileira (com o segmentado do plano) é mais alta que a 2ª.
+const STATE_CARD_HEIGHT: f32 = 176.0;
+const STATE_CARD_HEIGHT_WITH_PLAN: f32 = 224.0;
 
 pub(super) fn backup_message() -> Message {
     Message::OpenInTerminal("Backup Restic", "~/.local/bin/backup-restic".to_owned())
@@ -35,39 +40,27 @@ fn dash_or(v: Option<String>) -> String {
     v.unwrap_or_else(|| "—".to_owned())
 }
 
-fn panel<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
+fn panel<'a>(content: Element<'a, Message>, padding: [u16; 2]) -> widget::Container<'a, Message, cosmic::Theme> {
     widget::container(content)
-        .padding(CARD_PADDING)
+        .padding(padding)
         .width(Length::Fill)
-        .class(theme::Container::custom(|theme| {
-            let c = card(theme.cosmic());
-            let mut border: iced::Color = theme.cosmic().background(theme.transparent).divider.into();
-            border.a *= 0.55;
-            widget::container::Style {
-                background: Some(Background::Color(c.base.into())),
-                text_color: Some(c.on.into()),
-                icon_color: Some(c.on.into()),
-                border: iced::Border {
-                    radius: crate::shared::tokens::POPUP_RADIUS.into(),
-                    width: crate::shared::tokens::HAIRLINE_WIDTH,
-                    color: border,
-                },
-                ..Default::default()
-            }
-        }))
-        .into()
+        .class(theme::Container::custom(|theme| row::card_style(theme, CARD_RADIUS)))
 }
 
 fn heading<'a>(text: &'a str) -> Element<'a, Message> {
-    widget::text(text).size(14.0).font(cosmic::font::bold()).into()
+    widget::text(text).size(13.5).font(cosmic::font::semibold()).into()
 }
 
-fn caption<'a>(text: impl Into<std::borrow::Cow<'a, str>> + 'a) -> Element<'a, Message> {
-    widget::text::caption(text)
-        .class(theme::Text::Custom(|theme| {
-            let mut color = theme.cosmic().background(theme.transparent).on;
-            color.alpha *= 0.65;
-            iced::widget::text::Style { color: Some(color.into()), ..Default::default() }
+fn caption<'a>(text: impl Into<std::borrow::Cow<'a, str>> + 'a, size: f32) -> Element<'a, Message> {
+    widget::text(text).size(size).class(theme::Text::Custom(row::dimmed)).into()
+}
+
+fn faint<'a>(text: impl Into<std::borrow::Cow<'a, str>> + 'a) -> Element<'a, Message> {
+    widget::text(text)
+        .size(12.0)
+        .class(theme::Text::Custom(|theme| iced::widget::text::Style {
+            color: Some(row::on_alpha(theme, 0.58)),
+            ..Default::default()
         }))
         .into()
 }
@@ -85,106 +78,116 @@ fn bar<'a>(pct: Option<f32>) -> Element<'a, Message> {
                 ..Default::default()
             }
         }));
-    let portion = (value * 10.0).round() as u16;
+    // Mínimo de 3% para a barra nunca sumir (mockup).
+    let portion = (value.max(3.0) * 10.0).round() as u16;
     let mut inner = widget::row::with_capacity(2);
-    if portion > 0 {
-        inner = inner.push(fill.width(Length::FillPortion(portion)));
-    }
+    inner = inner.push(fill.width(Length::FillPortion(portion)));
     if portion < 1000 {
         inner = inner.push(widget::Space::new().width(Length::FillPortion(1000 - portion)).height(Length::Fixed(BAR_HEIGHT)));
     }
     widget::container(inner)
         .width(Length::Fill)
-        .class(theme::Container::custom(|theme| {
-            let mut c: iced::Color = theme.cosmic().background(theme.transparent).on.into();
-            c.a = 0.12;
-            widget::container::Style {
-                background: Some(Background::Color(c)),
-                border: iced::Border { radius: (BAR_HEIGHT / 2.0).into(), ..Default::default() },
-                ..Default::default()
-            }
+        .class(theme::Container::custom(|theme| widget::container::Style {
+            background: Some(Background::Color(row::on_alpha(theme, 0.08))),
+            border: iced::Border { radius: (BAR_HEIGHT / 2.0).into(), ..Default::default() },
+            ..Default::default()
         }))
         .into()
 }
 
+/// Métrica ao vivo: rótulo à esquerda e valor à direita na mesma linha, barra e detalhe.
 fn metric_card<'a>(
     title: &'a str,
     value: String,
     detail: String,
     pct: Option<f32>,
 ) -> Element<'a, Message> {
-    let spacing = cosmic::theme::spacing();
+    let top = widget::row::with_children(vec![
+        widget::container(caption(title, 12.5)).width(Length::Fill).into(),
+        widget::text(value).size(20.0).font(cosmic::font::bold()).into(),
+    ])
+    .align_y(Alignment::Center);
     panel(
-        widget::column::with_children(vec![
-            caption(title),
-            widget::text::title3(value).into(),
-            bar(pct),
-            caption(detail),
-        ])
-        .spacing(spacing.space_xxs)
-        .into(),
+        widget::column::with_children(vec![top.into(), bar(pct), faint(detail)])
+            .spacing(10)
+            .into(),
+        [14, 16],
     )
+    .into()
 }
 
-/// Cartão de estado: título + selo, linhas de texto, controle extra e botões.
+/// Cartão de estado: ícone + título + selo, valor em destaque, detalhe, controle extra e rodapé
+/// (ação à esquerda, "Abrir ›" à direita).
 fn state_card<'a>(
+    section: Section,
     title: &'a str,
     pill: Option<(&'static str, Tone)>,
-    lines: Vec<String>,
+    value: String,
+    meta: String,
     extra: Option<Element<'a, Message>>,
-    buttons: Vec<Element<'a, Message>>,
+    action: Option<Element<'a, Message>>,
+    height: f32,
 ) -> Element<'a, Message> {
-    let spacing = cosmic::theme::spacing();
     let mut head = widget::row::with_capacity(3)
-        .spacing(spacing.space_xs)
+        .spacing(10)
         .align_y(Alignment::Center)
+        .push(row::icon_box(section.icon(), 34.0, 17, Tone::Info))
         .push(widget::container(heading(title)).width(Length::Fill));
     if let Some((text, tone)) = pill {
         head = head.push(row::pill(text, tone));
     }
-    let mut col = widget::column::with_capacity(lines.len() + 3)
-        .spacing(spacing.space_xxs)
-        .push(head);
-    for l in lines {
-        col = col.push(caption(l));
-    }
+    let mut col = widget::column::with_capacity(5).spacing(14).push(head).push(
+        widget::column::with_children(vec![
+            widget::text(value).size(19.0).font(cosmic::font::bold()).into(),
+            caption(meta, 12.5),
+        ])
+        .spacing(3),
+    );
     if let Some(e) = extra {
         col = col.push(e);
     }
-    let mut foot = widget::row::with_capacity(buttons.len()).spacing(spacing.space_xxs);
-    for b in buttons {
-        foot = foot.push(b);
+    let open = widget::button::custom(
+        widget::row::with_children(vec![
+            widget::text("Abrir").size(12.5).font(row::medium()).into(),
+            widget::icon::icon(icon("go-next-symbolic")).size(15).into(),
+        ])
+        .spacing(2)
+        .align_y(Alignment::Center),
+    )
+    .padding([7, 4, 7, 10])
+    .class(row::btn_class(Btn::Link, 8.0))
+    .on_press(Message::SelectSection(section));
+    let mut foot = widget::row::with_capacity(3).align_y(Alignment::Center);
+    if let Some(a) = action {
+        foot = foot.push(a);
     }
-    col = col.push(foot);
-    panel(col.into())
+    foot = foot.push(widget::Space::new().width(Length::Fill)).push(open);
+    col = col.push(widget::Space::new().height(Length::Fill)).push(foot);
+    panel(col.height(Length::Fill).into(), [CARD_PADDING, CARD_PADDING])
+        .height(Length::Fixed(height))
+        .into()
 }
 
-fn open_button<'a>(section: Section) -> Element<'a, Message> {
-    row::button("Abrir", Message::SelectSection(section), BtnStyle::Normal)
+/// Ação do rodapé de um cartão (30 px, neutra).
+fn card_action<'a>(label: &'a str, msg: Option<Message>) -> Element<'a, Message> {
+    row::action_btn(label, msg, BtnStyle::Normal, 30.0)
 }
 
-fn plan_chips<'a>(active: Option<PowerProfileKind>, enabled: bool) -> Element<'a, Message> {
-    let spacing = cosmic::theme::spacing();
-    let mut r = widget::row::with_capacity(3).spacing(spacing.space_xxxs);
-    for kind in [PowerProfileKind::PowerSaver, PowerProfileKind::Balanced, PowerProfileKind::Performance] {
-        let msg = if enabled { Message::SetPowerProfile(kind.id().to_owned()) } else { Message::None };
-        r = r.push(
-            widget::button::custom(widget::text::caption(kind.label()))
-                .padding([5, 12])
-                .class(chip_class(active == Some(kind)))
-                .on_press(msg),
-        );
-    }
-    r.into()
+fn plan_segmented<'a>(active: Option<PowerProfileKind>, enabled: bool) -> Element<'a, Message> {
+    let kinds = [PowerProfileKind::PowerSaver, PowerProfileKind::Balanced, PowerProfileKind::Performance];
+    let labels: Vec<&'static str> = kinds.iter().map(|k| k.label()).collect();
+    let selected = active.and_then(|a| kinds.iter().position(|k| *k == a));
+    row::seg_control(&labels, selected, true, move |i| {
+        Some(if enabled { Message::SetPowerProfile(kinds[i].id().to_owned()) } else { Message::None })
+    })
 }
 
 /// `n` elementos por linha, preenchendo a última com espaço.
 fn grid<'a>(cells: Vec<Element<'a, Message>>, per_row: usize) -> Element<'a, Message> {
-    let spacing = cosmic::theme::spacing();
-    let mut col = widget::column::with_capacity(cells.len() / per_row + 1).spacing(spacing.space_s);
+    let mut col = widget::column::with_capacity(cells.len() / per_row + 1).spacing(GRID_GAP);
     let mut it = cells.into_iter().peekable();
     while it.peek().is_some() {
-        let mut r = widget::row::with_capacity(per_row).spacing(spacing.space_s);
+        let mut r = widget::row::with_capacity(per_row).spacing(GRID_GAP);
         for _ in 0..per_row {
             r = match it.next() {
                 Some(c) => r.push(widget::container(c).width(Length::FillPortion(1))),
@@ -227,44 +230,104 @@ fn alert_input(app: &ControlPanel) -> AlertInput<'_> {
     }
 }
 
-fn alerts_group(list: Vec<Alert>, busy: bool) -> Element<'static, Message> {
-    let spacing = cosmic::theme::spacing();
-    let rows = list
-        .into_iter()
-        .map(|a| {
-            let tone = match a.tone {
-                AlertTone::Warn => Tone::Warn,
-                AlertTone::Bad => Tone::Bad,
-            };
-            let mut buttons = widget::row::with_capacity(2).spacing(spacing.space_xxs);
-            if a.action == AlertAction::Open {
-                buttons = buttons.push(row::button("Abrir", Message::SelectSection(a.section), BtnStyle::Normal));
-            } else {
-                buttons = buttons
-                    .push(row::button("Detalhes", Message::SelectSection(a.section), BtnStyle::Normal))
-                    .push(
-                        widget::button::suggested(a.action.label())
-                            .on_press_maybe((!busy).then(|| a.action.message())),
-                    );
+/// Um alerta: cartão tingido do tom, ícone, texto, "Detalhes" e a ação cheia.
+fn alert_card(a: Alert, busy: bool) -> Element<'static, Message> {
+    let tone = match a.tone {
+        AlertTone::Warn => Tone::Warn,
+        AlertTone::Bad => Tone::Bad,
+    };
+    let tone_fg = move |theme: &cosmic::Theme| row::tone_colors(theme, tone).1;
+    let icon_box = widget::container(widget::icon::icon(icon("dialog-warning-symbolic")).size(18))
+        .width(Length::Fixed(34.0))
+        .height(Length::Fixed(34.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .class(theme::Container::custom(move |theme| {
+            let fg = tone_fg(theme);
+            widget::container::Style {
+                background: Some(Background::Color(Color { a: 0.16, ..fg })),
+                icon_color: Some(fg),
+                border: iced::Border { radius: 10.0.into(), ..Default::default() },
+                ..Default::default()
             }
-            widget::row::with_children(vec![
-                row::pill(if tone == Tone::Bad { "Atenção" } else { "Aviso" }, tone),
-                widget::column::with_children(vec![
-                    widget::text(a.title).size(14.0).font(cosmic::font::semibold()).into(),
-                    caption(a.detail),
-                ])
-                .spacing(spacing.space_xxxs)
-                .width(Length::Fill)
-                .into(),
-                buttons.into(),
-            ])
-            .spacing(spacing.space_s)
-            .align_y(Alignment::Center)
-            .padding([14, 18])
-            .into()
+        }));
+    let link = move |hovered: bool, theme: &cosmic::Theme| {
+        let fg = tone_fg(theme);
+        widget::button::Style {
+            background: hovered.then(|| Background::Color(Color { a: 0.10, ..fg })),
+            border_radius: 8.0.into(),
+            text_color: Some(fg),
+            ..widget::button::Style::new()
+        }
+    };
+    let filled = move |hovered: bool, disabled: bool, theme: &cosmic::Theme| {
+        let fg = tone_fg(theme);
+        let a = if disabled { 0.45 } else if hovered { 0.9 } else { 1.0 };
+        widget::button::Style {
+            background: Some(Background::Color(Color { a, ..fg })),
+            border_radius: 8.0.into(),
+            text_color: Some(theme.cosmic().background(theme.transparent).base.into()),
+            ..widget::button::Style::new()
+        }
+    };
+    let btn_text = |t: &'static str, bold: bool| {
+        widget::container(
+            widget::text(t).size(13.0).font(if bold { cosmic::font::semibold() } else { row::medium() }),
+        )
+        .height(Length::Fill)
+        .align_y(Alignment::Center)
+    };
+    let details = widget::button::custom(btn_text(if a.action == AlertAction::Open { "Abrir" } else { "Detalhes" }, false))
+        .height(Length::Fixed(32.0))
+        .padding([0, 12])
+        .class(theme::Button::Custom {
+            active: Box::new(move |_, t| link(false, t)),
+            disabled: Box::new(move |t| link(false, t)),
+            hovered: Box::new(move |_, t| link(true, t)),
+            pressed: Box::new(move |_, t| link(true, t)),
         })
-        .collect();
-    row::group("Alertas", None, false, rows)
+        .on_press(Message::SelectSection(a.section));
+    let mut buttons = widget::row::with_capacity(2).spacing(4).align_y(Alignment::Center).push(details);
+    if a.action != AlertAction::Open {
+        buttons = buttons.push(
+            widget::button::custom(btn_text(a.action.label(), true))
+                .height(Length::Fixed(32.0))
+                .padding([0, 14])
+                .class(theme::Button::Custom {
+                    active: Box::new(move |_, t| filled(false, false, t)),
+                    disabled: Box::new(move |t| filled(false, true, t)),
+                    hovered: Box::new(move |_, t| filled(true, false, t)),
+                    pressed: Box::new(move |_, t| filled(true, false, t)),
+                })
+                .on_press_maybe((!busy).then(|| a.action.message())),
+        );
+    }
+    widget::container(
+        widget::row::with_children(vec![
+            icon_box.into(),
+            widget::column::with_children(vec![
+                widget::text(a.title).size(13.5).font(cosmic::font::semibold()).into(),
+                widget::text(a.detail).size(12.5).class(theme::Text::Custom(row::soft)).into(),
+            ])
+            .spacing(2)
+            .width(Length::Fill)
+            .into(),
+            buttons.into(),
+        ])
+        .spacing(14)
+        .align_y(Alignment::Center),
+    )
+    .padding([12, 14, 12, 16])
+    .width(Length::Fill)
+    .class(theme::Container::custom(move |theme| {
+        let fg = tone_fg(theme);
+        widget::container::Style {
+            background: Some(Background::Color(Color { a: 0.08, ..fg })),
+            border: iced::Border { radius: CARD_RADIUS.into(), width: 1.0, color: Color { a: 0.22, ..fg } },
+            ..Default::default()
+        }
+    }))
+    .into()
 }
 
 fn metrics_row(app: &ControlPanel) -> Element<'_, Message> {
@@ -280,7 +343,7 @@ fn metrics_row(app: &ControlPanel) -> Element<'_, Message> {
         dash_or(m.and_then(|m| m.gpu_temp).map(|t| format!("{t:.0} °C"))),
         dash_or(m.and_then(|m| m.gpu_watts).map(|w| format!("{w:.0} W")))
     );
-    let power_detail = dash_or(m.and_then(|m| m.cost_per_hour).map(|c| format!("R$ {c:.2}/h")));
+    let power_detail = dash_or(m.and_then(|m| m.cost_per_hour).map(|c| format!("≈ R$ {c:.2} por hora")));
     grid(
         vec![
             metric_card("CPU", pct(m.map(|m| m.cpu_pct)), cpu_detail, m.map(|m| m.cpu_pct)),
@@ -297,39 +360,55 @@ fn metrics_row(app: &ControlPanel) -> Element<'_, Message> {
     )
 }
 
+/// "5 min" → "5 min"; "Nunca" → "nunca" (para o meio da frase).
+fn mins_phrase(mins: u32) -> String {
+    let s = crate::control_panel::power_config::ProfileTuning::format_mins(mins);
+    if mins == 0 { s.to_lowercase() } else { s }
+}
+
 fn power_card(app: &ControlPanel) -> Element<'_, Message> {
     let active = app.active_profile_kind();
-    let (pill, line) = match active {
-        Some(k) => (Some(("Ativo", Tone::Ok)), format!("Plano {}", k.label())),
-        None => (None, "Serviço de energia não respondeu".to_owned()),
+    let (pill, value, meta) = match active {
+        Some(k) => {
+            let t = app.power_config.get(k);
+            (
+                Some(("Ativo", Tone::Ok)),
+                format!("Plano {}", k.label()),
+                format!("Tela apaga em {} · senha em {}", mins_phrase(t.screen_off_mins), mins_phrase(t.lock_mins)),
+            )
+        }
+        None => (None, "Sem plano".to_owned(), "Serviço de energia não respondeu".to_owned()),
     };
     state_card(
+        Section::Power,
         "Energia",
         pill,
-        vec![line],
-        Some(plan_chips(active, !app.busy && app.power.is_some())),
-        vec![open_button(Section::Power)],
+        value,
+        meta,
+        Some(plan_segmented(active, !app.busy && app.power.is_some())),
+        None,
+        STATE_CARD_HEIGHT_WITH_PLAN,
     )
 }
 
 fn security_card(app: &ControlPanel) -> Element<'_, Message> {
     let score = app.snapshot.security.score;
-    let (pill, line) = if score == 0 {
+    let (pill, value) = if score == 0 {
         (None, "Lendo a nota…".to_owned())
     } else if score >= SECURITY_RECOMMENDED {
-        (Some(("Boa", Tone::Ok)), format!("Nota {score}/100"))
+        (Some(("Boa", Tone::Ok)), format!("{score} de 100"))
     } else {
-        (Some(("Pode melhorar", Tone::Warn)), format!("Nota {score}/100"))
+        (Some(("Pode melhorar", Tone::Warn)), format!("{score} de 100"))
     };
     state_card(
+        Section::Security,
         "Proteção",
         pill,
-        vec![line],
+        value,
+        "Nota de proteção do sistema".to_owned(),
         None,
-        vec![
-            row::button("Verificar agora", Message::RefreshAll, BtnStyle::Normal),
-            open_button(Section::Security),
-        ],
+        Some(card_action("Verificar agora", Some(Message::RefreshAll))),
+        STATE_CARD_HEIGHT_WITH_PLAN,
     )
 }
 
@@ -338,18 +417,18 @@ fn backup_card(app: &ControlPanel) -> Element<'_, Message> {
     let t = &app.backup_times;
     let late = health::backup_late(t, now);
     let pill = if late { Some(("Atrasado", Tone::Bad)) } else { None };
+    let value = t.last.map_or_else(|| "Nunca rodou".to_owned(), |l| ago(now, l));
+    let meta = format!("Próximo: {}", t.next.map_or_else(|| "—".to_owned(), |n| ahead(now, n)));
+    let run = row::when_idle(app.busy, backup_message());
     state_card(
+        Section::Backup,
         "Backup",
         pill,
-        vec![
-            format!("Último: {}", t.last.map_or_else(|| "nunca rodou".to_owned(), |l| ago(now, l))),
-            format!("Próximo: {}", t.next.map_or_else(|| "—".to_owned(), |n| ahead(now, n))),
-        ],
+        value,
+        meta,
         None,
-        vec![
-            row::button("Executar agora", backup_message(), BtnStyle::Normal),
-            open_button(Section::Backup),
-        ],
+        Some(card_action("Executar agora", run)),
+        STATE_CARD_HEIGHT_WITH_PLAN,
     )
 }
 
@@ -365,21 +444,27 @@ fn network_card(app: &ControlPanel) -> Element<'_, Message> {
         None => "VPN desligada".to_owned(),
     };
     let pill = net.connection.is_some().then_some(("Conectada", Tone::Ok));
-    state_card("Rede", pill, vec![conn, vpn], None, vec![open_button(Section::Network)])
+    state_card(Section::Network, "Rede", pill, conn, vpn, None, None, STATE_CARD_HEIGHT)
 }
 
 fn displays_card(app: &ControlPanel) -> Element<'_, Message> {
-    let count = app
-        .displays
-        .as_ref()
-        .map_or_else(|| "—".to_owned(), |d| d.iter().filter(|d| d.enabled).count().to_string());
+    let count = app.displays.as_ref().map(|d| d.iter().filter(|d| d.enabled).count());
+    let value = match count {
+        Some(1) => "1 tela".to_owned(),
+        Some(n) => format!("{n} telas"),
+        None => "—".to_owned(),
+    };
     let primary = app.primary_display.clone().unwrap_or_else(|| "—".to_owned());
+    let pill = count.map(|_| ("OK", Tone::Info));
     state_card(
+        Section::Displays,
         "Monitores",
+        pill,
+        value,
+        format!("Principal: {primary}"),
         None,
-        vec![format!("{count} ativo(s)"), format!("Principal: {primary}")],
         None,
-        vec![open_button(Section::Displays)],
+        STATE_CARD_HEIGHT,
     )
 }
 
@@ -402,10 +487,13 @@ fn services_card(app: &ControlPanel) -> Element<'_, Message> {
         .iter()
         .filter(|(unit, h)| health::is_stopped(h) && units.iter().any(|u| u.unit == *unit && u.is_system))
         .count();
-    let mut lines = vec![format!("{active} de {} ativos", units.len())];
-    if stopped_system > 0 {
-        lines.push(format!("{stopped_system} de sistema parado(s): abra a seção"));
-    }
+    let meta = if stopped_system > 0 {
+        format!("{stopped_system} de sistema parado(s): abra a seção")
+    } else if stopped_user.is_empty() {
+        "Nenhum serviço parado".to_owned()
+    } else {
+        format!("Parados: {}", stopped_user.join(", "))
+    };
     let restart = (!app.busy && !stopped_user.is_empty()).then(|| {
         Message::RunAction(
             "Reiniciar serviços parados",
@@ -413,72 +501,123 @@ fn services_card(app: &ControlPanel) -> Element<'_, Message> {
             false,
         )
     });
-    let pill = (!stopped_user.is_empty() || stopped_system > 0).then_some(("Atenção", Tone::Warn));
+    let pill = if !stopped_user.is_empty() || stopped_system > 0 {
+        Some(("Atenção", Tone::Warn))
+    } else {
+        Some(("OK", Tone::Ok))
+    };
     state_card(
+        Section::System,
         "Serviços",
         pill,
-        lines,
+        format!("{active} de {} ativos", units.len()),
+        meta,
         None,
-        vec![
-            widget::button::standard("Reiniciar parados").on_press_maybe(restart).into(),
-            open_button(Section::System),
-        ],
+        Some(card_action("Reiniciar parados", restart)),
+        STATE_CARD_HEIGHT,
     )
 }
 
 fn quick_actions(app: &ControlPanel) -> Element<'_, Message> {
     let enabled = !app.busy;
-    let item = |label: &'static str, msg: Message| -> Element<'_, Message> {
-        widget::button::standard(label)
-            .on_press_maybe(enabled.then_some(msg))
-            .width(Length::Fill)
-            .into()
+    let item = |ico: &'static str, label: &'static str, msg: Message| -> Element<'_, Message> {
+        widget::button::custom(
+            widget::row::with_children(vec![
+                widget::icon::icon(icon(ico))
+                    .size(16)
+                    .class(theme::Svg::Custom(std::rc::Rc::new(|theme| iced::widget::svg::Style {
+                        color: Some(row::accent(theme)),
+                    })))
+                    .into(),
+                widget::text(label).size(13.0).into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .height(Length::Fill),
+        )
+        .height(Length::Fixed(40.0))
+        .padding([0, 12])
+        .width(Length::Fill)
+        .class(row::btn_class(Btn::Tile, 10.0))
+        .on_press_maybe(enabled.then_some(msg))
+        .into()
     };
     let cells = vec![
-        item("Notificação de teste", Message::NotifSendTest),
-        item("Testar recorte", Message::RunScreenshot),
-        item("Executar backup", backup_message()),
-        item("Verificar segurança", Message::RefreshAll),
-        item("Reiniciar painel", Message::RestartPanel),
-        item("Bloquear tela", Message::GreeterTestLock),
+        item("mail-send-symbolic", "Notificação de teste", Message::NotifSendTest),
+        item(Section::Capture.icon(), "Testar recorte", Message::RunScreenshot),
+        item("media-playback-start-symbolic", "Executar backup", backup_message()),
+        item(Section::Security.icon(), "Verificar segurança", Message::RefreshAll),
+        item("view-refresh-symbolic", "Reiniciar painel", Message::RestartPanel),
+        item("system-lock-screen-symbolic", "Bloquear tela", Message::GreeterTestLock),
     ];
-    let spacing = cosmic::theme::spacing();
-    widget::column::with_children(vec![
-        container_title("Ações rápidas"),
-        grid(cells, 2),
-    ])
-    .spacing(spacing.space_xxs)
+    let mut col = widget::column::with_capacity(4).spacing(8);
+    let mut it = cells.into_iter();
+    while let (Some(a), b) = (it.next(), it.next()) {
+        let mut r = widget::row::with_capacity(2).spacing(8).push(a);
+        r = match b {
+            Some(b) => r.push(b),
+            None => r.push(widget::Space::new().width(Length::Fill)),
+        };
+        col = col.push(r);
+    }
+    panel(
+        widget::column::with_children(vec![heading("Ações rápidas"), col.into()])
+            .spacing(10)
+            .into(),
+        [CARD_PADDING, CARD_PADDING],
+    )
     .into()
-}
-
-fn container_title<'a>(text: &'a str) -> Element<'a, Message> {
-    widget::container(heading(text)).padding([0, 18]).into()
 }
 
 fn recent_group(app: &ControlPanel) -> Element<'_, Message> {
     let now = Instant::now();
-    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    let mut col = widget::column::with_capacity(RECENT_SHOWN * 2 + 1).push(
+        widget::container(heading("Alterados recentemente")).padding([0, 0, 6, 0]),
+    );
     for (i, c) in app.recent.items().iter().enumerate().take(RECENT_SHOWN) {
-        let undo = c
-            .undo
-            .is_some()
-            .then(|| row::button("Desfazer", Message::Undo(i), BtnStyle::Normal));
         let when = now.saturating_duration_since(c.at);
         let when = if when.as_secs() < 60 { "agora".to_owned() } else { format!("há {}", span(when)) };
-        rows.push(row::list_item(c.label.as_str(), format!("{} · {when}", c.section.label()), None, undo));
+        if i > 0 {
+            col = col.push(row::hairline());
+        }
+        let mut line = widget::row::with_capacity(3)
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .padding([9, 0])
+            .push(
+                widget::column::with_children(vec![
+                    widget::text(c.label.as_str()).size(13.0).into(),
+                    faint(c.section.label()),
+                ])
+                .spacing(1)
+                .width(Length::Fill),
+            )
+            .push(faint(when));
+        if c.undo.is_some() {
+            line = line.push(
+                widget::button::custom(widget::text("Desfazer").size(12.0).font(row::medium()))
+                    .padding([6, 10])
+                    .class(row::btn_class(Btn::Link, 7.0))
+                    .on_press(Message::Undo(i)),
+            );
+        }
+        col = col.push(line);
     }
-    if rows.is_empty() {
-        rows.push(row::note("Nada alterado nesta sessão."));
+    if app.recent.items().is_empty() {
+        col = col.push(widget::container(faint("Nada alterado nesta sessão.")).padding([9, 0]));
     }
-    row::group("Alterados recentemente", None, false, rows)
+    panel(col.into(), [CARD_PADDING, CARD_PADDING]).into()
 }
 
 pub(super) fn home_view(app: &ControlPanel) -> Element<'_, Message> {
-    let spacing = cosmic::theme::spacing();
-    let mut page: Vec<Element<'_, Message>> = vec![caption(hardware_line(app))];
-    let list = alerts(&alert_input(app));
-    if !list.is_empty() {
-        page.push(alerts_group(list, app.busy));
+    let title = widget::column::with_children(vec![
+        widget::text("Visão geral").size(26.0).font(cosmic::font::bold()).into(),
+        widget::text(hardware_line(app)).size(13.0).class(theme::Text::Custom(row::dimmed)).into(),
+    ])
+    .spacing(4);
+    let mut page: Vec<Element<'_, Message>> = vec![title.into()];
+    for a in alerts(&alert_input(app)) {
+        page.push(alert_card(a, app.busy));
     }
     page.push(metrics_row(app));
     page.push(grid(
@@ -492,8 +631,13 @@ pub(super) fn home_view(app: &ControlPanel) -> Element<'_, Message> {
         ],
         3,
     ));
-    page.push(quick_actions(app));
-    page.push(recent_group(app));
-    widget::column::with_children(page).spacing(spacing.space_m).into()
+    page.push(
+        widget::row::with_children(vec![
+            widget::container(quick_actions(app)).width(Length::FillPortion(1)).into(),
+            widget::container(recent_group(app)).width(Length::FillPortion(1)).into(),
+        ])
+        .spacing(GRID_GAP)
+        .into(),
+    );
+    widget::column::with_children(page).spacing(22).into()
 }
-

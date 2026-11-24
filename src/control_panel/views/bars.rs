@@ -41,28 +41,47 @@ fn warn_text(theme: &cosmic::Theme) -> iced::widget::text::Style {
 }
 
 pub(super) fn header_start(_app: &ControlPanel) -> Vec<Element<'_, Message>> {
-    vec![widget::text::heading("Painel de Controle").into()]
+    vec![widget::row::with_children(vec![
+        widget::icon::icon(icon("preferences-other-symbolic"))
+            .size(18)
+            .class(theme::Svg::Custom(std::rc::Rc::new(|theme| iced::widget::svg::Style {
+                color: Some(row::accent(theme)),
+            })))
+            .into(),
+        widget::text("Painel de Controle").size(13.0).font(cosmic::font::semibold()).into(),
+    ])
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()]
 }
 
 /// Campo de busca falso: abre a paleta (Ctrl K).
 pub(super) fn header_center(_app: &ControlPanel) -> Vec<Element<'_, Message>> {
-    let spacing = theme::spacing();
+    let key = widget::container(widget::text("Ctrl K").size(11.0).class(theme::Text::Custom(dim)))
+        .padding([2, 6])
+        .class(theme::Container::custom(|theme| widget::container::Style {
+            border: iced::Border { radius: 5.0.into(), width: 1.0, color: row::on_alpha(theme, 0.14) },
+            ..Default::default()
+        }));
     let content = widget::row::with_children(vec![
         widget::icon::icon(icon("system-search-symbolic")).size(SMALL_ICON).into(),
-        widget::text::body("Buscar ajuste ou ação…")
+        widget::text("Buscar ajuste ou ação…")
+            .size(13.0)
             .class(theme::Text::Custom(dim))
             .width(Length::Fill)
             .into(),
-        widget::text::caption("Ctrl K").class(theme::Text::Custom(dim)).into(),
+        key.into(),
     ])
-    .spacing(spacing.space_xxs)
+    .spacing(8)
+    .height(Length::Fill)
     .align_y(Alignment::Center);
     vec![
         widget::container(
             button::custom(content)
-                .padding([spacing.space_xxs, spacing.space_xs])
+                .height(Length::Fixed(32.0))
+                .padding([0, 8, 0, 12])
                 .width(Length::Fill)
-                .class(row_class())
+                .class(search_class())
                 .on_press(Message::OpenPalette),
         )
         .max_width(SEARCH_MAX_WIDTH)
@@ -75,25 +94,40 @@ pub(super) fn header_center(_app: &ControlPanel) -> Vec<Element<'_, Message>> {
 pub(super) fn header_end(app: &ControlPanel) -> Vec<Element<'_, Message>> {
     let count = app.pending_count();
     let text = crate::control_panel::save_status(count);
-    let style: fn(&cosmic::Theme) -> iced::widget::text::Style = if count == 0 { ok_text } else { warn_text };
-    vec![widget::text::caption(text).class(theme::Text::Custom(style)).into()]
+    let ok = count == 0;
+    let style: fn(&cosmic::Theme) -> iced::widget::text::Style = if ok { ok_text } else { warn_text };
+    let dot = widget::container(widget::Space::new().width(7.0).height(7.0)).class(theme::Container::custom(
+        move |theme| {
+            let c: Color = if ok { theme.cosmic().success_color().into() } else { theme.cosmic().warning_color().into() };
+            widget::container::Style {
+                background: Some(Background::Color(c)),
+                border: iced::Border { radius: 4.0.into(), ..Default::default() },
+                ..Default::default()
+            }
+        },
+    ));
+    vec![widget::container(
+        widget::row::with_children(vec![
+            dot.into(),
+            widget::text(text).size(12.0).class(theme::Text::Custom(style)).into(),
+        ])
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding([0, 6, 0, 0])
+    .into()]
 }
 
-/// Botão achatado com contorno fino: o campo de busca do cabeçalho e o botão de avançado.
-pub(super) fn row_class() -> theme::Button {
-    let style = |hovered: bool, theme: &cosmic::Theme| {
-        let c = card(theme.cosmic());
-        let mut border: Color = theme.cosmic().background(theme.transparent).divider.into();
-        border.a *= 0.8;
-        cosmic::widget::button::Style {
-            background: Some(Background::Color(if hovered { c.hover } else { c.base }.into())),
-            border_radius: theme.cosmic().radius_xl().into(),
-            border_width: 1.0,
-            border_color: border,
-            text_color: Some(c.on.into()),
-            icon_color: Some(c.on.into()),
-            ..cosmic::widget::button::Style::new()
-        }
+/// Campo de busca do cabeçalho: fundo elevado, contorno fino, raio 9 (mockup).
+fn search_class() -> theme::Button {
+    let style = |hovered: bool, theme: &cosmic::Theme| cosmic::widget::button::Style {
+        background: Some(Background::Color(row::on_alpha(theme, if hovered { 0.09 } else { 0.06 }))),
+        border_radius: 9.0.into(),
+        border_width: 1.0,
+        border_color: row::on_alpha(theme, 0.08),
+        text_color: Some(row::on_alpha(theme, 0.68)),
+        icon_color: Some(row::on_alpha(theme, 0.68)),
+        ..cosmic::widget::button::Style::new()
     };
     theme::Button::Custom {
         active: Box::new(move |_, t| style(false, t)),
@@ -141,13 +175,13 @@ fn apply_bar_for(app: &ControlPanel) -> Option<ApplyBar> {
 pub(super) fn apply_bar(app: &ControlPanel) -> Option<Element<'_, Message>> {
     let bar = apply_bar_for(app)?;
     let spacing = theme::spacing();
-    let go = widget::button::suggested(bar.button).on_press_maybe((!app.busy).then_some(bar.msg));
+    let go = row::action_btn(bar.button, (!app.busy).then_some(bar.msg), row::BtnStyle::Primary, 32.0);
     Some(
         widget::container(
             widget::row::with_children(vec![
                 widget::icon::icon(icon("dialog-warning-symbolic")).size(SMALL_ICON).into(),
-                widget::text::body(bar.text).width(Length::Fill).into(),
-                go.into(),
+                widget::text(bar.text).size(13.0).width(Length::Fill).into(),
+                go,
             ])
             .spacing(spacing.space_xs)
             .align_y(Alignment::Center),
@@ -188,43 +222,53 @@ fn toast_icon(kind: ToastKind) -> &'static str {
 }
 
 fn toast_card(t: &Toast<Message>) -> Element<'_, Message> {
-    let spacing = theme::spacing();
     let tone = tone_of(t.kind);
-    let mut r = widget::row::with_capacity(4)
-        .spacing(spacing.space_xs)
+    let badge = widget::container(widget::icon::icon(icon(toast_icon(t.kind))).size(13))
+        .width(Length::Fixed(22.0))
+        .height(Length::Fixed(22.0))
+        .align_x(Alignment::Center)
         .align_y(Alignment::Center)
-        .push(widget::icon::icon(icon(toast_icon(t.kind))).size(SMALL_ICON))
-        .push(widget::text::body(t.text.as_str()).width(Length::Fill));
+        .class(theme::Container::custom(move |theme| {
+            let (_, fg) = row::tone_colors(theme, tone);
+            widget::container::Style {
+                background: Some(Background::Color(Color { a: 0.18, ..fg })),
+                icon_color: Some(fg),
+                border: iced::Border { radius: 11.0.into(), ..Default::default() },
+                ..Default::default()
+            }
+        }));
+    let mut r = widget::row::with_capacity(4)
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(badge)
+        .push(widget::text(t.text.as_str()).size(13.0).width(Length::Fill));
     if let Some(undo) = &t.undo {
-        r = r.push(widget::button::text("Desfazer").on_press(undo.clone()));
+        r = r.push(
+            button::custom(widget::text("Desfazer").size(12.5).font(row::medium()))
+                .padding([5, 8])
+                .class(row::btn_class(row::Btn::Link, 7.0))
+                .on_press(undo.clone()),
+        );
     }
     r = r.push(
         button::icon(icon("window-close-symbolic"))
-            .icon_size(SMALL_ICON)
-            .padding(spacing.space_xxxs)
+            .icon_size(14)
+            .padding(4)
             .on_press(Message::DismissToast(t.id)),
     );
     widget::container(r)
-        .padding([spacing.space_xs, spacing.space_s])
+        .padding([10, 12, 10, 14])
         .width(Length::Fixed(TOAST_WIDTH))
         .class(theme::Container::custom(move |theme| {
             let c = card(theme.cosmic());
-            let (_, accent) = row::tone_colors(theme, tone);
             widget::container::Style {
-                background: Some(Background::Color(
-                    theme.cosmic().background(theme.transparent).base.into(),
-                )),
+                background: Some(Background::Color(theme.cosmic().primary(theme.transparent).base.into())),
                 text_color: Some(c.on.into()),
-                icon_color: Some(accent),
-                border: iced::Border {
-                    radius: theme.cosmic().radius_s().into(),
-                    width: 1.0,
-                    color: accent,
-                },
+                border: iced::Border { radius: 12.0.into(), width: 1.0, color: row::on_alpha(theme, 0.08) },
                 shadow: iced::Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
-                    offset: iced::Vector::new(0.0, 4.0),
-                    blur_radius: 16.0,
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+                    offset: iced::Vector::new(0.0, 12.0),
+                    blur_radius: 32.0,
                 },
                 ..Default::default()
             }

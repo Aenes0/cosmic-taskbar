@@ -9,9 +9,7 @@ use cosmic::{
     theme, widget,
 };
 
-use super::legacy::{
-    TileTone, draggable_grid_tile, monitor_panel_icon, monitor_poll_for, tile_grid, tone_pill,
-};
+use super::legacy::monitor_poll_for;
 use super::row::{self, BtnStyle, Tone};
 use super::shell::action_button;
 use crate::central::monitor::config::{
@@ -100,13 +98,12 @@ fn bar_metrics_group(app: &ControlPanel) -> Element<'_, Message> {
 fn cards_group(app: &ControlPanel) -> Element<'_, Message> {
     let spacing = theme::spacing();
     let dragging = app.dragging_monitor_card;
-    let legend = widget::row::with_children(vec![
-        tone_pill("Expandido", TileTone::Teal),
-        tone_pill("Compacto", TileTone::Blue),
-        tone_pill("Reduzido", TileTone::Amber),
-        tone_pill("Oculto", TileTone::Muted),
-    ])
-    .spacing(spacing.space_xxs);
+    let legend = row::legend(&[
+        ("Expandido", Tone::Ok),
+        ("Compacto", Tone::Info),
+        ("Reduzido", Tone::Warn),
+        ("Oculto", Tone::Neutral),
+    ]);
 
     let tiles: Vec<Element<'_, Message>> = app
         .monitor_settings
@@ -122,16 +119,18 @@ fn cards_group(app: &ControlPanel) -> Element<'_, Message> {
                 MonitorCardMode::Hidden => MonitorCardMode::Full,
             };
             let (tone, status_label) = match current {
-                MonitorCardMode::Full => (TileTone::Teal, "Expandido"),
-                MonitorCardMode::Compact => (TileTone::Blue, "Compacto"),
-                MonitorCardMode::Minimal => (TileTone::Amber, "Reduzido"),
-                MonitorCardMode::Hidden => (TileTone::Muted, "Oculto"),
+                MonitorCardMode::Full => (Tone::Ok, "Expandido"),
+                MonitorCardMode::Compact => (Tone::Info, "Compacto"),
+                MonitorCardMode::Minimal => (Tone::Warn, "Reduzido"),
+                MonitorCardMode::Hidden => (Tone::Neutral, "Oculto"),
             };
             let poll_footer = monitor_poll_for(panel).map(|comp| {
                 let secs = app.monitor_settings.component_poll(comp).clamp(1, 10);
                 widget::row::with_children(vec![
-                    widget::text::caption(format!("{secs}s"))
-                        .width(Length::Fixed(26.0))
+                    widget::text(format!("{secs}s"))
+                        .size(12.0)
+                        .font(cosmic::font::mono())
+                        .width(Length::Fixed(28.0))
                         .into(),
                     widget::slider(1.0_f32..=10.0_f32, secs as f32, move |v| {
                         Message::MonitorComponentPoll(comp, v.round() as u64)
@@ -144,18 +143,18 @@ fn cards_group(app: &ControlPanel) -> Element<'_, Message> {
                 .align_y(Alignment::Center)
                 .into()
             });
-            draggable_grid_tile(
-                monitor_panel_icon(panel),
-                panel.name(),
-                status_label,
+            row::drag_tile(row::DragTile {
+                name: panel.name(),
+                mode: status_label,
                 tone,
-                dragging == Some(panel),
-                dragging.is_some(),
-                Message::MonitorCardMode(panel, next),
-                Message::MonitorDragStart(panel),
-                Message::MonitorDragOver(panel),
-                poll_footer,
-            )
+                off: current == MonitorCardMode::Hidden,
+                dragging_this: dragging == Some(panel),
+                any_dragging: dragging.is_some(),
+                on_cycle: Message::MonitorCardMode(panel, next),
+                on_drag_start: Message::MonitorDragStart(panel),
+                on_drag_over: Message::MonitorDragOver(panel),
+                footer: poll_footer,
+            })
         })
         .collect();
 
@@ -167,11 +166,9 @@ fn cards_group(app: &ControlPanel) -> Element<'_, Message> {
             row::buttons(
                 "Cartões do painel da esquerda",
                 Some("Clique no cartão para alternar o modo; arraste pelos pontos para reordenar."),
-                vec![legend.into()],
+                vec![legend],
             ),
-            widget::container(tile_grid(tiles, TILE_COLUMNS))
-                .padding(spacing.space_s)
-                .into(),
+            row::tile_grid(tiles, TILE_COLUMNS),
         ],
     )
 }
@@ -216,7 +213,6 @@ fn processes_group(app: &ControlPanel) -> Element<'_, Message> {
 }
 
 fn weather_group(app: &ControlPanel) -> Element<'_, Message> {
-    let spacing = theme::spacing();
     let place = &app.weather_place;
     let current_place = if place.detail.is_empty() {
         format!("{} ({:.3}, {:.3})", place.name, place.lat, place.lon)
@@ -234,20 +230,18 @@ fn weather_group(app: &ControlPanel) -> Element<'_, Message> {
         widget::text_input("CEP ou nome da cidade", app.weather_query.as_str())
             .on_input(Message::WeatherQueryInput)
             .on_submit(|_| Message::WeatherSearch)
+            .size(13.0)
+            .padding([8, 12])
             .width(Length::Fill)
             .into(),
-        row::button("Buscar", Message::WeatherSearch, BtnStyle::Primary),
+        row::action_btn("Buscar", Some(Message::WeatherSearch), BtnStyle::Primary, 36.0),
     ])
-    .spacing(spacing.space_xxs)
+    .spacing(8)
     .align_y(Alignment::Center);
 
     let mut rows: Vec<Element<'_, Message>> = vec![
         row::kv("Local", current_place),
-        row::buttons(
-            "Buscar local",
-            Some("CEP (ex.: 30330-330) ou nome da cidade."),
-            vec![widget::container(search).width(Length::Fill).max_width(320.0).into()],
-        ),
+        row::wide("Buscar local", Some("CEP (ex.: 30330-330) ou nome da cidade."), search.into()),
     ];
     if app.weather_searching {
         rows.push(row::note("Procurando localidade..."));

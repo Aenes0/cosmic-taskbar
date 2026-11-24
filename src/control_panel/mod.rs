@@ -541,7 +541,7 @@ pub fn run() -> cosmic::iced::Result {
         }
     }
     let settings = cosmic::app::Settings::default()
-        .size(iced::Size::new(1080.0, 740.0))
+        .size(iced::Size::new(1280.0, 900.0))
         .size_limits(iced::Limits::NONE.min_width(780.0).min_height(540.0));
     cosmic::app::run::<ControlPanel>(settings, initial_section)
 }
@@ -1005,6 +1005,25 @@ impl cosmic::Application for ControlPanel {
         let mut tasks = vec![app.reload_all()];
         if app.section == Section::Home {
             tasks.push(app.read_metrics());
+        }
+        // TEMP-PRINT: remover antes da entrega.
+        if let Some(f) = std::env::var("CP_PRINT_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
+            tasks.push(
+                Task::future(async { tokio::time::sleep(std::time::Duration::from_millis(2800)).await })
+                    .discard()
+                    .chain(views::scroll_page_to(f)),
+            );
+        }
+        if let Ok(q) = std::env::var("CP_PRINT_PAL") {
+            tasks.push(
+                Task::future(async { tokio::time::sleep(std::time::Duration::from_millis(1500)).await })
+                    .discard()
+                    .chain(Task::done(cosmic::action::app(Message::OpenPalette)))
+                    .chain(Task::done(cosmic::action::app(Message::PaletteQuery(q)))),
+            );
+        }
+        if std::env::var("CP_PRINT_ADV").is_ok() {
+            app.advanced_open = true;
         }
         (app, Task::batch(tasks))
     }

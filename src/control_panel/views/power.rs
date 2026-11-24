@@ -9,19 +9,11 @@ mod advanced;
 
 use std::sync::LazyLock;
 
-use cosmic::{
-    Element,
-    iced::{self, Alignment, Length},
-    theme,
-    widget::{self, button},
-};
+use cosmic::{Element, theme, widget};
 
 use super::row::{self, BtnStyle, Tone};
 use super::shell::action_button;
-use crate::central::{
-    services::Battery,
-    tiles::{chip_class, icon},
-};
+use crate::central::services::Battery;
 use crate::control_panel::{
     ControlPanel, Message,
     power_config::{PowerProfileKind, ProfileTuning},
@@ -104,65 +96,23 @@ fn minutes_select<'a>(
 /// Os três cartões de perfil do plano ativo (clique = `SetPowerProfile`, como sempre).
 fn profile_cards(app: &ControlPanel) -> Option<Element<'_, Message>> {
     let power = app.power.as_ref()?;
-    let spacing = theme::spacing();
-    let defs: [(&str, &str, &str, &str, Tone); 3] = [
-        (
-            "power-saver",
-            "power-profile-power-saver-symbolic",
-            "Economia",
-            "Menos consumo, ventoinhas calmas.",
-            Tone::Ok,
-        ),
-        (
-            "balanced",
-            "power-profile-balanced-symbolic",
-            "Equilibrado",
-            "Bom para o dia a dia.",
-            Tone::Warn,
-        ),
-        (
-            "performance",
-            "power-profile-performance-symbolic",
-            "Desempenho",
-            "Máximo de CPU e GPU, para jogos.",
-            Tone::Bad,
-        ),
+    let defs: [(&str, &str, &str, &str); 3] = [
+        ("power-saver", "power-profile-power-saver-symbolic", "Economia", "Menos consumo, ventoinhas calmas."),
+        ("balanced", "power-profile-balanced-symbolic", "Equilibrado", "Bom para o dia a dia."),
+        ("performance", "power-profile-performance-symbolic", "Desempenho", "Máximo de CPU e GPU, para jogos."),
     ];
-    let mut cards = widget::row::with_capacity(defs.len()).spacing(spacing.space_xs);
-    for (id, ico, label, desc, tone) in defs {
-        if !power.available.iter().any(|p| p == id) {
-            continue;
-        }
-        let head = widget::row::with_children(vec![
-            widget::icon::icon(icon(ico))
-                .size(18)
-                .class(theme::Svg::Custom(std::rc::Rc::new(move |theme| {
-                    iced::widget::svg::Style {
-                        color: Some(row::tone_colors(theme, tone).1),
-                    }
-                })))
-                .into(),
-            widget::text::body(label).into(),
-        ])
-        .spacing(spacing.space_xxs)
-        .align_y(Alignment::Center);
-        let body = widget::column::with_children(vec![head.into(), widget::text::caption(desc).into()])
-            .spacing(spacing.space_xxxs)
-            .width(Length::Fill);
-        cards = cards.push(
-            button::custom(body)
-                .padding(spacing.space_s)
-                .width(Length::Fill)
-                .class(chip_class(power.active == id))
-                .on_press(Message::SetPowerProfile(id.to_owned())),
-        );
-    }
-    Some(
-        widget::container(cards)
-            .padding([spacing.space_s, spacing.space_m])
-            .width(Length::Fill)
-            .into(),
-    )
+    let choices = defs
+        .into_iter()
+        .filter(|(id, ..)| power.available.iter().any(|p| p == id))
+        .map(|(id, ico, name, desc)| row::Choice {
+            icon: ico,
+            name,
+            desc,
+            selected: power.active == id,
+            msg: Some(Message::SetPowerProfile(id.to_owned())),
+        })
+        .collect();
+    Some(row::choice_cards(choices))
 }
 
 /// Grupo "Plano ativo": cartões de perfil, estado do daemon e o seletor "Editando".

@@ -39,7 +39,7 @@ impl Category {
         match self {
             Category::Home => "go-home-symbolic",
             Category::System => "computer-symbolic",
-            Category::Appearance => "preferences-desktop-theme-symbolic",
+            Category::Appearance => "applications-graphics-symbolic",
             Category::Tools => "applications-utilities-symbolic",
             Category::Protection => "security-high-symbolic",
             Category::Maintenance => "emblem-system-symbolic",

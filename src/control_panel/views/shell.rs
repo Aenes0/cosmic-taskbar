@@ -18,7 +18,7 @@ use super::{
     row::{self, BtnStyle, Tone},
     security, system,
 };
-use crate::central::tiles::{chip_class, icon};
+use crate::central::tiles::icon;
 use crate::control_panel::{
     ControlPanel, Message, Section, chrome,
     nav::{Category, category_of},
@@ -40,8 +40,13 @@ const SUBTITLE_SIZE: f32 = 13.5;
 const TAB_ICON: u16 = 16;
 const TAB_UNDERLINE: f32 = 2.0;
 /// Mais ações que isso no cabeçalho vão para uma linha própria abaixo do título.
-const MAX_INLINE_ACTIONS: usize = 2;
+const MAX_INLINE_ACTIONS: usize = 3;
 const ADVANCED_ICON_BOX: f32 = 32.0;
+/// Distância vertical entre os blocos da página (mockup: 22 px).
+const PAGE_GAP: f32 = 22.0;
+/// Distância entre as abas de seção (mockup: 22 px).
+const TAB_GAP: f32 = 22.0;
+const TAB_HEIGHT: f32 = 36.0;
 
 pub(super) fn view(app: &ControlPanel) -> Element<'_, Message> {
     super::row::set_view_busy(app.busy);
@@ -63,16 +68,6 @@ pub(super) fn view(app: &ControlPanel) -> Element<'_, Message> {
 
 // ── Estilos ──────────────────────────────────────────────────────────────
 
-fn dim(theme: &cosmic::Theme) -> iced::widget::text::Style {
-    let mut color = theme.cosmic().background(theme.transparent).on;
-    color.alpha *= 0.65;
-    iced::widget::text::Style { color: Some(color.into()), ..Default::default() }
-}
-
-fn accent_text(theme: &cosmic::Theme) -> iced::widget::text::Style {
-    iced::widget::text::Style { color: Some(theme.cosmic().accent_color().into()), ..Default::default() }
-}
-
 /// Botão sem fundo; no hover ganha o fundo do cartão.
 fn flat_class(radius: f32) -> theme::Button {
     let style = move |hovered: bool, theme: &cosmic::Theme| {
@@ -93,29 +88,12 @@ fn flat_class(radius: f32) -> theme::Button {
     }
 }
 
-/// Pílula com texto próprio (o `row::pill` só aceita `&str` emprestado).
-fn owned_pill(text: String, tone: Tone) -> Element<'static, Message> {
-    widget::container(widget::text(text).size(12.5).font(cosmic::font::semibold()))
-        .padding([2, theme::spacing().space_xxs])
-        .class(theme::Container::custom(move |theme| {
-            let (bg, fg) = row::tone_colors(theme, tone);
-            widget::container::Style {
-                background: Some(Background::Color(bg)),
-                text_color: Some(fg),
-                border: iced::Border { radius: theme.cosmic().radius_xl().into(), ..Default::default() },
-                ..Default::default()
-            }
-        }))
-        .into()
-}
-
 // ── Trilho ───────────────────────────────────────────────────────────────
 
 fn rail(app: &ControlPanel) -> Element<'_, Message> {
-    let spacing = theme::spacing();
     let current = category_of(app.section);
     let mut col = widget::column::with_capacity(Category::ALL.len() + 2)
-        .spacing(spacing.space_xxs)
+        .spacing(6)
         .align_x(Alignment::Center)
         .width(Length::Fill)
         .height(Length::Fill);
@@ -124,18 +102,23 @@ fn rail(app: &ControlPanel) -> Element<'_, Message> {
     }
     col = col.push(widget::space::vertical().height(Length::Fill));
     col = col.push(widget::tooltip(
-        button::icon(icon("view-refresh-symbolic"))
-            .icon_size(17)
-            .padding(spacing.space_xs)
-            .class(bars::row_class())
-            .on_press(Message::RefreshAll),
+        button::custom(
+            widget::container(widget::icon::icon(icon("view-refresh-symbolic")).size(17))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        )
+        .width(Length::Fixed(40.0))
+        .height(Length::Fixed(40.0))
+        .padding(0)
+        .class(row::btn_class(row::Btn::Tile, 12.0))
+        .on_press(Message::RefreshAll),
         widget::text::caption("Atualizar status"),
         widget::tooltip::Position::Right,
     ));
     widget::container(col)
         .width(Length::Fixed(RAIL_WIDTH))
         .height(Length::Fill)
-        .padding([spacing.space_s, 0])
+        .padding([14, 0])
         .class(theme::Container::custom(|theme| {
             let bg = theme.cosmic().background(theme.transparent);
             let mut div: Color = bg.divider.into();
@@ -150,7 +133,6 @@ fn rail(app: &ControlPanel) -> Element<'_, Message> {
 }
 
 fn rail_item(app: &ControlPanel, cat: Category, selected: bool) -> Element<'_, Message> {
-    let spacing = theme::spacing();
     let alert = cat != Category::Home && app.category_alert(cat);
     let icon_el = widget::icon::icon(icon(cat.icon())).size(RAIL_ICON);
     let pill = widget::container(icon_el)
@@ -161,8 +143,8 @@ fn rail_item(app: &ControlPanel, cat: Category, selected: bool) -> Element<'_, M
         .class(theme::Container::custom(move |theme| {
             let accent: Color = theme.cosmic().accent_color().into();
             widget::container::Style {
-                background: selected.then(|| Background::Color(Color { a: 0.22, ..accent })),
-                icon_color: selected.then_some(accent),
+                background: selected.then(|| Background::Color(Color { a: 0.18, ..accent })),
+                icon_color: Some(if selected { accent } else { row::on_alpha(theme, 0.68) }),
                 border: iced::Border {
                     radius: (RAIL_PILL.1 / 2.0).into(),
                     ..Default::default()
@@ -182,6 +164,9 @@ fn rail_item(app: &ControlPanel, cat: Category, selected: bool) -> Element<'_, M
             ))
             .width(Length::Fixed(RAIL_PILL.0))
             .height(Length::Fixed(RAIL_PILL.1))
+            // Ponto no canto do ícone, não da pílula: fica no mesmo lugar
+            // com ou sem a pílula de seleção.
+            .padding([3.0, 7.0])
             .align_x(Alignment::End)
             .align_y(Alignment::Start)
             .into(),
@@ -189,9 +174,12 @@ fn rail_item(app: &ControlPanel, cat: Category, selected: bool) -> Element<'_, M
     }
     let label = widget::text(cat.label())
         .size(RAIL_LABEL_SIZE)
-        .font(cosmic::font::semibold())
+        .font(if selected { cosmic::font::semibold() } else { row::medium() })
+        .width(Length::Fill)
         .align_x(Alignment::Center);
-    let label = if selected { label.class(theme::Text::Custom(accent_text)) } else { label };
+    let label = if selected { label } else { label.class(theme::Text::Custom(row::dimmed)) };
+    // O conteúdo ocupa toda a largura do botão; sem isso o ícone e o rótulo
+    // encostam à esquerda e cada item fica desalinhado do vizinho.
     let content = widget::column::with_children(vec![
         iced::widget::stack(layers)
             .width(Length::Fixed(RAIL_PILL.0))
@@ -199,10 +187,11 @@ fn rail_item(app: &ControlPanel, cat: Category, selected: bool) -> Element<'_, M
             .into(),
         label.into(),
     ])
-    .spacing(spacing.space_xxxs)
+    .spacing(5)
+    .width(Length::Fill)
     .align_x(Alignment::Center);
     button::custom(content)
-        .padding([spacing.space_xxs, 0])
+        .padding([8, 0, 7, 0])
         .width(Length::Fixed(RAIL_ITEM_WIDTH))
         .class(flat_class(12.0))
         .on_press(Message::SelectCategory(cat))
@@ -226,7 +215,7 @@ fn page(app: &ControlPanel) -> Element<'_, Message> {
     };
     let scroll = widget::scrollable(
         widget::container(content)
-            .padding([spacing.space_m, spacing.space_l])
+            .padding([22, 32, 80, 32])
             .center_x(Length::Fill),
     )
     .id(super::page_scroll_id())
@@ -243,9 +232,8 @@ fn page(app: &ControlPanel) -> Element<'_, Message> {
 }
 
 fn section_page(app: &ControlPanel) -> Element<'_, Message> {
-    let spacing = theme::spacing();
     let mut col = widget::column::with_capacity(6)
-        .spacing(spacing.space_m)
+        .spacing(PAGE_GAP)
         .push(trail_and_tabs(app));
     // A Tela de Login desenha o próprio título e botões dentro de `login_view` (intacto).
     if app.section != Section::Login {
@@ -261,20 +249,20 @@ fn section_page(app: &ControlPanel) -> Element<'_, Message> {
     col.into()
 }
 
-/// Trilha "Início › Categoria" e abas sublinhadas das seções da categoria (quebram linha).
+/// Trilha "Início › Categoria" e a linha de abas da categoria: ícone + rótulo, sublinhado de
+/// destaque só na ativa e uma divisória fina sob a linha inteira (quebra só se faltar largura).
 fn trail_and_tabs(app: &ControlPanel) -> Element<'_, Message> {
-    let spacing = theme::spacing();
     let cat = category_of(app.section);
     let crumbs = widget::row::with_children(vec![
-        button::custom(widget::text::caption("Início").class(theme::Text::Custom(dim)))
+        button::custom(widget::text("Início").size(12.0).class(theme::Text::Custom(row::dimmed)))
             .padding(0)
             .class(theme::Button::Link)
             .on_press(Message::SelectCategory(Category::Home))
             .into(),
-        widget::text::caption("›").class(theme::Text::Custom(dim)).into(),
-        widget::text::caption(cat.label()).class(theme::Text::Custom(dim)).into(),
+        widget::text("›").size(12.0).class(theme::Text::Custom(faint)).into(),
+        widget::text(cat.label()).size(12.0).class(theme::Text::Custom(faint)).into(),
     ])
-    .spacing(spacing.space_xxs)
+    .spacing(6)
     .align_y(Alignment::Center);
 
     let tabs: Vec<Element<'_, Message>> = cat
@@ -282,42 +270,64 @@ fn trail_and_tabs(app: &ControlPanel) -> Element<'_, Message> {
         .iter()
         .map(|&s| tab(s, s == app.section))
         .collect();
-    let tab_row = widget::row::with_children(tabs)
-        .spacing(spacing.space_m)
-        .wrap()
-        .vertical_spacing(spacing.space_xxs);
+    let tab_row = widget::row::with_children(tabs).spacing(TAB_GAP).wrap().vertical_spacing(4.0);
 
-    widget::column::with_children(vec![crumbs.into(), tab_row.into(), widget::divider::horizontal::default().into()])
-        .spacing(spacing.space_xxs)
-        .into()
+    widget::column::with_children(vec![
+        crumbs.into(),
+        widget::column::with_children(vec![tab_row.into(), row::hairline()]).into(),
+    ])
+    .spacing(10)
+    .into()
 }
 
+fn faint(theme: &cosmic::Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style { color: Some(row::on_alpha(theme, 0.58)), ..Default::default() }
+}
+
+/// Aba: texto do tema na ativa (o destaque fica só no sublinhado), esmaecido nas outras.
 fn tab(section: Section, selected: bool) -> Element<'static, Message> {
-    let spacing = theme::spacing();
-    let mut label = widget::text::body(section.label());
-    if selected {
-        label = label.class(theme::Text::Custom(accent_text)).font(cosmic::font::semibold());
-    }
+    let label = widget::text(section.label())
+        .size(13.5)
+        .font(if selected { cosmic::font::semibold() } else { row::medium() })
+        .wrapping(iced::widget::text::Wrapping::None);
     let content = widget::row::with_children(vec![
         widget::icon::icon(icon(section.icon())).size(TAB_ICON).into(),
         label.into(),
     ])
-    .spacing(spacing.space_xxs)
+    .spacing(8)
     .align_y(Alignment::Center);
+    let class = move |hovered: bool, theme: &cosmic::Theme| {
+        let fg = row::on_alpha(theme, if selected || hovered { 1.0 } else { 0.68 });
+        widget::button::Style {
+            text_color: Some(fg),
+            icon_color: Some(fg),
+            ..widget::button::Style::new()
+        }
+    };
     let underline = widget::container(widget::Space::new().height(TAB_UNDERLINE))
         .width(Length::Fill)
         .class(theme::Container::custom(move |theme| widget::container::Style {
             background: selected.then(|| Background::Color(theme.cosmic().accent_color().into())),
+            border: iced::Border { radius: 1.0.into(), ..Default::default() },
             ..Default::default()
         }));
+    // Largura `Shrink` depois dos filhos: sem isso o sublinhado (`Fill`) faz cada aba ocupar a
+    // linha toda e a fileira de abas vira uma pilha.
     widget::column::with_children(vec![
-        button::custom(content)
-            .padding([spacing.space_xxs, spacing.space_xxxs])
-            .class(flat_class(8.0))
+        button::custom(widget::container(content).height(Length::Fill).align_y(Alignment::Center))
+            .height(Length::Fixed(TAB_HEIGHT))
+            .padding([0, 2])
+            .class(theme::Button::Custom {
+                active: Box::new(move |_, t| class(false, t)),
+                disabled: Box::new(move |t| class(false, t)),
+                hovered: Box::new(move |_, t| class(true, t)),
+                pressed: Box::new(move |_, t| class(true, t)),
+            })
             .on_press(Message::SelectSection(section))
             .into(),
         underline.into(),
     ])
+    .width(Length::Shrink)
     .into()
 }
 
@@ -327,47 +337,35 @@ fn page_header(app: &ControlPanel) -> Element<'_, Message> {
     let badge = page_badge(app);
     let actions = page_actions(app);
 
-    let icon_box = widget::container(widget::icon::icon(icon(sec.icon())).size(22))
-        .width(Length::Fixed(PAGE_ICON_BOX))
-        .height(Length::Fixed(PAGE_ICON_BOX))
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .class(theme::Container::custom(|theme| {
-            let accent: Color = theme.cosmic().accent_color().into();
-            widget::container::Style {
-                background: Some(Background::Color(Color { a: 0.14, ..accent })),
-                icon_color: Some(accent),
-                border: iced::Border { radius: theme.cosmic().radius_s().into(), ..Default::default() },
-                ..Default::default()
-            }
-        }));
+    let icon_box = row::icon_box(sec.icon(), PAGE_ICON_BOX, 22, Tone::Info);
 
     let mut title = widget::row::with_capacity(2)
         .spacing(spacing.space_xs)
         .align_y(Alignment::Center)
-        .push(widget::text(sec.label()).size(TITLE_SIZE).font(cosmic::font::bold()));
+        .push(widget::text(sec.label()).size(TITLE_SIZE).font(cosmic::font::bold()).wrapping(iced::widget::text::Wrapping::None));
     if let Some((text, tone)) = badge {
-        title = title.push(owned_pill(text, tone));
+        title = title.push(row::status_pill(text, tone));
     }
     let text_col = widget::column::with_children(vec![
         title.into(),
         widget::text(section_subtitle(sec))
             .size(SUBTITLE_SIZE)
-            .class(theme::Text::Custom(dim))
+            .line_height(iced::widget::text::LineHeight::Absolute(19.0.into()))
+            .class(theme::Text::Custom(row::dimmed))
             .into(),
     ])
-    .spacing(spacing.space_xxxs)
+    .spacing(3)
     .width(Length::Fill);
 
     let inline = actions.len() <= MAX_INLINE_ACTIONS;
     let mut head = widget::row::with_capacity(3)
-        .spacing(spacing.space_s)
+        .spacing(14)
         .align_y(Alignment::Start)
         .push(icon_box)
         .push(text_col);
     if inline && !actions.is_empty() {
         head = head.push(
-            widget::row::with_children(actions).spacing(spacing.space_xxs).align_y(Alignment::Center),
+            widget::row::with_children(actions).spacing(8).align_y(Alignment::Center),
         );
         return head.into();
     }
@@ -388,7 +386,6 @@ fn page_header(app: &ControlPanel) -> Element<'_, Message> {
 
 /// "Ir para": um atalho por grupo comum da seção (grupos avançados só aparecem abertos).
 fn jump_row(app: &ControlPanel) -> Option<Element<'_, Message>> {
-    let spacing = theme::spacing();
     let groups = chrome::section_groups(app.section);
     let shown: Vec<&'static str> = groups
         .iter()
@@ -398,24 +395,31 @@ fn jump_row(app: &ControlPanel) -> Option<Element<'_, Message>> {
     if shown.len() < 2 {
         return None;
     }
-    let mut chips: Vec<Element<'_, Message>> = vec![widget::text::caption("Ir para")
-        .class(theme::Text::Custom(dim))
-        .into()];
+    let mut chips: Vec<Element<'_, Message>> = vec![widget::container(
+        widget::text("Ir para").size(12.0).class(theme::Text::Custom(faint)),
+    )
+    .padding([0, 4, 0, 0])
+    .into()];
     for g in shown {
         chips.push(
-            button::custom(widget::text::caption(g))
-                .padding([spacing.space_xxxs, spacing.space_xs])
-                .class(chip_class(app.scroll_to == Some(g)))
-                .on_press(Message::JumpTo(g))
-                .into(),
+            button::custom(
+                widget::container(widget::text(g).size(12.5).wrapping(iced::widget::text::Wrapping::None))
+                    .height(Length::Fill)
+                    .align_y(Alignment::Center),
+            )
+            .height(Length::Fixed(28.0))
+            .padding([0, 11])
+            .class(row::btn_class(row::Btn::Chip(app.scroll_to == Some(g)), 14.0))
+            .on_press(Message::JumpTo(g))
+            .into(),
         );
     }
     Some(
         widget::row::with_children(chips)
-            .spacing(spacing.space_xxs)
+            .spacing(6)
             .align_y(Alignment::Center)
             .wrap()
-            .vertical_spacing(spacing.space_xxs)
+            .vertical_spacing(6)
             .into(),
     )
 }
@@ -426,45 +430,31 @@ fn advanced_toggle(app: &ControlPanel) -> Option<Element<'_, Message>> {
     if names.is_empty() {
         return None;
     }
-    let spacing = theme::spacing();
     let open = app.advanced_open;
-    let badge = widget::container(widget::icon::icon(icon("preferences-other-symbolic")).size(TAB_ICON))
-        .width(Length::Fixed(ADVANCED_ICON_BOX))
-        .height(Length::Fixed(ADVANCED_ICON_BOX))
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .class(theme::Container::custom(|theme| {
-            let warn: Color = theme.cosmic().warning_color().into();
-            widget::container::Style {
-                background: Some(Background::Color(Color { a: 0.14, ..warn })),
-                icon_color: Some(warn),
-                border: iced::Border { radius: theme.cosmic().radius_s().into(), ..Default::default() },
-                ..Default::default()
-            }
-        }));
+    let badge = row::icon_box("preferences-other-symbolic", ADVANCED_ICON_BOX, TAB_ICON, Tone::Warn);
     let content = widget::row::with_children(vec![
         badge.into(),
         widget::column::with_children(vec![
             widget::text(if open { "Ocultar ajustes avançados" } else { "Mostrar ajustes avançados" })
                 .size(14.0)
-                .font(cosmic::font::semibold())
+                .font(row::medium())
                 .into(),
-            widget::text(names.join(" · ")).size(12.5).class(theme::Text::Custom(dim)).into(),
+            widget::text(names.join(" · ")).size(12.5).class(theme::Text::Custom(row::dimmed)).into(),
         ])
-        .spacing(spacing.space_xxxs)
+        .spacing(2)
         .width(Length::Fill)
         .into(),
         widget::icon::icon(icon(if open { "go-up-symbolic" } else { "go-down-symbolic" }))
             .size(TAB_ICON)
             .into(),
     ])
-    .spacing(spacing.space_xs)
+    .spacing(12)
     .align_y(Alignment::Center);
     Some(
         button::custom(content)
-            .padding([spacing.space_xs, spacing.space_s])
+            .padding([14, 18])
             .width(Length::Fill)
-            .class(bars::row_class())
+            .class(row::btn_class(row::Btn::Outline, 12.0))
             .on_press(Message::ToggleAdvanced)
             .into(),
     )
@@ -542,12 +532,7 @@ pub(super) fn action_button<'a>(
     style: BtnStyle,
     enabled: bool,
 ) -> Element<'a, Message> {
-    let msg = enabled.then_some(msg);
-    match style {
-        BtnStyle::Primary => widget::button::suggested(label).on_press_maybe(msg).into(),
-        BtnStyle::Normal => widget::button::standard(label).on_press_maybe(msg).into(),
-        BtnStyle::Danger => widget::button::destructive(label).on_press_maybe(msg).into(),
-    }
+    row::action_btn(label, enabled.then_some(msg), style, 34.0)
 }
 
 /// Subtítulo da página (cópia do de `legacy`, que fica até o Task 15).

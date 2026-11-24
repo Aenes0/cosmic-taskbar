@@ -3,7 +3,6 @@
 //! Barra: espaçamento, ícones (arrastar/ciclar) e apps ocultos da bandeja.
 use cosmic::{Element, theme, widget};
 
-use super::legacy::{TileTone, draggable_grid_tile, tile_grid, tone_pill};
 use super::row::{self, BtnStyle, Tone};
 use super::shell::action_button;
 use crate::central::{bar_spacing::BarSpacing, layout::Show as BarShow};
@@ -30,22 +29,22 @@ pub(super) fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
             .map(|idx| choices[(idx + 1) % choices.len()])
             .unwrap_or(choices[0]);
         let (tone, status_label) = match current {
-            BarShow::Always => (TileTone::Teal, "Sempre"),
-            BarShow::Active => (TileTone::Amber, "Ativo"),
-            BarShow::Never => (TileTone::Muted, "Nunca"),
+            BarShow::Always => (Tone::Ok, "Sempre"),
+            BarShow::Active => (Tone::Warn, "Ativo"),
+            BarShow::Never => (Tone::Neutral, "Nunca"),
         };
-        draggable_grid_tile(
-            item.icon(),
-            item.name(),
-            status_label,
+        row::drag_tile(row::DragTile {
+            name: item.name(),
+            mode: status_label,
             tone,
-            dragging == Some(item),
-            dragging.is_some(),
-            Message::SetBarIcon(item, next),
-            Message::DragBarStart(item),
-            Message::DragBarOver(item),
-            None,
-        )
+            off: current == BarShow::Never,
+            dragging_this: dragging == Some(item),
+            any_dragging: dragging.is_some(),
+            on_cycle: Message::SetBarIcon(item, next),
+            on_drag_start: Message::DragBarStart(item),
+            on_drag_over: Message::DragBarOver(item),
+            footer: None,
+        })
     };
 
     let ordered = app.panel_icons.ordered(&app.reorderable_bar_items());
@@ -53,12 +52,7 @@ pub(super) fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
         .into_iter()
         .partition(|&item| app.panel_icons.get(item) != BarShow::Never);
 
-    let legend = widget::row::with_children(vec![
-        tone_pill("Sempre", TileTone::Teal),
-        tone_pill("Ativo", TileTone::Amber),
-        tone_pill("Nunca", TileTone::Muted),
-    ])
-    .spacing(spacing.space_xxs);
+    let legend = row::legend(&[("Sempre", Tone::Ok), ("Ativo", Tone::Warn), ("Nunca", Tone::Neutral)]);
 
     let mut icon_rows: Vec<Element<'_, Message>> = vec![row::segmented(
         "Espaçamento entre ícones",
@@ -70,7 +64,7 @@ pub(super) fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
     icon_rows.push(row::buttons(
         "Ícones na barra, na ordem exibida",
         Some("Clique no cartão para alternar; arraste pelos pontos para reordenar."),
-        vec![legend.into()],
+        vec![legend],
     ));
     if visible.is_empty() {
         icon_rows.push(row::note(
@@ -78,23 +72,13 @@ pub(super) fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
         ));
     } else {
         icon_rows.push(
-            widget::container(tile_grid(
-                visible.into_iter().map(&make_tile).collect(),
-                GRID_COLUMNS,
-            ))
-            .padding(spacing.space_s)
-            .into(),
+            row::tile_grid(visible.into_iter().map(&make_tile).collect(), GRID_COLUMNS),
         );
     }
     if !hidden.is_empty() {
         icon_rows.push(row::note("Ocultos da barra (clique para ativar)"));
         icon_rows.push(
-            widget::container(tile_grid(
-                hidden.into_iter().map(&make_tile).collect(),
-                GRID_COLUMNS,
-            ))
-            .padding(spacing.space_s)
-            .into(),
+            row::tile_grid(hidden.into_iter().map(&make_tile).collect(), GRID_COLUMNS),
         );
     }
 
