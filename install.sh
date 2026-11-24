@@ -172,7 +172,15 @@ if [ "$with_power" -eq 1 ] && [ -x "extras/power/install-economia-energia.sh" ];
     fi
 fi
 
-echo "Installed. Run ./setup.sh to use the taskbar and the Start menu in the panel."
+# Puts the taskbar and the Start menu in the panel and on the keys (idempotent).
+# Only for the user's own install: a system-wide one has no user's panel to set.
+# Its stdin is closed so it asks nothing; the boot greeter and power were handled above.
+if [ "$prefix" = "$HOME/.local" ] && [ -x ./setup.sh ]; then
+    BIN="$bindir/$bin" ./setup.sh </dev/null
+    echo "Installed and set up."
+else
+    echo "Installed. Run ./setup.sh to use the taskbar and the Start menu in the panel."
+fi
 if [ "$with_boot_greeter" -eq 0 ] && [ "$prefix" = "$HOME/.local" ] && ! systemctl is-enabled --quiet aenes-greeter.service 2>/dev/null; then
     echo "Tip: run ./install.sh --with-boot-greeter (or --with-all) to also enable the custom login screen at boot."
 fi
