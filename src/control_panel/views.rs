@@ -2676,6 +2676,158 @@ fn color_swatch<'a>(hex: &str, fallback_accent: bool) -> Element<'a, Message> {
         .into()
 }
 
+fn notif_live_preview<'a>(cfg: &'a notif_cfg::NotifConfig) -> Element<'a, Message> {
+    let opacity = cfg.opacity.clamp(0.40, 1.00);
+    let radius = cfg.corner_radius.clamp(4.0, 24.0);
+    let bg_rgb = cfg.bg_rgb();
+    let accent_rgb = cfg.accent_rgb();
+    let pad = match cfg.format {
+        NotifFormat::Minimal => [6, 10],
+        NotifFormat::Compact => [8, 12],
+        NotifFormat::Full => [12, 14],
+    };
+
+    let mut card_rows: Vec<Element<'a, Message>> = vec![
+        widget::row::with_children(vec![
+            widget::icon::icon(icon("preferences-system-notifications-symbolic"))
+                .size(if cfg.format == NotifFormat::Minimal { 14 } else { 18 })
+                .into(),
+            widget::text::caption("cosmic-taskbar").width(Length::Fill).into(),
+            widget::text::caption(if cfg.timeout_secs == 0 {
+                "persistente".to_owned()
+            } else {
+                format!("{}s", cfg.timeout_secs)
+            })
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+        ])
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into(),
+        widget::text::body("Nova mensagem recebida").into(),
+    ];
+
+    if cfg.show_body && cfg.format != NotifFormat::Minimal {
+        let sample = if cfg.max_body_lines <= 1 {
+            "Prévia ao vivo do estilo da notificação."
+        } else {
+            "Prévia ao vivo: cor, opacidade, bordas e posição atualizam instantaneamente."
+        };
+        card_rows.push(
+            widget::text::caption(sample)
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+        );
+    }
+
+    if cfg.show_actions && cfg.format == NotifFormat::Full {
+        let mk_btn = |lbl: &'static str| {
+            widget::container(widget::text::caption(lbl))
+                .padding([3, 10])
+                .class(theme::Container::custom(move |theme| {
+                    let c = match accent_rgb {
+                        Some([r, g, b]) => Color::from_rgb(r, g, b),
+                        None => theme.cosmic().accent_color().into(),
+                    };
+                    let mut bg = c;
+                    bg.a = 0.22;
+                    widget::container::Style {
+                        background: Some(Background::Color(bg)),
+                        text_color: Some(c),
+                        border: iced::Border {
+                            radius: 8.0.into(),
+                            width: 1.0,
+                            color: c,
+                        },
+                        ..Default::default()
+                    }
+                }))
+                .into()
+        };
+        card_rows.push(widget::row::with_children(vec![mk_btn("Abrir"), mk_btn("Dispensar")]).spacing(6).into());
+    }
+
+    let toast_card = widget::container(widget::column::with_children(card_rows).spacing(4))
+        .padding(pad)
+        .width(Length::Fixed(if cfg.format == NotifFormat::Compact { 245.0 } else { 280.0 }))
+        .class(theme::Container::custom(move |theme| {
+            let cosmic = theme.cosmic();
+            let c = card(cosmic);
+            let bg = match bg_rgb {
+                Some([r, g, b]) => Color::from_rgba(r, g, b, opacity),
+                None => {
+                    let mut base: Color = c.base.into();
+                    base.a = opacity;
+                    base
+                }
+            };
+            let mut border_color: Color = match accent_rgb {
+                Some([r, g, b]) => Color::from_rgb(r, g, b),
+                None => cosmic.accent_color().into(),
+            };
+            border_color.a = 0.80;
+            widget::container::Style {
+                background: Some(Background::Color(bg)),
+                text_color: Some(c.on.into()),
+                icon_color: Some(border_color),
+                border: iced::Border {
+                    radius: radius.into(),
+                    width: 1.25,
+                    color: border_color,
+                },
+                shadow: iced::Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                    offset: iced::Vector::new(0.0, 5.0),
+                    blur_radius: 14.0,
+                },
+                ..Default::default()
+            }
+        }));
+
+    let (align_x, align_y) = match cfg.position {
+        NotifPosition::TopRight => (iced::alignment::Horizontal::Right, iced::alignment::Vertical::Top),
+        NotifPosition::TopCenter => (iced::alignment::Horizontal::Center, iced::alignment::Vertical::Top),
+        NotifPosition::BottomRight => (iced::alignment::Horizontal::Right, iced::alignment::Vertical::Bottom),
+        NotifPosition::BottomLeft => (iced::alignment::Horizontal::Left, iced::alignment::Vertical::Bottom),
+    };
+
+    let stage = widget::container(toast_card)
+        .width(Length::Fill)
+        .height(Length::Fixed(185.0))
+        .padding(14)
+        .align_x(align_x)
+        .align_y(align_y)
+        .class(theme::Container::custom(|_| widget::container::Style {
+            background: Some(Background::Color(Color::from_rgb(0.09, 0.11, 0.16))),
+            border: iced::Border {
+                radius: 12.0.into(),
+                width: 1.0,
+                color: Color::from_rgba(1.0, 1.0, 1.0, 0.12),
+            },
+            ..Default::default()
+        }));
+
+    card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Prévia ao vivo").width(Length::Fill).into(),
+                widget::text::caption(format!(
+                    "{} · {} · {:.0}%",
+                    cfg.position.label(),
+                    cfg.format.label(),
+                    cfg.opacity * 100.0
+                ))
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            stage.into(),
+        ])
+        .spacing(8),
+    )
+}
+
 fn notifications_view(app: &ControlPanel) -> Element<'_, Message> {
     let spacing = theme::spacing();
     let cfg = &app.notif_config;
@@ -2684,11 +2836,21 @@ fn notifications_view(app: &ControlPanel) -> Element<'_, Message> {
         widget::row::with_children(vec![
             widget::text::title3("Notificações").width(Length::Fill).into(),
             action_btn("Restaurar padrão", Message::NotifReset, false),
+            action_btn(
+                "Testar OSD",
+                Message::RunAction(
+                    "Teste OSD",
+                    "notify-send -a logi-osd -i logi-backlight -h string:x-estilo:osd -h string:x-tom:normal -h int:x-pontos:5 -h int:x-pontos-total:7 -h boolean:transient:true -t 2000 'Luz do teclado' ''".to_owned(),
+                    false,
+                ),
+                false,
+            ),
             action_btn("Enviar notificação de teste", Message::NotifSendTest, true),
         ])
         .spacing(8)
         .align_y(Alignment::Center)
         .into(),
+        notif_live_preview(cfg),
     ];
 
     // 1. Duration, Format & Position
@@ -3623,6 +3785,274 @@ fn displays_view(app: &ControlPanel) -> Element<'_, Message> {
     widget::column::with_children(items).spacing(spacing.space_m).into()
 }
 
+fn login_live_preview<'a>(g: &'a data::GreeterConfig) -> Element<'a, Message> {
+    let is_light = g.theme == "light";
+    let accent_rgb = parse_hex_color(&g.accent_color);
+    let dim = g.dim_opacity.clamp(0.0, 0.85);
+    let card_op = g.card_opacity.clamp(0.0, 0.95);
+    let card_rad = g.card_radius.clamp(4.0, 32.0);
+    let text_col = if is_light {
+        Color::from_rgb(0.10, 0.12, 0.16)
+    } else {
+        Color::from_rgb(0.95, 0.96, 0.99)
+    };
+    let sub_col = if is_light {
+        Color::from_rgba(0.10, 0.12, 0.16, 0.72)
+    } else {
+        Color::from_rgba(0.95, 0.96, 0.99, 0.72)
+    };
+
+    let clock_px: f32 = match g.clock_size.as_str() {
+        "small" => 26.0,
+        "medium" => 34.0,
+        "huge" => 48.0,
+        _ => 40.0,
+    };
+    let time_str = match (g.clock_24h, g.show_seconds) {
+        (true, true) => "23:54:08",
+        (true, false) => "23:54",
+        (false, true) => "11:54:08 PM",
+        (false, false) => "11:54 PM",
+    };
+    let user_label = if g.default_user.trim().is_empty() {
+        "alexandre"
+    } else {
+        g.default_user.trim()
+    };
+
+    let clock_block: Element<'a, Message> = if g.style == "android" {
+        let mut col: Vec<Element<'a, Message>> = vec![
+            widget::text::body("23").size(clock_px).into(),
+            widget::text::body("54").size(clock_px).into(),
+        ];
+        if g.show_date {
+            col.push(widget::text::caption("seg, 23 nov").into());
+        }
+        widget::column::with_children(col)
+            .spacing(0)
+            .align_x(Alignment::Center)
+            .into()
+    } else {
+        let mut col: Vec<Element<'a, Message>> = vec![widget::text::body(time_str).size(clock_px).into()];
+        if g.show_date {
+            col.push(widget::text::caption("segunda-feira, 23 de novembro").into());
+        }
+        let align = if g.style == "editorial" {
+            Alignment::Start
+        } else {
+            Alignment::Center
+        };
+        widget::column::with_children(col)
+            .spacing(2)
+            .align_x(align)
+            .into()
+    };
+
+    let mut login_parts: Vec<Element<'a, Message>> = Vec::new();
+    if g.show_avatar {
+        login_parts.push(
+            widget::container(widget::icon::icon(icon("avatar-default-symbolic")).size(22))
+                .width(Length::Fixed(40.0))
+                .height(Length::Fixed(40.0))
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Center)
+                .class(theme::Container::custom(move |theme| {
+                    let acc = match accent_rgb {
+                        Some([r, g, b]) => Color::from_rgb(r, g, b),
+                        None => theme.cosmic().accent_color().into(),
+                    };
+                    let mut bg = acc;
+                    bg.a = 0.25;
+                    widget::container::Style {
+                        background: Some(Background::Color(bg)),
+                        icon_color: Some(acc),
+                        border: iced::Border {
+                            radius: 20.0.into(),
+                            width: 1.5,
+                            color: acc,
+                        },
+                        ..Default::default()
+                    }
+                }))
+                .into(),
+        );
+    }
+    if g.show_username {
+        login_parts.push(widget::text::body(user_label).into());
+    }
+    login_parts.push(
+        widget::container(
+            widget::row::with_children(vec![
+                widget::text::caption("••••••••••").width(Length::Fill).into(),
+                widget::icon::icon(icon("go-next-symbolic")).size(14).into(),
+            ])
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([6, 10])
+        .width(Length::Fixed(165.0))
+        .class(theme::Container::custom(move |theme| {
+            let acc = match accent_rgb {
+                Some([r, g, b]) => Color::from_rgb(r, g, b),
+                None => theme.cosmic().accent_color().into(),
+            };
+            widget::container::Style {
+                background: Some(Background::Color(if is_light {
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.72)
+                } else {
+                    Color::from_rgba(0.05, 0.06, 0.09, 0.65)
+                })),
+                text_color: Some(sub_col),
+                icon_color: Some(acc),
+                border: iced::Border {
+                    radius: (card_rad * 0.5).clamp(4.0, 14.0).into(),
+                    width: 1.0,
+                    color: acc,
+                },
+                ..Default::default()
+            }
+        }))
+        .into(),
+    );
+
+    let login_card: Element<'a, Message> = widget::container(
+        widget::column::with_children(login_parts)
+            .spacing(6)
+            .align_x(Alignment::Center),
+    )
+    .padding(if card_op > 0.02 { 14 } else { 6 })
+    .class(theme::Container::custom(move |_| {
+        let base = if is_light {
+            Color::from_rgba(1.0, 1.0, 1.0, card_op)
+        } else {
+            Color::from_rgba(0.08, 0.10, 0.14, card_op)
+        };
+        widget::container::Style {
+            background: (card_op > 0.02).then_some(Background::Color(base)),
+            text_color: Some(text_col),
+            border: iced::Border {
+                radius: card_rad.into(),
+                width: if card_op > 0.02 { 1.0 } else { 0.0 },
+                color: Color::from_rgba(1.0, 1.0, 1.0, 0.18),
+            },
+            ..Default::default()
+        }
+    }))
+    .into();
+
+    let inner: Element<'a, Message> = match g.style.as_str() {
+        "sidebar" => widget::row::with_children(vec![
+            widget::container(login_card)
+                .width(Length::Fixed(210.0))
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Center)
+                .into(),
+            widget::container(clock_block)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Center)
+                .into(),
+        ])
+        .spacing(12)
+        .height(Length::Fill)
+        .into(),
+        "editorial" => widget::row::with_children(vec![
+            widget::container(clock_block)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Bottom)
+                .into(),
+            widget::container(login_card)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right)
+                .align_y(iced::alignment::Vertical::Center)
+                .into(),
+        ])
+        .spacing(12)
+        .height(Length::Fill)
+        .into(),
+        "macos" => widget::column::with_children(vec![
+            widget::container(clock_block)
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .into(),
+            widget::space::vertical().height(Length::Fill).into(),
+            widget::container(login_card)
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .into(),
+        ])
+        .height(Length::Fill)
+        .into(),
+        _ => widget::column::with_children(vec![
+            widget::container(clock_block)
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .into(),
+            widget::container(login_card)
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .into(),
+        ])
+        .spacing(12)
+        .align_x(Alignment::Center)
+        .into(),
+    };
+
+    let wp_badge = match g.wallpaper_mode.as_str() {
+        "rotate_on_lock" => "Wallpaper: a cada bloqueio",
+        "rotate_interval" => "Wallpaper: rotativo por intervalo",
+        _ => "Wallpaper: fixo",
+    };
+
+    let stage = widget::container(inner)
+        .width(Length::Fill)
+        .height(Length::Fixed(245.0))
+        .padding(18)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .class(theme::Container::custom(move |_| {
+            let (r, gg, b) = if is_light {
+                (0.82 * (1.0 - dim), 0.87 * (1.0 - dim), 0.94 * (1.0 - dim))
+            } else {
+                (0.11 * (1.0 - dim), 0.16 * (1.0 - dim), 0.27 * (1.0 - dim))
+            };
+            widget::container::Style {
+                background: Some(Background::Color(Color::from_rgb(r, gg, b))),
+                text_color: Some(text_col),
+                border: iced::Border {
+                    radius: 14.0.into(),
+                    width: 1.5,
+                    color: Color::from_rgba(1.0, 1.0, 1.0, 0.14),
+                },
+                ..Default::default()
+            }
+        }));
+
+    card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Prévia ao vivo da Tela de Bloqueio")
+                    .width(Length::Fill)
+                    .into(),
+                widget::text::caption(format!(
+                    "{} · {} · {}",
+                    g.style, g.font_family, wp_badge
+                ))
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            stage.into(),
+        ])
+        .spacing(8),
+    )
+}
+
 fn login_view(app: &ControlPanel) -> Element<'_, Message> {
     let spacing = theme::spacing();
     let g = &app.greeter;
@@ -3640,6 +4070,7 @@ fn login_view(app: &ControlPanel) -> Element<'_, Message> {
         .spacing(8)
         .align_y(Alignment::Center)
         .into(),
+        login_live_preview(g),
     ];
 
     // Status & security card
@@ -3778,6 +4209,24 @@ fn login_view(app: &ControlPanel) -> Element<'_, Message> {
                 )
                 .on_input(Message::GreeterWallpaperDirInput)
                 .width(Length::Fill)
+                .into(),
+                widget::row::with_children(
+                    [
+                        ("~/Imagens", "~/Imagens"),
+                        ("~/Imagens/Wallpapers", "Wallpapers"),
+                        ("/mnt/dados/Imagens", "/mnt/dados/Imagens"),
+                    ]
+                    .into_iter()
+                    .map(|(dir, lbl)| {
+                        small_chip(
+                            lbl,
+                            g.wallpaper_dir == dir,
+                            Message::GreeterWallpaperDirInput(dir.to_owned()),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                )
+                .spacing(6)
                 .into(),
             ])
             .spacing(4)
