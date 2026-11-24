@@ -473,26 +473,18 @@ pub async fn apply_profile_now(profile_id: &str, tuning: &ProfileTuning) -> Stri
         .status()
         .await
         .is_ok_and(|s| s.success());
-    if daemon_active {
-        let bounce_to = if kind == PowerProfileKind::Balanced {
-            "power-saver"
-        } else {
-            "balanced"
-        };
-        let _ = crate::central::services::set_power_profile(bounce_to.to_owned()).await;
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-        if crate::central::services::set_power_profile(kind.id().to_owned())
+    if daemon_active
+        && crate::central::services::set_power_profile(kind.id().to_owned())
             .await
             .is_ok()
-        {
-            return match idle_err {
-                Some(e) => format!(
-                    "Plano {} aplicado via daemon (sem senha), mas houve erro ao salvar tempos de tela: {e}",
-                    kind.label()
-                ),
-                None => format!("✓ Plano {} salvo e aplicado automaticamente (sem senha).", kind.label()),
-            };
-        }
+    {
+        return match idle_err {
+            Some(e) => format!(
+                "Plano {} aplicado via daemon (sem senha), mas houve erro ao salvar tempos de tela: {e}",
+                kind.label()
+            ),
+            None => format!("✓ Plano {} salvo e aplicado automaticamente (sem senha).", kind.label()),
+        };
     }
 
     let installed = PathBuf::from("/usr/local/bin/economia-energia");

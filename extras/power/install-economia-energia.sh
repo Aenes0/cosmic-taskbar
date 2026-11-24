@@ -42,6 +42,9 @@ install -Dm0755 "$SCRIPT_DIR/economia-energia" /usr/local/bin/economia-energia
 install -Dm0755 "$SCRIPT_DIR/economia-energia-daemon" /usr/local/bin/economia-energia-daemon
 install -Dm0755 "$SCRIPT_DIR/economia-energia-ventoinhas" /usr/local/bin/economia-energia-ventoinhas
 install -Dm0644 "$SCRIPT_DIR/economia-energia.service" /etc/systemd/system/economia-energia.service
+if [ -f "$SCRIPT_DIR/io.github.Aenes0.EconomiaEnergia.conf" ]; then
+    install -Dm0644 "$SCRIPT_DIR/io.github.Aenes0.EconomiaEnergia.conf" /etc/dbus-1/system.d/io.github.Aenes0.EconomiaEnergia.conf
+fi
 
 # Economia de energia de áudio no boot (snd_hda_intel)
 install -dm0755 /etc/modprobe.d
@@ -66,5 +69,7 @@ udevadm control --reload 2>/dev/null || true
 udevadm trigger --subsystem-match=powercap --subsystem-match=hidraw 2>/dev/null || true
 
 systemctl daemon-reload
+systemctl reload dbus.service 2>/dev/null || true
 systemctl enable --now economia-energia.service
-echo "[economia-energia] Instalado e ativo (daemon + modprobe + módulos + regras udev)."
+systemctl restart economia-energia.service
+echo "[economia-energia] Instalado e ativo (daemon + D-Bus SetProfile + modprobe + módulos + regras udev)."

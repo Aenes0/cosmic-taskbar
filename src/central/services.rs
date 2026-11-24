@@ -1153,8 +1153,25 @@ async fn power_profiles(conn: &zbus::Connection) -> zbus::Result<PowerProfiles> 
     Ok(PowerProfiles { active, available })
 }
 
+#[zbus::proxy(
+    interface = "io.github.Aenes0.EconomiaEnergia",
+    default_service = "io.github.Aenes0.EconomiaEnergia",
+    default_path = "/io/github/Aenes0/EconomiaEnergia"
+)]
+trait EconomiaEnergiaDaemon {
+    fn set_profile(&self, profile: &str) -> zbus::Result<()>;
+}
+
 pub async fn set_power_profile(profile: String) -> zbus::Result<()> {
     let conn = zbus::Connection::system().await?;
+    // Prefer our root daemon so offline CPUs (e.g. AMD CCD1) are brought back
+    // online atomically before `power-profiles-daemon` touches `scaling_governor`,
+    // eliminating `EBUSY` and password prompts completely.
+    if let Ok(proxy) = EconomiaEnergiaDaemonProxy::new(&conn).await
+        && proxy.set_profile(&profile).await.is_ok()
+    {
+        return Ok(());
+    }
     PowerProfilesDaemonProxy::new(&conn)
         .await?
         .set_active_profile(&profile)

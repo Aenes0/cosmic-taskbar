@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Observa o power-profiles-daemon via D-Bus e aplica ajustes para cada perfil."""
+"""Observa o power-profiles-daemon via D-Bus e aplica ajustes para cada perfil.
+
+Também expõe `io.github.Aenes0.EconomiaEnergia.SetProfile(s)` no system bus
+para que o Painel de Controle / Central troquem de plano (e religuem CPUs/CCD1
+offline antes do power-profiles-daemon) sem nunca precisar de pkexec/sudo nem
+sofrer EBUSY no driver amd_pstate.
+"""
+import glob
 import os
 import signal
 import subprocess
@@ -11,6 +18,20 @@ BUS_NAME = "net.hadess.PowerProfiles"
 OBJ_PATH = "/net/hadess/PowerProfiles"
 IFACE = "net.hadess.PowerProfiles"
 PROPS_IFACE = "org.freedesktop.DBus.Properties"
+
+OWN_BUS_NAME = "io.github.Aenes0.EconomiaEnergia"
+OWN_OBJ_PATH = "/io/github/Aenes0/EconomiaEnergia"
+OWN_IFACE = "io.github.Aenes0.EconomiaEnergia"
+OWN_XML = f"""
+<node>
+  <interface name="{OWN_IFACE}">
+    <method name="SetProfile">
+      <arg type="s" name="profile" direction="in"/>
+    </method>
+  </interface>
+</node>
+"""
+
 HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "economia-energia")
 VALID_PROFILES = {"power-saver", "balanced", "performance"}
 
@@ -21,11 +42,24 @@ def log(msg):
     print(f"economia-energia-daemon: {msg}", flush=True)
 
 
-def apply_profile(profile):
+def online_all_cpus():
+    """Religa CPUs offline (ex.: CCD1) antes do power-profiles-daemon gravar scaling_governor."""
+    for path in sorted(glob.glob("/sys/devices/system/cpu/cpu[1-9]*/online")):
+        try:
+            with open(path, "r") as fh:
+                if fh.read().strip() == "1":
+                    continue
+            with open(path, "w") as fh:
+                fh.write("1")
+        except OSError:
+            pass
+
+
+def apply_profile(profile, force=False):
     if profile not in VALID_PROFILES:
         log(f"perfil desconhecido ignorado: {profile}")
         return
-    if state["profile"] == profile:
+    if not force and state["profile"] == profile:
         return
     log(f"perfil={profile} -> {HELPER} {profile}")
     res = subprocess.run([HELPER, profile], check=False)
@@ -53,6 +87,47 @@ def read_active_profile(conn):
         return None
 
 
+def set_ppd_profile(conn, profile):
+    conn.call_sync(
+        BUS_NAME,
+        OBJ_PATH,
+        PROPS_IFACE,
+        "Set",
+        GLib.Variant("(ssv)", (IFACE, "ActiveProfile", GLib.Variant("s", profile))),
+        None,
+        Gio.DBusCallFlags.NONE,
+        5000,
+        None,
+    )
+
+
+def on_method_call(conn, sender, path, iface, method, params, invocation):
+    if method != "SetProfile":
+        invocation.return_dbus_error(
+            "org.freedesktop.DBus.Error.UnknownMethod",
+            f"Metodo desconhecido: {method}",
+        )
+        return
+    (profile,) = params.unpack()
+    if profile not in VALID_PROFILES:
+        invocation.return_dbus_error(
+            "org.freedesktop.DBus.Error.InvalidArgs",
+            f"Perfil invalido: {profile}",
+        )
+        return
+    try:
+        online_all_cpus()
+        set_ppd_profile(conn, profile)
+        apply_profile(profile, force=True)
+        invocation.return_value(None)
+    except Exception as err:
+        log(f"erro em SetProfile({profile}): {err}")
+        invocation.return_dbus_error(
+            "io.github.Aenes0.EconomiaEnergia.Failed",
+            str(err),
+        )
+
+
 def on_properties_changed(conn, sender, path, iface, sig, params):
     changed_iface, changed_props, _invalidated = params.unpack()
     if changed_iface == IFACE and "ActiveProfile" in changed_props:
@@ -67,6 +142,21 @@ def on_name_appeared(conn, name, owner):
 
 def main():
     conn = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+    node_info = Gio.DBusNodeInfo.new_for_xml(OWN_XML)
+    conn.register_object(
+        OWN_OBJ_PATH,
+        node_info.interfaces[0],
+        on_method_call,
+        None,
+        None,
+    )
+    Gio.bus_own_name_on_connection(
+        conn,
+        OWN_BUS_NAME,
+        Gio.BusNameOwnerFlags.REPLACE,
+        None,
+        None,
+    )
     conn.signal_subscribe(
         BUS_NAME,
         PROPS_IFACE,
