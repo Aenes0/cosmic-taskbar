@@ -882,6 +882,41 @@ impl App {
         let t = strings();
         let spacing = theme::spacing();
         let mut body = vec![section(t.output)];
+        if let Some(volume) = &self.volume {
+            let pct = if volume.muted {
+                0
+            } else {
+                (volume.level * 100.0).round() as u32
+            };
+            let master_label = if crate::shared::locale::portuguese() {
+                "Volume principal"
+            } else {
+                "Master volume"
+            };
+            body.push(
+                padded_control(
+                    widget::column::with_children(vec![
+                        widget::row::with_children(vec![
+                            widget::text::caption(master_label).width(Length::Fill).into(),
+                            widget::text::caption(format!("{pct}%")).into(),
+                        ])
+                        .align_y(Alignment::Center)
+                        .into(),
+                        Level::new(
+                            widget::icon::icon(icon(self.volume_icon())).size(20),
+                            volume.level,
+                            |level| Message::SetVolume(level * 100.0),
+                        )
+                        .on_release(Message::AdjustDone)
+                        .on_icon_press(Some(Message::ToggleMute))
+                        .dimmed(volume.muted)
+                        .into(),
+                    ])
+                    .spacing(spacing.space_xxs),
+                )
+                .into(),
+            );
+        }
         if let Some((sinks, default)) = &self.sinks {
             for sink in sinks {
                 let active = &sink.name == default;

@@ -449,7 +449,7 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
             let rounded = ((v / 100.0).round() as u32) * 100;
             Message::PowerCpuMaxMhz(if rounded < 800 { 0 } else { rounded })
         })
-        .step(100.0)
+        .step(100.0_f32)
         .width(Length::Fill)
         .into(),
         widget::row::with_children(freq_presets).spacing(4).into(),
@@ -474,7 +474,7 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
                 widget::slider(10.0..=100.0, t.intel_max_perf_pct as f32, |v| {
                     Message::PowerIntelMaxPerf(v.round() as u32)
                 })
-                .step(5.0)
+                .step(5.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])
@@ -493,7 +493,7 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
                 widget::slider(0.0..=100.0, t.rapl_pl1_w.min(100) as f32, |v| {
                     Message::PowerRaplPl1(v.round() as u32)
                 })
-                .step(1.0)
+                .step(1.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])
@@ -512,7 +512,7 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
                 widget::slider(0.0..=120.0, t.rapl_pl2_w.min(120) as f32, |v| {
                     Message::PowerRaplPl2(v.round() as u32)
                 })
-                .step(1.0)
+                .step(1.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])
@@ -540,7 +540,7 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
             widget::slider(0.0..=max_cores_cap as f32, t.max_online_cores as f32, |v| {
                 Message::PowerMaxOnlineCores(v.round() as u32)
             })
-            .step(1.0)
+            .step(1.0_f32)
             .width(Length::Fill)
             .into(),
         ])
@@ -577,7 +577,7 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
                     let w = ((v / 5.0).round() as u32) * 5;
                     Message::PowerNvidiaPowerLimit(if w < 50 { 0 } else { w })
                 })
-                .step(5.0)
+                .step(5.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])
@@ -592,7 +592,7 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
                     let m = ((v / 50.0).round() as u32) * 50;
                     Message::PowerNvidiaGpuClock(if m < 300 { 0 } else { m })
                 })
-                .step(50.0)
+                .step(50.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])
@@ -607,7 +607,7 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
                     let m = ((v / 100.0).round() as u32) * 100;
                     Message::PowerNvidiaMemClock(if m < 400 { 0 } else { m })
                 })
-                .step(100.0)
+                .step(100.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])
@@ -637,7 +637,7 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
                     let m = ((v / 50.0).round() as u32) * 50;
                     Message::PowerIntelIgpuMaxMhz(if m < 300 { 0 } else { m })
                 })
-                .step(50.0)
+                .step(50.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])
@@ -2778,7 +2778,7 @@ fn notifications_view(app: &ControlPanel) -> Element<'_, Message> {
                 widget::slider(40.0..=100.0, (cfg.opacity * 100.0).round(), |v| {
                     Message::NotifOpacity(v / 100.0)
                 })
-                .step(1.0)
+                .step(1.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])
@@ -2794,7 +2794,7 @@ fn notifications_view(app: &ControlPanel) -> Element<'_, Message> {
                     cfg.corner_radius,
                     Message::NotifCornerRadius,
                 )
-                .step(1.0)
+                .step(1.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])
@@ -3015,7 +3015,7 @@ fn devices_osd_view(app: &ControlPanel) -> Element<'_, Message> {
                 widget::slider(200.0..=10000.0, dur_ms.min(10000) as f32, |v| {
                     Message::OsdDurationMs(((v / 100.0).round() as u64) * 100)
                 })
-                .step(100.0)
+                .step(100.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])
@@ -3039,7 +3039,7 @@ fn devices_osd_view(app: &ControlPanel) -> Element<'_, Message> {
                 widget::slider(5.0..=50.0, cfg.battery_low.clamp(5, 50) as f32, |v| {
                     Message::OsdBatteryLow(v.round() as u8)
                 })
-                .step(1.0)
+                .step(1.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])
@@ -3055,7 +3055,7 @@ fn devices_osd_view(app: &ControlPanel) -> Element<'_, Message> {
                     cfg.battery_critical as f32,
                     |v| Message::OsdBatteryCritical(v.round() as u8),
                 )
-                .step(1.0)
+                .step(1.0_f32)
                 .width(Length::Fill)
                 .into(),
             ])

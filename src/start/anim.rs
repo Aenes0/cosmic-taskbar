@@ -3,7 +3,7 @@
 //! The menu's open/close animation: its spring constants and the slide. The
 //! spring itself is shared with the taskbar (`shared::anim`).
 
-pub use crate::shared::anim::{Spring, motion_scale};
+pub use crate::shared::anim::Spring;
 
 /// Spring constants: snappy open with a hint of overshoot, fast clean close.
 pub const OPEN: (f32, f32) = (750.0, 48.0);

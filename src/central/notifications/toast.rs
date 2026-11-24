@@ -36,6 +36,8 @@ pub const TOAST_WIDTH: f32 = 368.0;
 pub struct Toast {
     pub notification: Notification,
     pub shown_at: Instant,
+    /// Accumulated time spent paused while the pointer hovers over the toast stack.
+    pub paused_for: Duration,
 }
 
 impl Toast {
@@ -43,11 +45,18 @@ impl Toast {
         Self {
             notification,
             shown_at: Instant::now(),
+            paused_for: Duration::ZERO,
         }
     }
 
+    pub fn pause_step(&mut self, delta: Duration) {
+        self.paused_for += delta;
+    }
+
     pub fn is_expired(&self, timeout_secs: u32) -> bool {
-        timeout_secs > 0 && self.shown_at.elapsed() >= Duration::from_secs(u64::from(timeout_secs))
+        timeout_secs > 0
+            && self.shown_at.elapsed().saturating_sub(self.paused_for)
+                >= Duration::from_secs(u64::from(timeout_secs))
     }
 }
 
@@ -107,11 +116,7 @@ fn toast_card_style(cfg: &NotifConfig) -> theme::Container<'static> {
                 width: 1.25,
                 color: border_color,
             },
-            shadow: iced::Shadow {
-                color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
-                offset: iced::Vector::new(0.0, 6.0),
-                blur_radius: 18.0,
-            },
+            shadow: crate::shared::tokens::popup_shadow(),
             ..Default::default()
         }
     })
@@ -150,6 +155,7 @@ pub fn view<'a, M: Clone + 'static>(
     cfg: &'a NotifConfig,
     on_dismiss: impl Fn(u32) -> M + Copy + 'a,
     on_invoke: impl Fn(u32, String) -> M + Copy + 'a,
+    on_hover: impl Fn(bool) -> M + Copy + 'a,
 ) -> Element<'a, M> {
     let gap = match cfg.format {
         NotifFormat::Full => 10,
@@ -159,9 +165,12 @@ pub fn view<'a, M: Clone + 'static>(
         .iter()
         .map(|toast| render_one(&toast.notification, cfg, on_dismiss, on_invoke))
         .collect();
-    widget::column::with_children(cards)
+    let stack = widget::column::with_children(cards)
         .spacing(gap)
-        .width(Length::Fixed(TOAST_WIDTH))
+        .width(Length::Fixed(TOAST_WIDTH));
+    widget::mouse_area(stack)
+        .on_enter(on_hover(true))
+        .on_exit(on_hover(false))
         .into()
 }
 

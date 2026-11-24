@@ -26,6 +26,7 @@ use cosmic::{
             runtime::wayland::layer_surface::{IcedMargin, IcedOutput, SctkLayerSurfaceSettings},
             shell::commands::layer_surface::{
                 Anchor, KeyboardInteractivity, Layer, destroy_layer_surface, get_layer_surface,
+                set_margin,
             },
         },
         stream,
@@ -218,15 +219,13 @@ impl TaskbarPopups {
         }
     }
 
-    fn build_layer_surface(
+    fn compute_placement(
         &self,
-        id: window::Id,
         output_name: &str,
         anchor: AnchorEdge,
         icon_center: f32,
         popup_major: f32,
-        keyboard: KeyboardInteractivity,
-    ) -> app::Task<HostMsg> {
+    ) -> (IcedOutput, Anchor, IcedMargin) {
         let info = self.output_info(output_name);
         let output = info.map_or(IcedOutput::Active, |o| IcedOutput::Output(o.output.clone()));
         let screen_major = info.map_or(1920.0, |o| {
@@ -251,6 +250,20 @@ impl TaskbarPopups {
                 IcedMargin { right: PANEL_GAP, top: lead, left: 0, bottom: 0 },
             ),
         };
+        (output, wl_anchor, margin)
+    }
+
+    fn build_layer_surface(
+        &self,
+        id: window::Id,
+        output_name: &str,
+        anchor: AnchorEdge,
+        icon_center: f32,
+        popup_major: f32,
+        keyboard: KeyboardInteractivity,
+    ) -> app::Task<HostMsg> {
+        let (output, wl_anchor, margin) =
+            self.compute_placement(output_name, anchor, icon_center, popup_major);
         get_layer_surface(SctkLayerSurfaceSettings {
             id,
             layer: Layer::Top,
@@ -285,21 +298,41 @@ impl TaskbarPopups {
                     return Task::none();
                 }
                 self.hide_gen += 1;
+                let est = estimate_preview_major(window_ids.len(), anchor.is_horizontal());
+                // Reuse the existing preview layer surface when gliding between apps
+                // on the same output/edge: zero flicker, zero Vulkan swapchain recreate.
                 if let Some(ActivePopup {
+                    id: existing_id,
                     output: cur_out,
+                    anchor: cur_anchor,
                     kind: ActiveKind::Preview(cur),
                     ..
                 }) = &mut self.active
                 {
-                    if *cur_out == output && cur.app_id == app_id {
+                    if *cur_out == output && *cur_anchor == anchor {
+                        let same_app = cur.app_id == app_id;
+                        let surface_id = *existing_id;
+                        cur.app_id = app_id;
+                        cur.icon_name = icon_name;
                         cur.window_ids = window_ids.clone();
+                        if !same_app {
+                            self.hovered_card = None;
+                            self.lifts.clear();
+                        }
                         self.request_captures(&window_ids);
-                        return Task::none();
+                        let (_, _, margin) =
+                            self.compute_placement(&output, anchor, icon_center, est);
+                        return set_margin(
+                            surface_id,
+                            margin.top,
+                            margin.right,
+                            margin.bottom,
+                            margin.left,
+                        );
                     }
                 }
                 let close = self.close_active();
                 let new_id = window::Id::unique();
-                let est = estimate_preview_major(window_ids.len(), anchor.is_horizontal());
                 let surface = self.build_layer_surface(
                     new_id,
                     &output,

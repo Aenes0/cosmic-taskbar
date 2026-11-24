@@ -100,6 +100,8 @@ pub enum Message {
     ToastDismiss(u32),
     /// Invoke a notification action button from a floating toast card.
     ToastInvoke(u32, String),
+    /// Pointer entered or left the floating toast stack (pauses auto-dismiss).
+    ToastHover(bool),
     /// Centered transient OSD pill (e.g. `logi-osd` keyboard/device status).
     Osd(toast::OsdPill),
 }
@@ -143,6 +145,10 @@ pub struct Panels {
     gpu_energy_at: Option<Instant>,
     /// Active floating notification toasts (newest first).
     toasts: Vec<Toast>,
+    /// True while the pointer is hovering over the toast stack (pauses expiry).
+    toast_hovered: bool,
+    /// Timestamp of the last `ToastTick` for accurate hover-pause accumulation.
+    last_toast_tick: Option<Instant>,
     /// Layer-shell surface currently hosting floating toasts and its anchor position.
     toast_surface: Option<(window::Id, NotifPosition)>,
     /// Notification `(id, time)` pairs already seen so old history never pops up as toasts,
@@ -340,6 +346,8 @@ impl Panels {
     /// Creates, repositions, or destroys the floating toast layer surface to match `self.toasts`.
     fn sync_toast_surface(&mut self) -> app::Task<Message> {
         if self.toasts.is_empty() {
+            self.toast_hovered = false;
+            self.last_toast_tick = None;
             return match self.toast_surface.take() {
                 Some((id, _)) => destroy_layer_surface(id),
                 None => Task::none(),
@@ -456,6 +464,8 @@ impl cosmic::Application for Panels {
             whole_screen: std::env::var("COSMIC_PANELS_SURFACE").as_deref() == Ok("screen"),
             gpu_energy_at: None,
             toasts: Vec::new(),
+            toast_hovered: false,
+            last_toast_tick: None,
             toast_surface: None,
             seen_toast_ids: initial_seen,
             notif_config: NotifConfig::load(),
@@ -590,12 +600,23 @@ impl cosmic::Application for Panels {
                 }
             }
             Message::ToastTick => {
+                let now = Instant::now();
+                let delta = self
+                    .last_toast_tick
+                    .map_or(Duration::from_millis(250), |prev| now.saturating_duration_since(prev));
+                self.last_toast_tick = Some(now);
                 let mut tasks = Vec::new();
                 let timeout = self.notif_config.timeout_secs;
-                let before = self.toasts.len();
-                self.toasts.retain(|t| !t.is_expired(timeout));
-                if self.toasts.len() != before {
-                    tasks.push(self.sync_toast_surface());
+                if self.toast_hovered {
+                    for toast in &mut self.toasts {
+                        toast.pause_step(delta);
+                    }
+                } else {
+                    let before = self.toasts.len();
+                    self.toasts.retain(|t| !t.is_expired(timeout));
+                    if self.toasts.len() != before {
+                        tasks.push(self.sync_toast_surface());
+                    }
                 }
                 if self.osd.as_ref().is_some_and(toast::OsdPill::is_expired) {
                     self.osd = None;
@@ -604,6 +625,10 @@ impl cosmic::Application for Panels {
                 if !tasks.is_empty() {
                     return Task::batch(tasks);
                 }
+            }
+            Message::ToastHover(hovered) => {
+                self.toast_hovered = hovered;
+                self.last_toast_tick = Some(Instant::now());
             }
             Message::Osd(pill) => {
                 self.osd = Some(pill);
@@ -725,6 +750,7 @@ impl cosmic::Application for Panels {
                 &self.notif_config,
                 Message::ToastDismiss,
                 Message::ToastInvoke,
+                Message::ToastHover,
             );
             return cosmic::widget::autosize::autosize(
                 stack,

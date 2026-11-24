@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use cosmic::iced::{
     Subscription,
-    futures::{self, SinkExt, StreamExt, channel::mpsc},
+    futures::{SinkExt, StreamExt, channel::mpsc},
     stream,
 };
 

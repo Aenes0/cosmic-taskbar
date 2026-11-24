@@ -23,7 +23,7 @@ pub static SWITCHER_SCROLL_ID: LazyLock<widget::Id> =
     LazyLock::new(|| widget::Id::new("cosmic-switcher-grid"));
 
 const CARD_PAD: f32 = 8.0;
-const CARD_RADIUS: f32 = 12.0;
+const CARD_RADIUS: f32 = crate::shared::tokens::POPUP_RADIUS;
 const THUMB_RADIUS: f32 = 8.0;
 const PANEL_RADIUS: f32 = 18.0;
 
@@ -150,7 +150,7 @@ pub fn view<'a>(app: &'a SwitcherApp) -> Element<'a, Msg> {
             text_color: Some(c.on_bg_color().into()),
             border: Border {
                 radius: PANEL_RADIUS.into(),
-                width: 1.0,
+                width: crate::shared::tokens::HAIRLINE_WIDTH,
                 color: border_col,
             },
             shadow: Shadow {
