@@ -80,10 +80,10 @@ impl cosmic::Application for StartMenu {
             resize: resize::Resize::Idle,
             persist_size,
             tools: false,
+            last_was_tools: false,
             power_open: false,
         };
-        let show = menu.show();
-        menu.tools = tools;
+        let show = if tools { menu.show_tools() } else { menu.show() };
         // COSMIC_START_PREVIEW=recommended, power, user, tools-power or a category's
         // number opens there; any other text searches it: to see them
         // without clicking.
@@ -138,7 +138,29 @@ impl cosmic::Application for StartMenu {
     fn update(&mut self, message: Message) -> app::Task<Message> {
         match message {
             Message::Toggle => {
-                match toggle_action(self.surface.is_some(), self.closing, self.hidden_at.elapsed()) {
+                // If the Win+X tools menu is open (or just closed on focus loss),
+                // switch directly into the main Start menu instead of dropping the click.
+                if self.surface.is_some() && self.tools {
+                    self.tools = false;
+                    self.power_open = false;
+                    self.ready = !self.apps.is_empty();
+                    let apps = reload_apps(self.apps_signature);
+                    let recents = Task::perform(
+                        async { tokio::task::spawn_blocking(load_recents).await.unwrap_or_default() },
+                        |recents| cosmic::action::app(Message::Recents(recents)),
+                    );
+                    WINDOWS_SHOWN.store(true, Ordering::Relaxed);
+                    if let Some(tx) = &self.windows_tx {
+                        _ = tx.send(Command::Refresh);
+                    }
+                    return Task::batch([apps, recents, text_input::focus(SEARCH.clone())]);
+                }
+                let since_close = if self.last_was_tools {
+                    CLICK_THAT_CLOSED
+                } else {
+                    self.hidden_at.elapsed()
+                };
+                match toggle_action(self.surface.is_some(), self.closing, since_close) {
                     ToggleAction::Hide => return self.hide(),
                     ToggleAction::Show => return self.show(),
                     ToggleAction::Reopen => {
@@ -153,14 +175,18 @@ impl cosmic::Application for StartMenu {
             }
             Message::Hide => return self.hide(),
             Message::Tools => {
-                self.preview_close();
-                self.cancel_drag();
                 if self.surface.is_some() && self.tools {
                     return self.hide();
                 }
-                let show = self.show();
-                self.tools = true;
-                return show;
+                // Right-clicking the Start button while Tools was open closed it via
+                // focus loss right before the D-Bus call arrived: treat as toggle-close.
+                if self.surface.is_none()
+                    && self.last_was_tools
+                    && self.hidden_at.elapsed() < CLICK_THAT_CLOSED
+                {
+                    return Task::none();
+                }
+                return self.show_tools();
             }
             Message::Tool(tool) => {
                 if matches!(tool, crate::start::tools::Tool::PowerMenu) {
@@ -176,12 +202,15 @@ impl cosmic::Application for StartMenu {
                 return self.hide();
             }
             // Losing the keyboard as it opens is not someone leaving it.
-            Message::Unfocused => {
+            Message::Unfocused(id) => {
+                if !accepts_size(self.surface, id) {
+                    return Task::none();
+                }
                 // The polkit dialog takes the keyboard: it is not leaving.
                 if self.uninstall_running() {
                     return Task::none();
                 }
-                if self.shown_at.elapsed() > Duration::from_millis(400) {
+                if self.shown_at.elapsed() > crate::shared::tokens::FOCUS_SETTLING {
                     return self.hide();
                 }
             }
@@ -217,8 +246,8 @@ impl cosmic::Application for StartMenu {
                 }
             }
             Message::Focus => return text_input::focus(SEARCH.clone()),
-            Message::Focused => {
-                if self.surface.is_some() {
+            Message::Focused(id) => {
+                if accepts_size(self.surface, id) && !self.tools {
                     return text_input::focus(focus_id(self.group_edit.is_some()));
                 }
             }
@@ -593,15 +622,11 @@ impl cosmic::Application for StartMenu {
                 text_color: Some(p.text),
                 icon_color: Some(p.text),
                 border: iced::Border {
-                    radius: 8.0.into(),
-                    width: 1.0,
+                    radius: crate::shared::tokens::POPUP_RADIUS.into(),
+                    width: crate::shared::tokens::HAIRLINE_WIDTH,
                     color: p.border,
                 },
-                shadow: iced::Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
-                    offset: iced::Vector::new(0.0, 6.0),
-                    blur_radius: MARGIN,
-                },
+                shadow: crate::shared::tokens::popup_shadow(),
                 ..Default::default()
             }));
         // Clicks on the menu stay there; anywhere else, they close it.

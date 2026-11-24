@@ -57,6 +57,7 @@ impl cosmic::Application for StartButton {
                 return self.close();
             }
             ButtonMessage::RightClick => {
+                self.zoom.press();
                 // Open the Win+X tools menu in the standalone Vulkan layer-shell
                 // host (`--tools`) instead of a cosmic-panel xdg_popup.
                 std::thread::spawn(|| {
@@ -127,7 +128,7 @@ impl cosmic::Application for StartButton {
         let button = button::custom(logo)
             .padding(if horizontal { [minor, major] } else { [major, minor] })
             .class(theme::Button::AppletIcon)
-            .on_press(ButtonMessage::Click);
+            .on_press_down(ButtonMessage::Click);
         applet
             .autosize_window(widget::mouse_area(button).on_right_press(ButtonMessage::RightClick))
             .into()

@@ -7,7 +7,7 @@
 
 use cosmic::{
     Element,
-    iced::{self, Alignment, Background, Color, Length},
+    iced::{self, Alignment, Background, Length},
     theme,
     widget::{self, button},
 };
@@ -101,45 +101,54 @@ fn settings(page: &str) -> Tool {
 }
 
 /// The list, as Windows orders it; `None` is a line between groups.
-fn items() -> Vec<Option<(&'static str, &'static str, Tool)>> {
-    let t = texts();
-    let mut items = vec![
-        Some(("view-app-grid-symbolic", t.installed_apps, settings("applications"))),
-        Some(("battery-good-symbolic", t.power_options, settings("power"))),
-        Some((
-            "text-x-generic-symbolic",
-            t.event_viewer,
-            Tool::InTerminal(vec!["journalctl".into(), "-b".into(), "-e".into()]),
-        )),
-        Some(("computer-symbolic", t.system, settings("about"))),
-        Some(("network-wired-symbolic", t.network_connections, settings("network"))),
-    ];
-    if which("gnome-disks") {
-        items.push(Some(("drive-harddisk-symbolic", t.disk_management, Tool::Run("gnome-disks", Vec::new()))));
-    }
-    items.extend([
-        Some(("utilities-terminal-symbolic", t.terminal, Tool::Run("cosmic-term", Vec::new()))),
-        Some((
-            "security-high-symbolic",
-            t.terminal_admin,
-            Tool::InTerminal(vec!["sudo".into(), "-i".into()]),
-        )),
-        None,
-        Some(("utilities-system-monitor-symbolic", t.task_manager, task_manager_tool())),
-        Some((
-            "preferences-system-symbolic",
-            if crate::shared::locale::portuguese() { "Painel de Controle" } else { "Control Panel" },
-            Tool::ControlPanel,
-        )),
-        Some(("emblem-system-symbolic", t.settings, Tool::Run("cosmic-settings", Vec::new()))),
-        Some(("system-file-manager-symbolic", t.file_explorer, Tool::Run("cosmic-files", Vec::new()))),
-        Some(("system-search-symbolic", t.search, Tool::Search)),
-        Some(("system-run-symbolic", t.run, Tool::Run("cosmic-launcher", Vec::new()))),
-        None,
-        Some(("system-shutdown-symbolic", t.shut_down_or_sign_out, Tool::PowerMenu)),
-        Some(("user-desktop-symbolic", t.desktop, Tool::ShowDesktop)),
-    ]);
-    items
+/// Cached once so `view()` never scans `$PATH` or stats the filesystem per frame.
+fn items() -> &'static [Option<(&'static str, &'static str, Tool)>] {
+    static ITEMS: std::sync::OnceLock<Vec<Option<(&'static str, &'static str, Tool)>>> =
+        std::sync::OnceLock::new();
+    ITEMS.get_or_init(|| {
+        let t = texts();
+        let mut items = vec![
+            Some(("view-app-grid-symbolic", t.installed_apps, settings("applications"))),
+            Some(("battery-good-symbolic", t.power_options, settings("power"))),
+            Some((
+                "text-x-generic-symbolic",
+                t.event_viewer,
+                Tool::InTerminal(vec!["journalctl".into(), "-b".into(), "-e".into()]),
+            )),
+            Some(("computer-symbolic", t.system, settings("about"))),
+            Some(("network-wired-symbolic", t.network_connections, settings("network"))),
+        ];
+        if which("gnome-disks") {
+            items.push(Some((
+                "drive-harddisk-symbolic",
+                t.disk_management,
+                Tool::Run("gnome-disks", Vec::new()),
+            )));
+        }
+        items.extend([
+            Some(("utilities-terminal-symbolic", t.terminal, Tool::Run("cosmic-term", Vec::new()))),
+            Some((
+                "security-high-symbolic",
+                t.terminal_admin,
+                Tool::InTerminal(vec!["sudo".into(), "-i".into()]),
+            )),
+            None,
+            Some(("utilities-system-monitor-symbolic", t.task_manager, task_manager_tool())),
+            Some((
+                "preferences-system-symbolic",
+                if crate::shared::locale::portuguese() { "Painel de Controle" } else { "Control Panel" },
+                Tool::ControlPanel,
+            )),
+            Some(("emblem-system-symbolic", t.settings, Tool::Run("cosmic-settings", Vec::new()))),
+            Some(("system-file-manager-symbolic", t.file_explorer, Tool::Run("cosmic-files", Vec::new()))),
+            Some(("system-search-symbolic", t.search, Tool::Search)),
+            Some(("system-run-symbolic", t.run, Tool::Run("cosmic-launcher", Vec::new()))),
+            None,
+            Some(("system-shutdown-symbolic", t.shut_down_or_sign_out, Tool::PowerMenu)),
+            Some(("user-desktop-symbolic", t.desktop, Tool::ShowDesktop)),
+        ]);
+        items
+    })
 }
 
 fn power_items() -> Vec<(&'static str, &'static str, Tool)> {
@@ -161,15 +170,11 @@ fn card<'a, M: 'static>(content: impl Into<Element<'a, M>>, width: f32, p: Palet
             text_color: Some(p.text),
             icon_color: Some(p.text),
             border: iced::Border {
-                radius: 8.0.into(),
-                width: 1.0,
+                radius: crate::shared::tokens::POPUP_RADIUS.into(),
+                width: crate::shared::tokens::HAIRLINE_WIDTH,
                 color: p.border,
             },
-            shadow: iced::Shadow {
-                color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
-                offset: iced::Vector::new(0.0, 4.0),
-                blur_radius: 12.0,
-            },
+            shadow: crate::shared::tokens::menu_shadow(),
             ..Default::default()
         }))
         .into()
@@ -206,7 +211,7 @@ pub fn view<'a, M: Clone + 'static>(power_open: bool, on: impl Fn(Tool) -> M, p:
         list = list.push(match item {
             Some((icon, label, tool)) => {
                 let arrow = matches!(tool, Tool::PowerMenu);
-                row(icon, label, arrow, on(tool), p)
+                row(icon, label, arrow, on(tool.clone()), p)
             }
             None => widget::container(
                 widget::container(widget::space::horizontal())

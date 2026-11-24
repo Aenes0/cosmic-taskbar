@@ -8,4 +8,6 @@ pub mod capture;
 pub mod journal;
 pub mod locale;
 pub mod logging;
+pub mod overlay;
 pub mod preview_card;
+pub mod tokens;

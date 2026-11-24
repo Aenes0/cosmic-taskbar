@@ -37,10 +37,11 @@ pub fn run() -> cosmic::iced::Result {
     let args: Vec<String> = std::env::args().collect();
     let panels = args.iter().position(|arg| arg == "--panels");
     // A couple of threads do: an applet waits on events, it doesn't crunch;
-    // one per core (24 here) only took memory. The panels' host, one.
+    // one per core (24 here) only took memory. Two threads for the panels'
+    // host keep D-Bus/click responsiveness separate from background GPU/DDC reads.
     if panels.is_some() {
         // SAFETY: first thing, before any thread starts.
-        unsafe { std::env::set_var("TOKIO_WORKER_THREADS", "1") };
+        unsafe { std::env::set_var("TOKIO_WORKER_THREADS", "2") };
     } else if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
         // SAFETY: first thing, before any thread starts.
         unsafe { std::env::set_var("TOKIO_WORKER_THREADS", "2") };

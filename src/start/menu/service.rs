@@ -14,17 +14,43 @@ pub fn tools_running() -> bool {
     call_running("Tools")
 }
 
-fn call_running(method: &str) -> bool {
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
-        return false;
-    };
+fn call_running(method: &'static str) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    // Keep one lightweight runtime and D-Bus session connection alive across clicks
+    // so left/right clicks on the Start button never pay a full runtime + D-Bus handshake.
+    struct Client {
+        runtime: tokio::runtime::Runtime,
+        conn: Option<zbus::Connection>,
+    }
+    static CLIENT: OnceLock<Mutex<Client>> = OnceLock::new();
+    let mutex = CLIENT.get_or_init(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("start menu dbus runtime");
+        Mutex::new(Client { runtime, conn: None })
+    });
+    let mut guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    let Client { runtime, conn } = &mut *guard;
     runtime.block_on(async {
-        let Ok(conn) = zbus::Connection::session().await else {
+        if conn.is_none() {
+            *conn = zbus::Connection::session().await.ok();
+        }
+        let Some(c) = conn.as_ref() else {
             return false;
         };
-        conn.call_method(Some(BUS_NAME), BUS_PATH, Some(BUS_NAME), method, &())
+        match c
+            .call_method(Some(BUS_NAME), BUS_PATH, Some(BUS_NAME), method, &())
             .await
-            .is_ok()
+        {
+            Ok(_) => true,
+            Err(zbus::Error::InputOutput(_)) => {
+                // Connection dropped: clear so the next call reconnects.
+                *conn = None;
+                false
+            }
+            Err(_) => false,
+        }
     })
 }
 
@@ -38,6 +64,10 @@ impl Service {
 
     async fn tools(&self) {
         _ = self.0.clone().send(Message::Tools).await;
+    }
+
+    async fn close(&self) {
+        _ = self.0.clone().send(Message::Hide).await;
     }
 }
 

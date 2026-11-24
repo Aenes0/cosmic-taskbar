@@ -269,10 +269,10 @@ pub enum Message {
     Tools,
     Tool(crate::start::tools::Tool),
     Hide,
-    Unfocused,
+    Unfocused(window::Id),
     Escape,
     Focus,
-    Focused,
+    Focused(window::Id),
     Resized(window::Id, iced::Size),
     Apps(u64, Arc<Vec<AppEntry>>),
     Trim,
@@ -438,6 +438,9 @@ pub struct StartMenu {
     persist_size: bool,
     /// Showing the tools (Win+X) instead of the menu.
     tools: bool,
+    /// Whether the last closed view was `tools` (so left-clicking Start right
+    /// after closing Tools opens Start instead of being treated as a duplicate toggle).
+    last_was_tools: bool,
     power_open: bool,
 }
 
@@ -515,7 +518,49 @@ impl StartMenu {
         let ready = Task::perform(tokio::time::sleep(Duration::from_millis(300)), |()| {
             cosmic::action::app(Message::Ready)
         });
-        Task::batch([surface, size, apps, recents, focus, ready])
+        let dismiss = Task::future(async {
+            crate::shared::overlay::dismiss_others(crate::shared::overlay::Overlay::Start).await;
+            cosmic::action::app(Message::Nothing)
+        });
+        Task::batch([surface, size, apps, recents, focus, ready, dismiss])
+    }
+
+    /// Opens the Win+X tools menu immediately without triggering Start menu
+    /// desktop-entry scans, recent-file I/O, or toplevel refreshes.
+    fn show_tools(&mut self) -> app::Task<Message> {
+        self.preview_close();
+        self.cancel_drag();
+        self.resize_cancel();
+        self.power_open = false;
+        self.tools = true;
+        self.ready = true;
+        self.closing = false;
+        self.anim = crate::start::anim::Spring::new(1.0);
+        self.anim_last = None;
+        if self.surface.is_some() {
+            return Task::none();
+        }
+        let id = window::Id::unique();
+        self.surface = Some(id);
+        self.shown_at = Instant::now();
+        self.on_top = panel_on_top();
+        let surface = get_layer_surface(SctkLayerSurfaceSettings {
+            id,
+            layer: Layer::Top,
+            keyboard_interactivity: KeyboardInteractivity::Exclusive,
+            anchor: Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
+            namespace: "central-start".into(),
+            size: Some((None, None)),
+            exclusive_zone: 0,
+            size_limits: Limits::NONE.min_width(1.0).min_height(1.0),
+            ..Default::default()
+        });
+        let size = window::size(id).map(move |size| cosmic::Action::App(Message::Resized(id, size)));
+        let dismiss = Task::future(async {
+            crate::shared::overlay::dismiss_others(crate::shared::overlay::Overlay::Start).await;
+            cosmic::action::app(Message::Nothing)
+        });
+        Task::batch([surface, size, dismiss])
     }
 
     /// Starts the menu's showing once its content is here (or it waited enough).
@@ -543,6 +588,7 @@ impl StartMenu {
             return Task::none();
         };
         self.hidden_at = Instant::now();
+        self.last_was_tools = self.tools;
         self.commit_name();
         self.cancel_drag();
         self.resize_cancel();

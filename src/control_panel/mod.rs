@@ -292,6 +292,7 @@ pub enum Message {
     RefreshAll,
     ActionDone(String),
     DismissNotice,
+    ToggleSecurityAdvanced,
     None,
 }
 
@@ -340,6 +341,7 @@ pub struct ControlPanel {
     screenshot_config: ScreenshotConfig,
     // Login (Greeter)
     greeter: data::GreeterConfig,
+    security_show_advanced: bool,
     busy: bool,
     notice: Option<String>,
 }
@@ -493,6 +495,7 @@ impl cosmic::Application for ControlPanel {
             osd_config: osd_config::load_or_default(),
             screenshot_config: ScreenshotConfig::load(),
             greeter: data::load_greeter_config(),
+            security_show_advanced: false,
             busy: false,
             notice: None,
         };
@@ -1581,6 +1584,9 @@ impl cosmic::Application for ControlPanel {
             }
             Message::DismissNotice => {
                 self.notice = None;
+            }
+            Message::ToggleSecurityAdvanced => {
+                self.security_show_advanced = !self.security_show_advanced;
             }
             Message::None => {}
         }

@@ -246,6 +246,7 @@ pub enum Message {
     ToggleShowPercentage,
     ToggleConservationMode,
     SettingsChanged,
+    SettingsLoaded(Box<SettingsSnapshot>),
     Inhibited(Option<u32>),
     WifiNetworks(Option<WifiNetworks>),
     /// Join the network at this index of the list.
@@ -324,6 +325,42 @@ pub enum Message {
     Lock,
     PowerOff,
     None,
+}
+
+/// Settings read off the UI thread so opening the popup never blocks on disk I/O.
+#[derive(Clone, Debug)]
+pub struct SettingsSnapshot {
+    tiles: Vec<Placed>,
+    panel_icons: PanelIcons,
+    layout: Layout,
+    bar_spacing: BarSpacing,
+    primary_display: Option<String>,
+    show_percentage: bool,
+    notif_config: NotifConfig,
+    do_not_disturb: bool,
+    dark_mode: bool,
+    tiling_config: services::TilingConfig,
+    touchpad: Option<services::Touchpad>,
+    hot_edge: bool,
+}
+
+impl SettingsSnapshot {
+    fn load() -> Self {
+        Self {
+            tiles: load_tiles(),
+            panel_icons: PanelIcons::load(),
+            layout: Layout::load(),
+            bar_spacing: BarSpacing::load(),
+            primary_display: layout::primary_display(),
+            show_percentage: SHOW_PERCENTAGE.get(),
+            notif_config: NotifConfig::load(),
+            do_not_disturb: DO_NOT_DISTURB.get(),
+            dark_mode: DARK_MODE.get(),
+            tiling_config: services::tiling_config(),
+            touchpad: services::touchpad(),
+            hot_edge: services::hot_edge(),
+        }
+    }
 }
 
 /// A tile being dragged to a new place, and whether it moved at all: one
@@ -1251,38 +1288,44 @@ impl App {
         }
     }
 
-    /// Reloads all user-configurable settings from disk (`cosmic_config`).
-    /// Called both on live `SettingsChanged` notifications and whenever the
-    /// hosted Central popup opens (since `central --panels` does not hold
-    /// `settings_subscription` while the popup is closed).
-    fn reload_settings(&mut self) {
+    fn apply_settings(&mut self, s: SettingsSnapshot) {
         if self.drag.is_none() && self.resizing.is_none() && self.before_edit.is_none() {
-            let tiles = load_tiles();
-            if tiles != self.tiles {
-                self.tiles = tiles;
+            if s.tiles != self.tiles {
+                self.tiles = s.tiles;
                 self.selected_tile = None;
             }
         }
-        self.panel_icons = PanelIcons::load();
-        self.layout = Layout::load();
-        self.bar_spacing = BarSpacing::load();
-        self.primary_display = layout::primary_display();
-        self.show_percentage = SHOW_PERCENTAGE.get();
-        self.notif_config = NotifConfig::load();
-        self.do_not_disturb = DO_NOT_DISTURB.get();
+        self.panel_icons = s.panel_icons;
+        self.layout = s.layout;
+        self.bar_spacing = s.bar_spacing;
+        self.primary_display = s.primary_display;
+        self.show_percentage = s.show_percentage;
+        self.notif_config = s.notif_config;
+        self.do_not_disturb = s.do_not_disturb;
         if !self.do_not_disturb && self.dnd_until.is_some() {
             self.dnd_until = None;
             services::set_dnd_until(None);
         }
-        self.dark_mode = DARK_MODE.get();
-        self.tiling_config = services::tiling_config();
-        self.touchpad = services::touchpad();
-        self.hot_edge = services::hot_edge();
+        self.dark_mode = s.dark_mode;
+        self.tiling_config = s.tiling_config;
+        self.touchpad = s.touchpad;
+        self.hot_edge = s.hot_edge;
+    }
+
+    /// Reloads all user-configurable settings from disk (`cosmic_config`).
+    fn reload_settings(&mut self) {
+        self.apply_settings(SettingsSnapshot::load());
     }
 
     /// What opening reads, the panel on its main page.
     fn opened(&mut self) -> app::Task<Message> {
-        self.reload_settings();
+        // Refresh disk settings asynchronously so the first frame renders immediately.
+        let settings = Task::future(async {
+            match tokio::task::spawn_blocking(SettingsSnapshot::load).await {
+                Ok(snapshot) => cosmic::action::app(Message::SettingsLoaded(Box::new(snapshot))),
+                Err(_) => cosmic::action::app(Message::None),
+            }
+        });
         self.page = Some(Page::Main);
         self.calendar_month = crate::central::calendar::Month::now();
         self.fold_for_room();
@@ -1299,7 +1342,7 @@ impl App {
         };
         // What another screen's applet wrote down: read now, not
         // watched all the time; off the UI's thread.
-        Task::batch([load_clipboard(true), displays, read_camera()])
+        Task::batch([settings, load_clipboard(true), displays, read_camera()])
     }
 
     /// No room for it all: the calendar and what was copied fold, for the
@@ -2267,6 +2310,9 @@ impl cosmic::Application for App {
             Message::SettingsChanged => {
                 // What another screen's applet or the Control Panel saved.
                 self.reload_settings();
+            }
+            Message::SettingsLoaded(snapshot) => {
+                self.apply_settings(*snapshot);
             }
             Message::ToggleShowPercentage => {
                 self.show_percentage = !self.show_percentage;

@@ -75,21 +75,35 @@ pub enum Step {
     Ignore,
 }
 
-/// `shown` is the panel open and its screen; `just_closed` the one that
-/// closed a moment ago.
-pub fn step(shown: Option<(Which, &str)>, just_closed: Option<(Which, &str)>, request: &Request) -> Step {
+/// `shown` is the panel open, its screen, and its active page (for the Central);
+/// `just_closed` the one that closed a moment ago, along with its page.
+pub fn step(
+    shown: Option<(Which, &str, Option<&str>)>,
+    just_closed: Option<(Which, &str, Option<&str>)>,
+    request: &Request,
+) -> Step {
     let asked = (request.which, request.output.as_str());
     let paged = request.page.is_some();
     match shown {
-        Some(shown) if shown == asked => {
+        Some((w, out, page)) if (w, out) == asked => {
             if paged {
                 Step::Page
-            } else {
+            } else if page.is_none() || page == Some("main") {
                 Step::Close
+            } else {
+                // Clicking the clock (Toggle) while a dedicated page such as
+                // volume/network/power is open switches directly to the main Central page.
+                Step::Page
             }
         }
         Some(_) => Step::Switch,
-        None if !paged && just_closed == Some(asked) => Step::Ignore,
+        None if !paged
+            && just_closed.is_some_and(|(w, out, page)| {
+                (w, out) == asked && (page.is_none() || page == Some("main"))
+            }) =>
+        {
+            Step::Ignore
+        }
         None => Step::Open,
     }
 }
@@ -160,30 +174,39 @@ mod tests {
     fn the_same_panel_on_the_same_screen_toggles() {
         let asked = request(Which::Central, "DP-3", None);
         assert_eq!(step(None, None, &asked), Step::Open);
-        assert_eq!(step(Some((Which::Central, "DP-3")), None, &asked), Step::Close);
+        assert_eq!(step(Some((Which::Central, "DP-3", Some("main"))), None, &asked), Step::Close);
+        assert_eq!(step(Some((Which::Central, "DP-3", None)), None, &asked), Step::Close);
+        // Clicking the clock while a dedicated subpage (e.g. sound/power/network)
+        // is still open switches directly to the main Central page instead of closing.
+        assert_eq!(step(Some((Which::Central, "DP-3", Some("sound"))), None, &asked), Step::Page);
     }
 
     #[test]
     fn another_panel_or_screen_switches() {
         let asked = request(Which::Central, "DP-3", None);
-        assert_eq!(step(Some((Which::Monitor, "DP-3")), None, &asked), Step::Switch);
-        assert_eq!(step(Some((Which::Central, "HDMI-A-1")), None, &asked), Step::Switch);
+        assert_eq!(step(Some((Which::Monitor, "DP-3", None)), None, &asked), Step::Switch);
+        assert_eq!(step(Some((Which::Central, "HDMI-A-1", Some("main"))), None, &asked), Step::Switch);
     }
 
     #[test]
     fn the_click_that_closed_it_does_not_open_it_again() {
         let asked = request(Which::Central, "DP-3", None);
-        assert_eq!(step(None, Some((Which::Central, "DP-3")), &asked), Step::Ignore);
+        assert_eq!(step(None, Some((Which::Central, "DP-3", Some("main"))), &asked), Step::Ignore);
+        assert_eq!(step(None, Some((Which::Central, "DP-3", None)), &asked), Step::Ignore);
+        // Clicking the clock right after a dedicated page (e.g. volume/sound)
+        // closed on focus loss opens the main Central panel immediately.
+        assert_eq!(step(None, Some((Which::Central, "DP-3", Some("sound"))), &asked), Step::Open);
+        assert_eq!(step(None, Some((Which::Central, "DP-3", Some("network"))), &asked), Step::Open);
         // Another one opens, as does a page asked for.
-        assert_eq!(step(None, Some((Which::Monitor, "DP-3")), &asked), Step::Open);
+        assert_eq!(step(None, Some((Which::Monitor, "DP-3", None)), &asked), Step::Open);
         let paged = request(Which::Central, "DP-3", Some("sound"));
-        assert_eq!(step(None, Some((Which::Central, "DP-3")), &paged), Step::Open);
+        assert_eq!(step(None, Some((Which::Central, "DP-3", Some("main"))), &paged), Step::Open);
     }
 
     #[test]
     fn a_page_asked_of_the_panel_showing_turns_it() {
         let paged = request(Which::Central, "DP-3", Some("sound"));
-        assert_eq!(step(Some((Which::Central, "DP-3")), None, &paged), Step::Page);
+        assert_eq!(step(Some((Which::Central, "DP-3", Some("main"))), None, &paged), Step::Page);
     }
 
     #[test]

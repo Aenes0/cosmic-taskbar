@@ -61,7 +61,7 @@ pub const APP_ID: &str = "io.github.Aenes0.CosmicCentral.Panels";
 const JUST_CLOSED: Duration = Duration::from_millis(300);
 /// Losing the keyboard this soon after showing is the opening, not someone
 /// leaving it.
-const SETTLING: Duration = Duration::from_millis(400);
+const SETTLING: Duration = crate::shared::tokens::FOCUS_SETTLING;
 /// After starting, when to find which monitors have DDC, if none is known.
 const DETECT_AFTER: Duration = Duration::from_secs(45);
 /// Tried again this much later while a panel shows or just opened.
@@ -74,8 +74,8 @@ pub enum Message {
     Request(Request),
     Close,
     /// The panel's surface got the keyboard (logged only).
-    Focused,
-    Unfocused,
+    Focused(window::Id),
+    Unfocused(window::Id),
     Output(String, WlOutput, Option<i32>),
     OutputGone(WlOutput),
     /// A surface was configured: the panel's, for timing its opening.
@@ -207,7 +207,11 @@ impl Panels {
             self.pending = Some(request);
             return Task::none();
         }
-        let shown = self.shown.as_ref().map(|s| (s.which, s.output.as_str()));
+        let shown_page = self.shown.as_ref().and_then(|s| match s.which {
+            Which::Central => self.central.page_name(),
+            Which::Monitor => None,
+        });
+        let shown = self.shown.as_ref().map(|s| (s.which, s.output.as_str(), shown_page.as_deref()));
         let recent_closed = self
             .closed
             .as_ref()
@@ -229,7 +233,7 @@ impl Panels {
         {
             return Task::none();
         }
-        let just_closed = recent_closed.map(|(which, output, _, _)| (*which, output.as_str()));
+        let just_closed = recent_closed.map(|(which, output, page, _)| (*which, output.as_str(), page.as_deref()));
         match place::step(shown, just_closed, &request) {
             Step::Open => self.show(request),
             Step::Close => self.hide(),
@@ -238,7 +242,7 @@ impl Panels {
                 Task::batch([hide, self.show(request)])
             }
             Step::Page => {
-                let page = request.page.as_deref().unwrap_or_default();
+                let page = request.page.as_deref().unwrap_or(central::Page::Main.name());
                 let task = match request.which {
                     Which::Central => lift(self.central.turn_to(page), Message::Central),
                     Which::Monitor => lift(self.monitor.turn_to(page), Message::Monitor),
@@ -310,7 +314,11 @@ impl Panels {
         tracing::debug!("showing the {} on {:?}: {id:?}", request.which.name(), request.output);
         self.shown = Some(Shown { which: request.which, output: request.output, id, at: Instant::now() });
         self.opened_at = Some(Instant::now());
-        Task::batch([surface, panel])
+        let dismiss = Task::future(async {
+            crate::shared::overlay::dismiss_others(crate::shared::overlay::Overlay::Central).await;
+            cosmic::action::app(Message::Nothing)
+        });
+        Task::batch([surface, panel, dismiss])
     }
 
     fn hide(&mut self) -> app::Task<Message> {
@@ -488,9 +496,13 @@ impl cosmic::Application for Panels {
             }
             Message::Request(request) => return self.request(request),
             Message::Close => return self.hide(),
-            Message::Focused => tracing::debug!("the panel has the keyboard"),
-            Message::Unfocused => {
-                if self.shown.as_ref().is_some_and(|s| s.at.elapsed() > SETTLING) {
+            Message::Focused(id) => {
+                if self.shown.as_ref().is_some_and(|s| s.id == id) {
+                    tracing::debug!("the panel has the keyboard");
+                }
+            }
+            Message::Unfocused(id) => {
+                if self.shown.as_ref().is_some_and(|s| s.id == id && s.at.elapsed() > SETTLING) {
                     return self.hide();
                 }
             }
@@ -673,11 +685,11 @@ impl cosmic::Application for Panels {
                     iced::Event::PlatformSpecific(iced::event::PlatformSpecific::Wayland(Wayland::Layer(
                         LayerEvent::Unfocused,
                         ..,
-                    ))) => Some(Message::Unfocused),
+                    ))) => Some(Message::Unfocused(window)),
                     iced::Event::PlatformSpecific(iced::event::PlatformSpecific::Wayland(Wayland::Layer(
                         LayerEvent::Focused,
                         ..,
-                    ))) => Some(Message::Focused),
+                    ))) => Some(Message::Focused(window)),
                     _ => None,
                 }
             }));

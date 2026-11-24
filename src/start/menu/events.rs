@@ -26,8 +26,8 @@ pub(super) fn window_event(event: iced::Event, status: event::Status, window: wi
         }
         iced::Event::PlatformSpecific(event::PlatformSpecific::Wayland(wayland::Event::Layer(layer, ..))) => {
             match layer {
-                wayland::LayerEvent::Focused => Some(Message::Focused),
-                wayland::LayerEvent::Unfocused => Some(Message::Unfocused),
+                wayland::LayerEvent::Focused => Some(Message::Focused(window)),
+                wayland::LayerEvent::Unfocused => Some(Message::Unfocused(window)),
                 _ => None,
             }
         }

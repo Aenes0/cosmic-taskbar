@@ -17,7 +17,7 @@ use cosmic::{
     cosmic_config::{Config, CosmicConfigEntry},
     desktop::{IconSourceExt, fde},
     iced::{
-        self, Alignment, Background, Border, Color, Length, Limits, Padding, Subscription,
+        self, Alignment, Background, Border, Length, Limits, Padding, Subscription,
         advanced::text::{Ellipsize, EllipsizeHeightLimit},
         event,
         futures::{self, SinkExt, channel::mpsc},
@@ -54,7 +54,7 @@ pub const APP_ID: &str = "io.github.Aenes0.CosmicTaskbar.Popups";
 const PANEL_GAP: i32 = 8;
 const SCREEN_PAD: f32 = 8.0;
 const HIDE_PREVIEW_GRACE: Duration = Duration::from_millis(240);
-const MENU_SETTLING: Duration = Duration::from_millis(350);
+const MENU_SETTLING: Duration = crate::shared::tokens::FOCUS_SETTLING;
 const ANIM_FRAME: Duration = Duration::from_millis(16);
 const PREVIEW_REFRESH: Duration = Duration::from_millis(1000);
 
@@ -81,7 +81,7 @@ pub enum HostMsg {
         original_app_id: String,
         currently_pinned: bool,
     },
-    Unfocused,
+    Unfocused(window::Id),
     Close,
 }
 
@@ -400,7 +400,11 @@ impl TaskbarPopups {
                         window_ids,
                     }),
                 });
-                Task::batch([close, surface])
+                let dismiss = Task::future(async {
+                    crate::shared::overlay::dismiss_others(crate::shared::overlay::Overlay::Taskbar).await;
+                    cosmic::Action::None
+                });
+                Task::batch([close, surface, dismiss])
             }
             PopupCommand::HideAll => {
                 self.hide_gen += 1;
@@ -576,11 +580,7 @@ impl TaskbarPopups {
                         width: 1.0,
                         color: bg.divider.into(),
                     },
-                    shadow: iced::Shadow {
-                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
-                        offset: iced::Vector::new(0.0, 4.0),
-                        blur_radius: 12.0,
-                    },
+                    shadow: crate::shared::tokens::menu_shadow(),
                     ..Default::default()
                 }
             }))
@@ -781,9 +781,10 @@ impl cosmic::Application for TaskbarPopups {
                 }
                 return self.close_active();
             }
-            HostMsg::Unfocused => {
+            HostMsg::Unfocused(id) => {
                 if let Some(active) = &self.active {
-                    if matches!(active.kind, ActiveKind::Menu(_))
+                    if active.id == id
+                        && matches!(active.kind, ActiveKind::Menu(_))
                         && active.opened_at.elapsed() > MENU_SETTLING
                     {
                         return self.close_active();
@@ -822,7 +823,7 @@ impl cosmic::Application for TaskbarPopups {
         ];
 
         if self.active.is_some() {
-            subs.push(event::listen_with(|event, _, _| {
+            subs.push(event::listen_with(|event, _, window| {
                 use iced::event::wayland::{Event as Wayland, LayerEvent};
                 match event {
                     iced::Event::Keyboard(keyboard::Event::KeyPressed {
@@ -831,7 +832,7 @@ impl cosmic::Application for TaskbarPopups {
                     }) => Some(HostMsg::Close),
                     iced::Event::PlatformSpecific(iced::event::PlatformSpecific::Wayland(
                         Wayland::Layer(LayerEvent::Unfocused, ..),
-                    )) => Some(HostMsg::Unfocused),
+                    )) => Some(HostMsg::Unfocused(window)),
                     _ => None,
                 }
             }));

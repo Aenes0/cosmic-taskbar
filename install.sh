@@ -139,6 +139,9 @@ if [ "$prefix" = "$HOME/.local" ]; then
         systemctl --user enable "$unit.service" >/dev/null 2>&1 || true
         systemctl --user restart "$unit.service" || echo "could not restart $unit now; it starts at the next login"
     done
+    # Restart resident panel-spawned hosts so they pick up the freshly installed binary.
+    pkill -f "cosmic-taskbar --(menu|tools)$" >/dev/null 2>&1 || true
+    pkill -f "cosmic-taskbar --taskbar-popups$" >/dev/null 2>&1 || true
     for path_unit in fix-brave-pwa-icons wallpapers-monitores; do
         systemctl --user enable --now "$path_unit.path" >/dev/null 2>&1 || true
     done

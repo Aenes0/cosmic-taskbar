@@ -256,7 +256,7 @@ impl StartMenu {
             column = column.push(item);
         }
         let is_group = matches!(target, Target::Group(_));
-        let radius = if is_group { group_ui::POPUP_RADIUS } else { 8.0 };
+        let radius = if is_group { group_ui::POPUP_RADIUS } else { crate::shared::tokens::POPUP_RADIUS };
         let card = widget::container(column).width(Length::Fixed(width));
         let card = if is_group { card.id(group_ui::popup_card_id()) } else { card };
         let card = card.class(theme::Container::custom(move |_| widget::container::Style {
@@ -265,14 +265,10 @@ impl StartMenu {
                 icon_color: Some(p.text),
                 border: iced::Border {
                     radius: radius.into(),
-                    width: 1.0,
+                    width: crate::shared::tokens::HAIRLINE_WIDTH,
                     color: p.border,
                 },
-                shadow: iced::Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
-                    offset: iced::Vector::new(0.0, 4.0),
-                    blur_radius: 16.0,
-                },
+                shadow: crate::shared::tokens::popup_shadow(),
                 ..Default::default()
             }));
         Some(PopupCard { card: card.into(), count, has_title, width, place })

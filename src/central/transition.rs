@@ -7,7 +7,7 @@
 //! The popup's size is left alone: resizing it every frame makes the software
 //! renderer present buffers of the wrong size, and abort.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use cosmic::iced::{
     Color, Event, Length, Rectangle, Size, Vector,
@@ -18,10 +18,10 @@ use cosmic::iced::{
     window,
 };
 
-const DURATION: Duration = Duration::from_millis(240);
+const BASE_DURATION_MS: u64 = 180;
 /// How far a page slides in from, in logical pixels.
-const SLIDE: f32 = 48.0;
-const DROP: f32 = 10.0;
+const SLIDE: f32 = 36.0;
+const DROP: f32 = 8.0;
 
 pub struct Transition<'a, Message> {
     key: u64,
@@ -58,7 +58,11 @@ struct State {
 
 impl State {
     fn progress(&self) -> f32 {
-        (self.start.elapsed().as_secs_f32() / DURATION.as_secs_f32()).min(1.0)
+        let duration = crate::shared::tokens::scaled_duration(BASE_DURATION_MS);
+        if duration.is_zero() {
+            return 1.0;
+        }
+        (self.start.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.0)
     }
 
     /// Ease out: fast, then settling.

@@ -4,6 +4,7 @@
 //! ask it, without waiting for it: a stuck host never holds the bar.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use cosmic::iced::{
@@ -44,6 +45,39 @@ pub fn panel_output() -> String {
     std::env::var("COSMIC_PANEL_OUTPUT").unwrap_or_default()
 }
 
+static HOST_READY: AtomicBool = AtomicBool::new(false);
+static OWNER_WATCHER_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Keeps `HOST_READY` accurate via D-Bus `NameOwnerChanged` signals so hot-path
+/// clicks skip the synchronous `NameHasOwner` round-trip completely.
+fn ensure_owner_watcher(conn: &zbus::Connection) {
+    if OWNER_WATCHER_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let conn = conn.clone();
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        let Ok(proxy) = zbus::fdo::DBusProxy::new(&conn).await else {
+            OWNER_WATCHER_STARTED.store(false, Ordering::Release);
+            return;
+        };
+        let Ok(mut stream) = proxy.receive_name_owner_changed().await else {
+            OWNER_WATCHER_STARTED.store(false, Ordering::Release);
+            return;
+        };
+        while let Some(signal) = stream.next().await {
+            if let Ok(args) = signal.args()
+                && args.name().as_str() == BUS_NAME
+            {
+                let has_owner = args.new_owner().is_some();
+                HOST_READY.store(has_owner, Ordering::Release);
+            }
+        }
+        HOST_READY.store(false, Ordering::Release);
+        OWNER_WATCHER_STARTED.store(false, Ordering::Release);
+    });
+}
+
 /// Sent with no reply expected, so a stuck host never holds the applet (its
 /// watchdog restarts it); all of it off the bar's UI, in its own task. When
 /// the host isn't on the bus, its unit is started (not waited on) so it runs
@@ -54,19 +88,25 @@ async fn ask(request: Request) {
     static BUS: tokio::sync::OnceCell<zbus::Connection> = tokio::sync::OnceCell::const_new();
     let result = async {
         let conn = BUS.get_or_try_init(zbus::Connection::session).await?;
-        if !has_host(conn).await? {
-            if !start_unit().await {
-                static STARTED: Mutex<Option<Instant>> = Mutex::new(None);
-                let mut started = STARTED.lock().unwrap_or_else(|e| e.into_inner());
-                if started.is_none_or(|at| at.elapsed() > STARTING) {
-                    *started = Some(Instant::now());
-                    start_host(&request);
+        ensure_owner_watcher(conn);
+        if !HOST_READY.load(Ordering::Acquire) {
+            if has_host(conn).await? {
+                HOST_READY.store(true, Ordering::Release);
+            } else {
+                if !start_unit().await {
+                    static STARTED: Mutex<Option<Instant>> = Mutex::new(None);
+                    let mut started = STARTED.lock().unwrap_or_else(|e| e.into_inner());
+                    if started.is_none_or(|at| at.elapsed() > STARTING) {
+                        *started = Some(Instant::now());
+                        start_host(&request);
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            if !coming_up(conn).await {
-                tracing::warn!("{UNIT} didn't come up in {COMING_UP:?}: {request:?} dropped");
-                return Ok(());
+                if !coming_up(conn).await {
+                    tracing::warn!("{UNIT} didn't come up in {COMING_UP:?}: {request:?} dropped");
+                    return Ok(());
+                }
+                HOST_READY.store(true, Ordering::Release);
             }
         }
         match tokio::time::timeout(ASKING, conn.send(&message(&request)?)).await {
@@ -78,6 +118,7 @@ async fn ask(request: Request) {
         }
     };
     if let Err(err) = result.await {
+        HOST_READY.store(false, Ordering::Release);
         tracing::warn!("the panels' host didn't take {request:?}: {err}");
     }
 }
