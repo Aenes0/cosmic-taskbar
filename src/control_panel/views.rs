@@ -4046,12 +4046,157 @@ fn displays_view(app: &ControlPanel) -> Element<'_, Message> {
     widget::column::with_children(items).spacing(spacing.space_m).into()
 }
 
+/// Nome do estilo no Painel (id desconhecido cai em Windows 11, como a leitura da config).
+fn style_label(id: &str) -> &'static str {
+    let canon = data::canonical_greeter_style(id).unwrap_or("win11");
+    data::GREETER_STYLES
+        .iter()
+        .find(|(sid, _, _)| *sid == canon)
+        .map(|(_, name, _)| *name)
+        .unwrap_or("Windows 11")
+}
+
+fn preview_accent(theme: &cosmic::Theme, accent_rgb: Option<[f32; 3]>) -> Color {
+    match accent_rgb {
+        Some([r, g, b]) => Color::from_rgb(r, g, b),
+        None => theme.cosmic().accent_color().into(),
+    }
+}
+
+fn preview_avatar<'a>(accent_rgb: Option<[f32; 3]>) -> Element<'a, Message> {
+    widget::container(widget::icon::icon(icon("avatar-default-symbolic")).size(22))
+        .width(Length::Fixed(40.0))
+        .height(Length::Fixed(40.0))
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .class(theme::Container::custom(move |theme| {
+            let acc = preview_accent(theme, accent_rgb);
+            let mut bg = acc;
+            bg.a = 0.25;
+            widget::container::Style {
+                background: Some(Background::Color(bg)),
+                icon_color: Some(acc),
+                border: iced::Border { radius: 20.0.into(), width: 1.5, color: acc },
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
+fn preview_field<'a>(
+    accent_rgb: Option<[f32; 3]>,
+    is_light: bool,
+    sub_col: Color,
+    radius: f32,
+    width: f32,
+) -> Element<'a, Message> {
+    widget::container(
+        widget::row::with_children(vec![
+            widget::text::caption("••••••••••").width(Length::Fill).into(),
+            widget::icon::icon(icon("go-next-symbolic")).size(14).into(),
+        ])
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding([6, 10])
+    .width(Length::Fixed(width))
+    .class(theme::Container::custom(move |theme| {
+        let acc = preview_accent(theme, accent_rgb);
+        widget::container::Style {
+            background: Some(Background::Color(if is_light {
+                Color::from_rgba(1.0, 1.0, 1.0, 0.72)
+            } else {
+                Color::from_rgba(0.05, 0.06, 0.09, 0.65)
+            })),
+            text_color: Some(sub_col),
+            icon_color: Some(acc),
+            border: iced::Border { radius: radius.into(), width: 1.0, color: acc },
+            ..Default::default()
+        }
+    }))
+    .into()
+}
+
+/// Botão redondo de vidro dos cantos do iOS (lanterna / câmera).
+fn preview_round_button<'a>(icon_name: &'static str, is_light: bool) -> Element<'a, Message> {
+    widget::container(widget::icon::icon(icon(icon_name)).size(14))
+        .width(Length::Fixed(34.0))
+        .height(Length::Fixed(34.0))
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .class(theme::Container::custom(move |_| widget::container::Style {
+            background: Some(Background::Color(if is_light {
+                Color::from_rgba(1.0, 1.0, 1.0, 0.55)
+            } else {
+                Color::from_rgba(0.05, 0.06, 0.09, 0.55)
+            })),
+            border: iced::Border {
+                radius: 17.0.into(),
+                width: 1.0,
+                color: Color::from_rgba(1.0, 1.0, 1.0, 0.18),
+            },
+            ..Default::default()
+        }))
+        .into()
+}
+
+/// Atalho quadrado-arredondado dos cantos do Android.
+fn preview_shortcut<'a>(is_light: bool) -> Element<'a, Message> {
+    widget::container(widget::space::horizontal().width(Length::Fixed(30.0)))
+        .height(Length::Fixed(30.0))
+        .class(theme::Container::custom(move |_| widget::container::Style {
+            background: Some(Background::Color(if is_light {
+                Color::from_rgba(1.0, 1.0, 1.0, 0.6)
+            } else {
+                Color::from_rgba(0.16, 0.10, 0.24, 0.65)
+            })),
+            border: iced::Border { radius: 10.0.into(), ..Default::default() },
+            ..Default::default()
+        }))
+        .into()
+}
+
+/// Barrinha de início do iOS e do iPadOS.
+fn preview_home_bar<'a>(col: Color, width: f32) -> Element<'a, Message> {
+    widget::container(widget::space::horizontal().width(Length::Fixed(width)))
+        .height(Length::Fixed(3.0))
+        .class(theme::Container::custom(move |_| widget::container::Style {
+            background: Some(Background::Color(Color { a: 0.7, ..col })),
+            border: iced::Border { radius: 2.0.into(), ..Default::default() },
+            ..Default::default()
+        }))
+        .into()
+}
+
+/// Widget de vidro de exemplo da coluna do iPadOS.
+fn preview_widget_chip<'a>(label: &'a str, is_light: bool, text: Color) -> Element<'a, Message> {
+    widget::container(widget::text::caption(label))
+        .padding([5, 10])
+        .width(Length::Fixed(120.0))
+        .class(theme::Container::custom(move |_| widget::container::Style {
+            background: Some(Background::Color(if is_light {
+                Color::from_rgba(1.0, 1.0, 1.0, 0.6)
+            } else {
+                Color::from_rgba(0.08, 0.10, 0.14, 0.6)
+            })),
+            text_color: Some(text),
+            border: iced::Border {
+                radius: 12.0.into(),
+                width: 1.0,
+                color: Color::from_rgba(1.0, 1.0, 1.0, 0.16),
+            },
+            ..Default::default()
+        }))
+        .into()
+}
+
 fn login_live_preview<'a>(g: &'a data::GreeterConfig) -> Element<'a, Message> {
     let is_light = g.theme == "light";
     let accent_rgb = parse_hex_color(&g.accent_color);
     let dim = g.dim_opacity.clamp(0.0, 0.85);
     let card_op = g.card_opacity.clamp(0.0, 0.95);
     let card_rad = g.card_radius.clamp(4.0, 32.0);
+    let soften = (g.blur_radius as f32 / 40.0).min(1.0) * 0.5;
     let text_col = if is_light {
         Color::from_rgb(0.10, 0.12, 0.16)
     } else {
@@ -4081,186 +4226,201 @@ fn login_live_preview<'a>(g: &'a data::GreeterConfig) -> Element<'a, Message> {
         g.default_user.trim()
     };
 
-    let clock_block: Element<'a, Message> = if g.style == "android" {
-        let mut col: Vec<Element<'a, Message>> = vec![
-            widget::text::body("23").size(clock_px).into(),
-            widget::text::body("54").size(clock_px).into(),
-        ];
-        if g.show_date {
-            col.push(widget::text::caption("seg, 23 nov").into());
+    let style = data::canonical_greeter_style(&g.style).unwrap_or("win11");
+    let date_str = "segunda-feira, 23 de novembro";
+    let big_clock_col = Color { a: if is_light { 0.78 } else { 0.82 }, ..text_col };
+
+    // Relógio de cada estilo: win11 centrado; android em 2 linhas; macOS/iOS com a data
+    // pequena sobre o relógio enorme e translúcido; iPadOS alinhado à esquerda.
+    let clock_block: Element<'a, Message> = match style {
+        "android" => {
+            let col: Vec<Element<'a, Message>> = vec![
+                widget::text::body("23").size(clock_px * 1.3).line_height(iced::widget::text::LineHeight::Relative(1.0)).into(),
+                widget::text::body("54").size(clock_px * 1.3).line_height(iced::widget::text::LineHeight::Relative(1.0)).into(),
+            ];
+            widget::column::with_children(col)
+                .spacing(0)
+                .align_x(Alignment::Center)
+                .into()
         }
-        widget::column::with_children(col)
-            .spacing(0)
-            .align_x(Alignment::Center)
-            .into()
-    } else {
-        let mut col: Vec<Element<'a, Message>> = vec![widget::text::body(time_str).size(clock_px).into()];
-        if g.show_date {
-            col.push(widget::text::caption("segunda-feira, 23 de novembro").into());
+        "macos" | "ios" | "ipados" => {
+            let (scale, align) = match style {
+                "macos" => (1.5, Alignment::Center),
+                "ios" => (1.7, Alignment::Center),
+                _ => (1.2, Alignment::Start),
+            };
+            let mut col: Vec<Element<'a, Message>> = Vec::new();
+            if g.show_date {
+                col.push(widget::text::caption(date_str).into());
+            }
+            col.push(
+                widget::text::body(time_str)
+                    .size(clock_px * scale)
+                    .line_height(iced::widget::text::LineHeight::Relative(1.0))
+                    .into(),
+            );
+            widget::container(widget::column::with_children(col).spacing(0).align_x(align))
+                .class(theme::Container::custom(move |_| widget::container::Style {
+                    text_color: Some(big_clock_col),
+                    ..Default::default()
+                }))
+                .into()
         }
-        let align = if g.style == "editorial" {
-            Alignment::Start
-        } else {
-            Alignment::Center
-        };
-        widget::column::with_children(col)
-            .spacing(2)
-            .align_x(align)
-            .into()
+        _ => {
+            let mut col: Vec<Element<'a, Message>> =
+                vec![widget::text::body(time_str)
+                    .size(clock_px)
+                    .line_height(iced::widget::text::LineHeight::Relative(1.0))
+                    .into()];
+            if g.show_date {
+                col.push(widget::text::caption(date_str).into());
+            }
+            widget::column::with_children(col)
+                .spacing(2)
+                .align_x(Alignment::Center)
+                .into()
+        }
     };
 
+    // Avatar + nome só entram onde o estilo os mostra (win11 e android).
     let mut login_parts: Vec<Element<'a, Message>> = Vec::new();
-    if g.show_avatar {
-        login_parts.push(
-            widget::container(widget::icon::icon(icon("avatar-default-symbolic")).size(22))
-                .width(Length::Fixed(40.0))
-                .height(Length::Fixed(40.0))
-                .align_x(iced::alignment::Horizontal::Center)
-                .align_y(iced::alignment::Vertical::Center)
-                .class(theme::Container::custom(move |theme| {
-                    let acc = match accent_rgb {
-                        Some([r, g, b]) => Color::from_rgb(r, g, b),
-                        None => theme.cosmic().accent_color().into(),
-                    };
-                    let mut bg = acc;
-                    bg.a = 0.25;
-                    widget::container::Style {
-                        background: Some(Background::Color(bg)),
-                        icon_color: Some(acc),
-                        border: iced::Border {
-                            radius: 20.0.into(),
-                            width: 1.5,
-                            color: acc,
-                        },
-                        ..Default::default()
-                    }
-                }))
-                .into(),
-        );
+    if g.show_avatar && matches!(style, "win11" | "macos") {
+        login_parts.push(preview_avatar(accent_rgb));
     }
-    if g.show_username {
+    if g.show_username && matches!(style, "win11" | "macos") {
         login_parts.push(widget::text::body(user_label).into());
     }
-    login_parts.push(
+    // win11: retângulo com botão-seta; demais: pílula.
+    let field_radius = if style == "win11" { (card_rad * 0.5).clamp(4.0, 14.0) } else { 999.0 };
+    let field_width = match style {
+        "ipados" => 200.0,
+        "ios" => 210.0,
+        "android" => 230.0,
+        _ => 165.0,
+    };
+    login_parts.push(preview_field(accent_rgb, is_light, sub_col, field_radius, field_width));
+    if style == "macos" {
+        login_parts.push(widget::text::caption("Toque para desbloquear").class(theme::Text::Custom(dimmed)).into());
+    }
+
+    let login_card: Element<'a, Message> = if style == "win11" {
         widget::container(
-            widget::row::with_children(vec![
-                widget::text::caption("••••••••••").width(Length::Fill).into(),
-                widget::icon::icon(icon("go-next-symbolic")).size(14).into(),
-            ])
-            .spacing(6)
-            .align_y(Alignment::Center),
+            widget::column::with_children(login_parts)
+                .spacing(6)
+                .align_x(Alignment::Center),
         )
-        .padding([6, 10])
-        .width(Length::Fixed(165.0))
-        .class(theme::Container::custom(move |theme| {
-            let acc = match accent_rgb {
-                Some([r, g, b]) => Color::from_rgb(r, g, b),
-                None => theme.cosmic().accent_color().into(),
+        .padding(if card_op > 0.02 { 14 } else { 6 })
+        .class(theme::Container::custom(move |_| {
+            let base = if is_light {
+                Color::from_rgba(1.0, 1.0, 1.0, card_op)
+            } else {
+                Color::from_rgba(0.08, 0.10, 0.14, card_op)
             };
             widget::container::Style {
-                background: Some(Background::Color(if is_light {
-                    Color::from_rgba(1.0, 1.0, 1.0, 0.72)
-                } else {
-                    Color::from_rgba(0.05, 0.06, 0.09, 0.65)
-                })),
-                text_color: Some(sub_col),
-                icon_color: Some(acc),
+                background: (card_op > 0.02).then_some(Background::Color(base)),
+                text_color: Some(text_col),
                 border: iced::Border {
-                    radius: (card_rad * 0.5).clamp(4.0, 14.0).into(),
-                    width: 1.0,
-                    color: acc,
+                    radius: card_rad.into(),
+                    width: if card_op > 0.02 { 1.0 } else { 0.0 },
+                    color: Color::from_rgba(1.0, 1.0, 1.0, 0.18),
                 },
                 ..Default::default()
             }
         }))
-        .into(),
-    );
-
-    let login_card: Element<'a, Message> = widget::container(
+        .into()
+    } else {
         widget::column::with_children(login_parts)
             .spacing(6)
-            .align_x(Alignment::Center),
-    )
-    .padding(if card_op > 0.02 { 14 } else { 6 })
-    .class(theme::Container::custom(move |_| {
-        let base = if is_light {
-            Color::from_rgba(1.0, 1.0, 1.0, card_op)
-        } else {
-            Color::from_rgba(0.08, 0.10, 0.14, card_op)
-        };
-        widget::container::Style {
-            background: (card_op > 0.02).then_some(Background::Color(base)),
-            text_color: Some(text_col),
-            border: iced::Border {
-                radius: card_rad.into(),
-                width: if card_op > 0.02 { 1.0 } else { 0.0 },
-                color: Color::from_rgba(1.0, 1.0, 1.0, 0.18),
-            },
-            ..Default::default()
-        }
-    }))
-    .into();
+            .align_x(Alignment::Center)
+            .into()
+    };
 
-    let inner: Element<'a, Message> = match g.style.as_str() {
-        "sidebar" => widget::row::with_children(vec![
-            widget::container(login_card)
-                .width(Length::Fixed(210.0))
-                .height(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .align_y(iced::alignment::Vertical::Center)
-                .into(),
-            widget::container(clock_block)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .align_y(iced::alignment::Vertical::Center)
-                .into(),
-        ])
-        .spacing(12)
-        .height(Length::Fill)
-        .into(),
-        "editorial" => widget::row::with_children(vec![
-            widget::container(clock_block)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Left)
-                .align_y(iced::alignment::Vertical::Bottom)
-                .into(),
-            widget::container(login_card)
-                .height(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Right)
-                .align_y(iced::alignment::Vertical::Center)
-                .into(),
-        ])
-        .spacing(12)
-        .height(Length::Fill)
-        .into(),
-        "macos" => widget::column::with_children(vec![
-            widget::container(clock_block)
-                .width(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .into(),
+    let centered = |e: Element<'a, Message>| -> Element<'a, Message> {
+        widget::container(e)
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .into()
+    };
+
+    let inner: Element<'a, Message> = match style {
+        // Material 3: "Num relance" (data) no topo à esquerda, relógio em duas linhas,
+        // pílula tonal e atalhos quadrados-arredondados nos cantos da base.
+        "android" => widget::column::with_children(vec![
+            widget::text::caption(if g.show_date { "seg., 23 de nov." } else { "" }).into(),
+            centered(clock_block),
             widget::space::vertical().height(Length::Fill).into(),
-            widget::container(login_card)
-                .width(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .into(),
+            centered(login_card),
+            widget::row::with_children(vec![
+                preview_shortcut(is_light),
+                widget::space::horizontal().width(Length::Fill).into(),
+                preview_shortcut(is_light),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+        ])
+        .spacing(4)
+        .height(Length::Fill)
+        .into(),
+        // Data + relógio enorme no topo; avatar, nome, pílula de vidro e dica na base.
+        "macos" => widget::column::with_children(vec![
+            centered(clock_block),
+            widget::space::vertical().height(Length::Fill).into(),
+            centered(login_card),
         ])
         .height(Length::Fill)
         .into(),
-        _ => widget::column::with_children(vec![
+        // Barra de status, relógio gigante, pílula de vidro, botões redondos nos cantos
+        // (sessão/teclado à esquerda, energia à direita) e barrinha inferior.
+        "ios" => widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::caption("23:54").width(Length::Fill).into(),
+                widget::text::caption("Rede · Casa  87 %").into(),
+            ])
+            .into(),
+            centered(clock_block),
+            widget::space::vertical().height(Length::Fill).into(),
+            centered(login_card),
+            widget::row::with_children(vec![
+                preview_round_button("input-keyboard-symbolic", is_light),
+                widget::space::horizontal().width(Length::Fill).into(),
+                preview_round_button("system-shutdown-symbolic", is_light),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            centered(preview_home_bar(text_col, 70.0)),
+        ])
+        .spacing(4)
+        .height(Length::Fill)
+        .into(),
+        // Data e relógio no canto superior esquerdo, coluna de widgets de vidro abaixo,
+        // campo centrado na base, barrinha inferior; papel de parede livre à direita.
+        "ipados" => widget::column::with_children(vec![
             widget::container(clock_block)
                 .width(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center)
+                .align_x(iced::alignment::Horizontal::Left)
                 .into(),
-            widget::container(login_card)
-                .width(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .into(),
+            widget::container(
+                widget::column::with_children(vec![
+                    preview_widget_chip("87 % Mouse", is_light, sub_col),
+                    preview_widget_chip("Rede · Casa", is_light, sub_col),
+                ])
+                .spacing(4),
+            )
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Left)
+            .into(),
+            widget::space::vertical().height(Length::Fill).into(),
+            centered(login_card),
+            centered(preview_home_bar(text_col, 90.0)),
         ])
-        .spacing(12)
-        .align_x(Alignment::Center)
+        .spacing(4)
+        .height(Length::Fill)
         .into(),
+        // win11: relógio e cartão de vidro centrados.
+        _ => widget::column::with_children(vec![centered(clock_block), centered(login_card)])
+            .spacing(12)
+            .align_x(Alignment::Center)
+            .into(),
     };
 
     let wp_badge = match g.wallpaper_mode.as_str() {
@@ -4281,6 +4441,10 @@ fn login_live_preview<'a>(g: &'a data::GreeterConfig) -> Element<'a, Message> {
             } else {
                 (0.11 * (1.0 - dim), 0.16 * (1.0 - dim), 0.27 * (1.0 - dim))
             };
+            // blur > 0: só suaviza o tom do fundo da prévia (sem blur real).
+            let (r, gg, b) = ((r + (r + gg + b) / 3.0 * soften) / (1.0 + soften),
+                (gg + (r + gg + b) / 3.0 * soften) / (1.0 + soften),
+                (b + (r + gg + b) / 3.0 * soften) / (1.0 + soften));
             widget::container::Style {
                 background: Some(Background::Color(Color::from_rgb(r, gg, b))),
                 text_color: Some(text_col),
@@ -4301,7 +4465,7 @@ fn login_live_preview<'a>(g: &'a data::GreeterConfig) -> Element<'a, Message> {
                     .into(),
                 widget::text::caption(format!(
                     "{} · {} · {}",
-                    g.style, g.font_family, wp_badge
+                    style_label(&g.style), g.font_family, wp_badge
                 ))
                 .class(theme::Text::Custom(dimmed))
                 .into(),
@@ -4367,35 +4531,30 @@ fn login_view(app: &ControlPanel) -> Element<'_, Message> {
     ));
 
     // 5 Layout Styles card
-    let style_options: &[(&str, &str, &str)] = &[
-        ("win11", "Windows 11", "Relógio central no topo + cartão de vidro centralizado"),
-        ("android", "Android / Pixel", "Relógio gigante em 2 linhas (HH / MM) + login embaixo"),
-        ("macos", "macOS Sonoma", "Relógio leve no topo + barra compacta de senha na base"),
-        ("sidebar", "Painel Lateral", "Coluna de vidro à esquerda + relógio amplo à direita"),
-        ("editorial", "Editorial", "Relógio no canto inferior esquerdo + cartão à direita"),
-    ];
+    let style_options: &[(&str, &str, &str)] = &data::GREETER_STYLES;
     let style_chips = widget::row::with_children(
         style_options
             .iter()
             .map(|(id, label, _)| {
                 small_chip(
                     *label,
-                    g.style == *id,
+                    data::canonical_greeter_style(&g.style) == Some(*id),
                     Message::GreeterStyle((*id).to_owned()),
                 )
             })
             .collect::<Vec<_>>(),
     )
     .spacing(6);
+    let active_style = data::canonical_greeter_style(&g.style).unwrap_or("win11");
     let active_style_desc = style_options
         .iter()
-        .find(|(id, _, _)| *id == g.style)
+        .find(|(id, _, _)| *id == active_style)
         .map(|(_, _, desc)| *desc)
         .unwrap_or("Layout personalizado da tela de bloqueio e login.");
 
     items.push(card_box(
         widget::column::with_children(vec![
-            widget::text::heading("Estilo da Tela (5 layouts)").into(),
+            widget::text::heading("Estilo da Tela").into(),
             style_chips.into(),
             widget::text::caption(active_style_desc)
                 .class(theme::Text::Custom(dimmed))
@@ -5170,4 +5329,16 @@ fn system_view(app: &ControlPanel) -> Element<'_, Message> {
     items.push(card_box(widget::column::with_children(unit_rows).spacing(spacing.space_xs)));
 
     widget::column::with_children(items).spacing(spacing.space_m).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn style_label_uses_panel_names() {
+        assert_eq!(style_label("ios"), "iOS 26");
+        assert_eq!(style_label("ipados"), "iPadOS 26");
+        assert_eq!(style_label("desconhecido"), "Windows 11");
+    }
 }

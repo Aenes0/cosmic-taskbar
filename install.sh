@@ -52,6 +52,11 @@ if [ -f "greeter/Cargo.toml" ]; then
     greeter_target="${CARGO_TARGET_DIR:-greeter/target}"
     install -Dm0755 "$greeter_target/release/cosmic-greeter" "$bindir/aenes-greeter"
     ln -sf "aenes-greeter" "$bindir/cosmic-greeter"
+    # The greeter styles use Inter and Nunito when present; only warn, install nothing.
+    if ! fc-list : family 2>/dev/null | grep -qi '^Inter' \
+        || ! fc-list : family 2>/dev/null | grep -qi 'Nunito'; then
+        echo "Fontes do greeter ausentes: sudo pacman -S inter-font ttf-nunito"
+    fi
 fi
 
 # The programs this one replaces were called by these names, by shortcuts,

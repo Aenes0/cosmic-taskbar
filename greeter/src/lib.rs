@@ -34,3 +34,11 @@ mod motion;
 mod offset;
 
 pub mod style_config;
+
+mod styles;
+
+mod backdrop;
+
+mod sysinfo;
+
+mod selection;

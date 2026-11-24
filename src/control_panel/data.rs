@@ -136,7 +136,8 @@ pub struct SystemSnapshot {
 /// User preferences for the isolated login & lock screen (`~/.config/cosmic-taskbar/greeter.toml`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GreeterConfig {
-    /// Layout style: `"win11"`, `"android"`, `"macos"`, `"sidebar"`, `"editorial"`.
+    /// Layout style: `"win11"`, `"android"`, `"macos"`, `"ios"`, `"ipados"`
+    /// (legacy `"editorial"` and `"sidebar"` are read as `"ios"` and `"ipados"`).
     pub style: String,
     pub wallpaper: String,
     /// Wallpaper mode: `"fixed"`, `"rotate_on_lock"`, `"rotate_interval"`.
@@ -275,6 +276,47 @@ fn escape_toml_string(value: &str) -> String {
     out
 }
 
+/// (id gravado, nome no Painel, descrição curta) — ordem da lista do Painel.
+pub const GREETER_STYLES: [(&str, &str, &str); 5] = [
+    (
+        "win11",
+        "Windows 11",
+        "Relógio centrado no topo, avatar redondo e campo retangular com botão-seta.",
+    ),
+    (
+        "android",
+        "Android 16 (Pixel)",
+        "Cores tonais do papel de parede, relógio gigante em duas linhas e campo em pílula.",
+    ),
+    (
+        "macos",
+        "macOS Tahoe",
+        "Data pequena sobre relógio enorme e translúcido, campo em pílula de vidro na base.",
+    ),
+    (
+        "ios",
+        "iOS 26",
+        "Barra de status, relógio gigante com degradê de vidro e botões redondos nos cantos.",
+    ),
+    (
+        "ipados",
+        "iPadOS 26",
+        "Relógio no canto superior esquerdo, widgets de vidro e campo centrado na base.",
+    ),
+];
+
+/// Normalises a style name (case-insensitive, legacy aliases accepted) to its canonical id.
+pub fn canonical_greeter_style(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_lowercase().as_str() {
+        "win11" => Some("win11"),
+        "android" => Some("android"),
+        "macos" => Some("macos"),
+        "ios" | "editorial" => Some("ios"),
+        "ipados" | "sidebar" => Some("ipados"),
+        _ => None,
+    }
+}
+
 pub fn parse_greeter_toml(text: &str) -> GreeterConfig {
     let mut cfg = GreeterConfig::default();
     for raw_line in text.lines() {
@@ -289,9 +331,8 @@ pub fn parse_greeter_toml(text: &str) -> GreeterConfig {
         let val = val.trim();
         match key {
             "style" => {
-                let parsed = parse_toml_string(val).to_lowercase();
-                if matches!(parsed.as_str(), "win11" | "android" | "macos" | "sidebar" | "editorial") {
-                    cfg.style = parsed;
+                if let Some(id) = canonical_greeter_style(&parse_toml_string(val)) {
+                    cfg.style = id.to_owned();
                 }
             }
             "wallpaper" => cfg.wallpaper = parse_toml_string(val),
@@ -1278,5 +1319,24 @@ isolated_binary = false
         assert_eq!(parsed.default_user, "maria");
         assert_eq!(parsed.session, "COSMIC");
         assert!(!parsed.isolated_binary);
+    }
+
+    #[test]
+    fn greeter_style_aliases() {
+        assert_eq!(parse_greeter_toml("style = \"editorial\"").style, "ios");
+        assert_eq!(parse_greeter_toml("style = \"sidebar\"").style, "ipados");
+        assert_eq!(parse_greeter_toml("style = \"Android\"").style, "android");
+        assert_eq!(parse_greeter_toml("style = \"xyz\"").style, "win11");
+    }
+
+    #[test]
+    fn greeter_styles_round_trip() {
+        for (id, _, _) in GREETER_STYLES {
+            let cfg = GreeterConfig {
+                style: id.to_owned(),
+                ..GreeterConfig::default()
+            };
+            assert_eq!(parse_greeter_toml(&format_greeter_toml(&cfg)).style, id);
+        }
     }
 }

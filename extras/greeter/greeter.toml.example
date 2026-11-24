@@ -11,11 +11,27 @@ wallpaper = ""
 clock_24h = true
 show_seconds = false
 
-# Ajustes visuais aplicados na cópia do wallpaper em /var/lib/aenes-greeter/
+# Estilo da tela de login/bloqueio: win11 | android | macos | ios | ipados
+# ("editorial" vale como ios e "sidebar" como ipados; o Painel grava só os novos)
+style = "win11"
+
+# Ajustes visuais (o próprio greeter desfoca e escurece o fundo; o wallpaper
+# em /var/lib/aenes-greeter/ é uma cópia fiel do original)
 # blur_radius: desfoque gaussiano em pixels (0 = desativado, faixa 0..60)
 blur_radius = 0
 # dim_opacity: escurecimento sobre o fundo (0.0 = nenhum, 0.35 = 35%, faixa 0.0..0.85)
 dim_opacity = 0.0
+# card_opacity: opacidade do cartão de vidro (0.0 = sem cartão, faixa 0.0..0.95)
+card_opacity = 0.0
+# card_radius: raio do cartão em px (faixa 4..32)
+card_radius = 16
+# font_family: system | sans | mono | serif ("system" usa Inter/Nunito conforme o estilo;
+#   instale com: sudo pacman -S inter-font ttf-nunito)
+font_family = "system"
+# font_weight: light | normal | semibold | bold
+font_weight = "normal"
+# clock_size: small | medium | large | huge
+clock_size = "medium"
 
 # Tema da tela de login: "dark" ou "light"
 theme = "dark"
@@ -23,8 +39,8 @@ theme = "dark"
 # Nome de usuário pré-selecionado na tela de login (vazio = último usuário)
 default_user = ""
 
-# Sessão padrão pré-selecionada para default_user (ex: "COSMIC")
-session = "COSMIC"
+# Sessão padrão (vazio = última sessão usada, escolhida pelo greeter; ex: "COSMIC")
+session = ""
 
 # true  = usa /usr/local/bin/aenes-greeter (compilado de greeter/ no cosmic-taskbar)
 #         + /etc/greetd/aenes-greeter.toml + /etc/systemd/system/aenes-greeter.service

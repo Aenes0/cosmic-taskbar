@@ -78,6 +78,14 @@ impl Time {
             .to_string()
     }
 
+    /// Data curta com o dia da semana abreviado ("ter., 24 de nov."), para os widgets compactos.
+    pub fn format_date_short(&self) -> String {
+        let prefs = DateTimeFormatterPreferences::from(&self.locale);
+        let dtf = DateTimeFormatter::try_new(prefs, fieldsets::MDE::medium()).unwrap();
+        dtf.format(&DateTime::convert_from(self.now.datetime()))
+            .to_string()
+    }
+
     pub fn format_time(&self, military_time: bool) -> String {
         self.format_time_opts(military_time, false)
     }
@@ -208,6 +216,14 @@ mod tests {
     #[test]
     fn long_date_pt_br() {
         assert_eq!(at_0034("pt-BR").format_date(), "quarta-feira, 21 de outubro");
+    }
+    #[test]
+    fn short_date_pt_br() {
+        assert_eq!(at_0034("pt-BR").format_date_short(), "qua., 21 de out.");
+    }
+    #[test]
+    fn short_date_en_us() {
+        assert_eq!(at_0034("en-US").format_date_short(), "Wed, Oct 21");
     }
     #[test]
     fn long_date_en_us() {

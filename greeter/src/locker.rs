@@ -24,7 +24,7 @@ use std::ffi::{CStr, CString};
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, process};
 use tokio::sync::mpsc;
 use tokio::task;
@@ -35,9 +35,11 @@ use tracing_subscriber::{EnvFilter, fmt};
 use wayland_client::Proxy;
 use wayland_client::protocol::wl_output::WlOutput;
 
+use crate::backdrop::{self, BackdropSet};
 use crate::common::{self, Common, DEFAULT_MENU_ITEM_HEIGHT, MAX_WIDTH};
 use crate::fl;
 use crate::login_ui;
+use crate::styles;
 use crate::motion::{self, HoverTarget, Motion, Part};
 use crate::power::{self, PowerAction};
 use crate::style_config::{self, StyleConfig};
@@ -261,12 +263,42 @@ pub(crate) fn pam_service_from(value: Option<&std::ffi::OsStr>) -> String {
     }
 }
 
+/// Serviço usado quando o escolhido não tem arquivo PAM (existe em toda distro).
+const FALLBACK_PAM_SERVICE: &str = "login";
+/// Onde o Linux-PAM procura os serviços (o vendor dir é o fallback de /etc).
+const PAM_DIRS: [&str; 2] = ["/etc/pam.d", "/usr/lib/pam.d"];
+
+/// Serviço PAM que realmente existe. Sem `/etc/pam.d/cosmic-greeter` (Arch/CachyOS) o PAM cairia
+/// em `other` (`pam_deny`) e recusaria toda senha; então, se o escolhido não existe, usa `login`.
+pub(crate) fn resolve_pam_service(
+    value: Option<&std::ffi::OsStr>,
+    exists: impl Fn(&str) -> bool,
+) -> String {
+    let candidate = pam_service_from(value);
+    if exists(&candidate) || !exists(FALLBACK_PAM_SERVICE) {
+        return candidate;
+    }
+    tracing::warn!(
+        "serviço PAM {candidate:?} não existe; usando {FALLBACK_PAM_SERVICE:?}"
+    );
+    FALLBACK_PAM_SERVICE.to_string()
+}
+
+fn pam_service_exists(name: &str) -> bool {
+    PAM_DIRS
+        .iter()
+        .any(|dir| std::path::Path::new(dir).join(name).is_file())
+}
+
 pub fn pam_thread(username: String, conversation: Conversation) -> Result<(), pam_client::Error> {
     //TODO: send errors to GUI, restart process
 
     // Create PAM context
     let mut context = pam_client::Context::new(
-        &pam_service_from(std::env::var_os(PAM_SERVICE_ENV).as_deref()),
+        &resolve_pam_service(
+            std::env::var_os(PAM_SERVICE_ENV).as_deref(),
+            pam_service_exists,
+        ),
         Some(&username),
         conversation,
     )?;
@@ -439,6 +471,20 @@ pub enum Message {
     DemoTick,
     /// Release systemd-logind delay sleep inhibitor after lock surfaces have committed a frame.
     ReleaseInhibit,
+    /// Resultado do job de desfoque/análise do papel de parede da superfície principal.
+    Backdrop(SurfaceId, Result<backdrop::Prepared, String>),
+    /// Resultado da rotação por horário lida fora da UI: fatia de `rotate_interval` que o pediu e o
+    /// papel de parede (`None` = nada a trocar).
+    Wallpaper(u64, Option<LoadedWallpaper>),
+}
+
+/// Papel de parede escolhido e lido pela rotação, já fora da thread de UI.
+#[derive(Clone, Debug)]
+pub struct LoadedWallpaper {
+    /// Origem (caminho + mtime); `None` quando a escolha ficou sem papel de parede custom.
+    source: Option<WallpaperSource>,
+    /// Handle lido; `None` se a leitura falhou ou não há papel de parede custom.
+    handle: Option<widget::image::Handle>,
 }
 
 impl From<common::Message> for Message {
@@ -498,6 +544,62 @@ pub struct App {
     custom_wallpaper: Option<widget::image::Handle>,
     /// Number of lock cycles (used for `rotate_on_lock`).
     lock_count: u64,
+    /// Arquivo (e mtime) de onde veio `custom_wallpaper`: papel de parede igual não é recarregado,
+    /// então o handle (e o desfoque já pronto dele) sobrevive entre bloqueios.
+    wallpaper_src: Option<WallpaperSource>,
+    /// Fatia de `rotate_interval` da última escolha; `Tick` recarrega quando ela muda.
+    last_rotation_slot: Option<u64>,
+    /// Desfoque e análise do fundo por superfície principal (preenchido por jobs assíncronos).
+    backdrops: BackdropSet<SurfaceId>,
+}
+
+/// De onde veio o papel de parede custom: caminho e data de modificação.
+type WallpaperSource = (PathBuf, Option<SystemTime>);
+
+/// Segundos desde a época Unix (0 se o relógio estiver antes dela).
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Lê a origem (caminho + mtime) do papel de parede escolhido.
+fn wallpaper_source(path: PathBuf) -> WallpaperSource {
+    let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
+    (path, modified)
+}
+
+/// O papel de parede já carregado continua valendo: mesma origem e, se há origem, handle presente.
+fn wallpaper_unchanged(
+    current: Option<&WallpaperSource>,
+    next: Option<&WallpaperSource>,
+    has_handle: bool,
+) -> bool {
+    current == next && has_handle == next.is_some()
+}
+
+/// O resultado da rotação ainda vale: a fatia que o pediu é a última escolhida (resultado de fatia
+/// velha é descartado).
+fn wallpaper_slice_is_current(current: Option<u64>, result_slot: u64) -> bool {
+    current == Some(result_slot)
+}
+
+/// Lê `picked` (I/O: metadados e arquivo; só chamar fora da thread de UI). `None` quando a origem é a
+/// já carregada (`current` + `has_handle`), para o handle e o desfoque prontos continuarem valendo.
+fn load_rotated_wallpaper(
+    picked: Option<PathBuf>,
+    current: Option<&WallpaperSource>,
+    has_handle: bool,
+) -> Option<LoadedWallpaper> {
+    let next = picked.map(wallpaper_source);
+    if wallpaper_unchanged(current, next.as_ref(), has_handle) {
+        return None;
+    }
+    let handle = next
+        .as_ref()
+        .and_then(|(path, _)| style_config::load_wallpaper_handle(path));
+    Some(LoadedWallpaper { source: next, handle })
 }
 
 impl App {
@@ -514,10 +616,115 @@ impl App {
     /// Reload style configuration and pick/load wallpaper for the current lock cycle.
     fn reload_style_and_wallpaper(&mut self) {
         self.style_config = StyleConfig::load();
-        self.custom_wallpaper = self
-            .style_config
-            .pick_wallpaper(self.lock_count)
-            .and_then(|path| style_config::load_wallpaper_handle(&path));
+        let now = unix_now();
+        self.last_rotation_slot = self.style_config.rotation_slot(now);
+        let picked = self.style_config.pick_wallpaper_at(self.lock_count, now);
+        self.apply_wallpaper(picked);
+    }
+
+    /// Carrega `picked` como papel de parede custom, a menos que seja o mesmo arquivo já carregado
+    /// (mesmo handle = mesmo desfoque, sem refazer o job nem piscar a imagem nítida).
+    fn apply_wallpaper(&mut self, picked: Option<PathBuf>) {
+        let next = picked.map(wallpaper_source);
+        if wallpaper_unchanged(self.wallpaper_src.as_ref(), next.as_ref(), self.custom_wallpaper.is_some()) {
+            return;
+        }
+        self.custom_wallpaper = next
+            .as_ref()
+            .and_then(|(path, _)| style_config::load_wallpaper_handle(path));
+        self.wallpaper_src = next;
+    }
+
+    /// Rotação por horário: quando a fatia de `rotate_interval` muda, escolhe e lê o próximo papel de
+    /// parede fora da thread de UI (`Message::Wallpaper`); prompt, foco e texto digitado não são
+    /// tocados. Só enquanto bloqueado; ao bloquear de novo `reload_style_and_wallpaper` já escolhe.
+    fn rotate_wallpaper_if_due(&mut self) -> Task<Message> {
+        if matches!(self.state, State::Unlocked) {
+            return Task::none();
+        }
+        let now = unix_now();
+        let slot = self.style_config.rotation_slot(now);
+        if !style_config::rotation_due(self.last_rotation_slot, slot) {
+            return Task::none();
+        }
+        let Some(slot_value) = slot else {
+            return Task::none();
+        };
+        self.last_rotation_slot = slot;
+        let cfg = self.style_config.clone();
+        let lock_count = self.lock_count;
+        let current = self.wallpaper_src.clone();
+        let has_handle = self.custom_wallpaper.is_some();
+        cosmic::task::future(async move {
+            let loaded = task::spawn_blocking(move || {
+                let picked = cfg.pick_wallpaper_at(lock_count, now);
+                load_rotated_wallpaper(picked, current.as_ref(), has_handle)
+            })
+            .await
+            .unwrap_or(None);
+            Message::Wallpaper(slot_value, loaded)
+        })
+    }
+
+    /// Aplica o resultado da rotação (já lido fora da UI), a menos que a origem não tenha mudado
+    /// entre o pedido e a resposta.
+    fn apply_loaded_wallpaper(&mut self, loaded: LoadedWallpaper) {
+        if wallpaper_unchanged(
+            self.wallpaper_src.as_ref(),
+            loaded.source.as_ref(),
+            self.custom_wallpaper.is_some(),
+        ) {
+            return;
+        }
+        self.custom_wallpaper = loaded.handle;
+        self.wallpaper_src = loaded.source;
+    }
+
+    /// Imagem de fundo da superfície principal `id`: a custom da config ou a do cosmic-bg.
+    fn original_wallpaper(&self, id: SurfaceId) -> Option<&widget::image::Handle> {
+        self.custom_wallpaper
+            .as_ref()
+            .or_else(|| self.common.surface_images.get(&id))
+    }
+
+    /// Identidade do que a superfície principal `id` mostra (`None` sem imagem ou sem tamanho).
+    fn backdrop_tag(&self, id: SurfaceId) -> Option<backdrop::Tag> {
+        backdrop::surface_tag(
+            self.original_wallpaper(id)?,
+            self.style_config.blur_radius,
+            self.common.output_size(id),
+        )
+    }
+
+    /// Dispara o desfoque/análise de cada superfície que ainda não tem o resultado do seu `tag`.
+    /// Só decodifica/desfoca/hasheia dentro do job (`prepare_async`); aqui só clona `Bytes`.
+    fn spawn_backdrops(&mut self) -> Task<Message> {
+        if matches!(self.state, State::Unlocked) {
+            return Task::none();
+        }
+        let ids: Vec<SurfaceId> = self.common.surface_ids.values().copied().collect();
+        let mut tasks = Vec::new();
+        for id in ids {
+            let Some(tag) = self.backdrop_tag(id) else {
+                continue;
+            };
+            if !self.backdrops.wants(id, tag) {
+                continue;
+            }
+            let Some(bytes) = self.original_wallpaper(id).and_then(backdrop::handle_bytes) else {
+                continue;
+            };
+            self.backdrops.mark_pending(id, tag);
+            tasks.push(cosmic::task::future(async move {
+                // `cache_dir` cria a pasta (I/O): também fora da thread de UI.
+                let cache = task::spawn_blocking(|| backdrop::cache_dir(false))
+                    .await
+                    .ok()
+                    .flatten();
+                Message::Backdrop(id, backdrop::prepare_async(bytes, tag, cache).await)
+            }));
+        }
+        Task::batch(tasks)
     }
 
     /// O antigo ramo `State::Unlocked` de `Message::Lock`, sem mudança (mais `cancel_exit`).
@@ -615,6 +822,7 @@ impl App {
             hour,
             minute,
             date: self.common.time.format_date(),
+            short_date: self.common.time.format_date_short(),
             look: self.motion.look(Part::Clock),
         };
 
@@ -656,10 +864,10 @@ impl App {
 
                     let submit = (accepts && !value.is_empty())
                         .then(|| Message::Submit(value.clone()));
-                    field = Some(login_ui::password_row_styled(
-                        text_input,
+                    field = Some(styles::FieldParts {
+                        input: text_input,
                         submit,
-                        login_ui::FieldFx {
+                        fx: login_ui::FieldFx {
                             look: field_look,
                             hover: self.motion.hover_t(surface_id, HoverTarget::Field),
                             focus: self.motion.focus_t(),
@@ -667,54 +875,82 @@ impl App {
                             field_hovers: Some(hovers(surface_id, HoverTarget::Field)),
                             submit_hovers: Some(hovers(surface_id, HoverTarget::Submit)),
                         },
-                        cfg,
-                    ));
+                    });
                 }
                 None => {}
             }
         }
 
-        let avatar = cfg.show_avatar.then(|| {
-            login_ui::avatar(
-                self.flags.user_icon.as_ref(),
-                metrics.avatar,
-                self.motion.look(Part::Avatar),
-            )
-        });
-        let name = cfg.show_username.then(|| {
-            login_ui::user_name_styled(
-                &self.flags.user_data.full_name,
-                self.motion.look(Part::Name),
-                cfg,
-            )
-        });
-        let login = login_ui::LoginBlock {
-            avatar,
-            name,
-            field,
-            status: login_ui::status_view_styled(
-                self.current_status(),
-                self.motion.look(Part::Status),
-                cfg,
-            ),
-            look: field_look,
-        };
-
         let power = power::menu_visible(self.flags.logind_available, self.flags.nested).then(|| {
-            login_ui::power_button(
-                self.dropdown_opt == Some(Dropdown::Power),
-                Message::DropdownToggle(Dropdown::Power),
-                Message::Power,
-                login_ui::PowerFx {
+            styles::PowerParts {
+                open: self.dropdown_opt == Some(Dropdown::Power),
+                on_toggle: Message::DropdownToggle(Dropdown::Power),
+                on_action: Message::Power,
+                fx: login_ui::PowerFx {
                     look: self.motion.look(Part::Power),
                     hover: self.motion.hover_t(surface_id, HoverTarget::Power),
                     menu: self.motion.menu_look(),
                     hovers: Some(hovers(surface_id, HoverTarget::Power)),
                 },
-            )
+            }
         });
 
-        login_ui::screen_styled(cfg, metrics, clock_data, login, power)
+        let keyboard = style_config::wants_keyboard_menu(self.common.active_layouts.len())
+            .then(|| styles::ChoiceMenu {
+                open: self.dropdown_opt == Some(Dropdown::Keyboard),
+                on_toggle: Message::DropdownToggle(Dropdown::Keyboard),
+                label: self
+                    .common
+                    .active_layouts
+                    .get(self.common.current_keyboard_layout)
+                    .map(|layout| layout.name())
+                    .unwrap_or_default(),
+                items: self
+                    .common
+                    .active_layouts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, layout)| {
+                        (
+                            layout.description.clone(),
+                            i == self.common.current_keyboard_layout,
+                            Message::KeyboardLayout(i),
+                        )
+                    })
+                    .collect(),
+            });
+
+        // Análise do fundo do monitor desta subsuperfície; só vale se for do que está na tela.
+        let main = self.common.main_surface_of(surface_id).unwrap_or(surface_id);
+        let backdrop = self
+            .backdrop_tag(main)
+            .and_then(|tag| self.backdrops.get(main).filter(|p| p.tag == tag))
+            .map(|p| &p.analysis);
+
+        styles::view(styles::ScreenInput {
+            cfg,
+            metrics,
+            clock: clock_data,
+            user: styles::UserParts {
+                icon: self.flags.user_icon.as_ref(),
+                full_name: &self.flags.user_data.full_name,
+            },
+            field,
+            status: self.current_status(),
+            looks: styles::Looks {
+                clock: self.motion.look(Part::Clock),
+                avatar: self.motion.look(Part::Avatar),
+                name: self.motion.look(Part::Name),
+                field: field_look,
+                status: self.motion.look(Part::Status),
+                power: self.motion.look(Part::Power),
+            },
+            power,
+            session: None,
+            keyboard,
+            system: &self.common.system_info,
+            backdrop,
+        })
     }
 
     /// Layout original do upstream (cartão com relógio grande); fica escondido, não apagado.
@@ -1098,9 +1334,12 @@ impl cosmic::Application for App {
         };
 
         let style_config = StyleConfig::load();
-        let custom_wallpaper = style_config
-            .pick_wallpaper(0)
-            .and_then(|path| style_config::load_wallpaper_handle(&path));
+        let now_secs = unix_now();
+        let wallpaper_src = style_config.pick_wallpaper_at(0, now_secs).map(wallpaper_source);
+        let custom_wallpaper = wallpaper_src
+            .as_ref()
+            .and_then(|(path, _)| style_config::load_wallpaper_handle(path));
+        let last_rotation_slot = style_config.rotation_slot(now_secs);
 
         let mut app = App {
             common,
@@ -1116,6 +1355,9 @@ impl cosmic::Application for App {
             style_config,
             custom_wallpaper,
             lock_count: 0,
+            wallpaper_src,
+            last_rotation_slot,
+            backdrops: BackdropSet::default(),
         };
         // Grava a chave do status sem fade (nada de fade de 150 ms na partida).
         let key = login_ui::status_key(&app.current_status());
@@ -1147,9 +1389,18 @@ impl cosmic::Application for App {
         crate::perf::count(crate::perf::Counter::Update);
         let now = Instant::now();
         self.motion.tick(now);
+        // Quadros de animação e hover não mudam imagem nem tamanho: nem olham os fundos.
+        let touches_wallpaper = !matches!(
+            message,
+            Message::Frame(_) | Message::Hover(..) | Message::CursorLeft(_)
+        );
         let task = self.update_inner(message);
         let key = login_ui::status_key(&self.current_status());
         self.motion.observe_status(key, now);
+        if touches_wallpaper {
+            // Bloqueio, imagem/tamanho novos e troca de papel de parede: um job por tag novo.
+            return Task::batch([task, self.spawn_backdrops()]);
+        }
         task
     }
 
@@ -1161,11 +1412,20 @@ impl cosmic::Application for App {
     /// Creates a view after each update.
     fn view_window(&self, surface_id: SurfaceId) -> Element<'_, Self::Message> {
         crate::perf::count(crate::perf::Counter::WallpaperView);
-        let img = self
-            .custom_wallpaper
-            .as_ref()
-            .or_else(|| self.common.surface_images.get(&surface_id))
-            .unwrap_or(&self.common.fallback_background);
+        // A primeira pintura nunca espera o job: sem resultado do `tag` atual, vai a imagem original.
+        let img = match self.original_wallpaper(surface_id) {
+            Some(original) => match self.backdrop_tag(surface_id) {
+                // Rotação com tag novo pendente: segue o desfocado anterior, sem piscar a original.
+                Some(tag) => self.backdrops.view_handle(
+                    surface_id,
+                    self.style_config.blur_radius,
+                    tag,
+                    original,
+                ),
+                None => original,
+            },
+            None => &self.common.fallback_background,
+        };
         login_ui::wallpaper_view(img, self.style_config.dim_opacity)
     }
 
@@ -1221,7 +1481,7 @@ impl cosmic::Application for App {
         // Roteiro de demo (só aninhado com a variável de ambiente).
         subscriptions.push(motion::demo_ticks(self.flags.demo).map(|_| Message::DemoTick));
 
-        if self.style_config.show_seconds {
+        if self.style_config.needs_second_tick() {
             subscriptions.push(
                 cosmic::iced::time::every(std::time::Duration::from_secs(1))
                     .map(|_| Message::Common(common::Message::Tick)),
@@ -1250,7 +1510,35 @@ impl App {
                     self.motion.start_entry(now);
                     self.motion.set_focus(true, now);
                 }
-                return self.common.update(common_message);
+                // Rotação por horário no `Tick` que já existe (sem timer novo).
+                let is_tick = matches!(&common_message, common::Message::Tick);
+                let task = self.common.update(common_message);
+                if is_tick {
+                    return Task::batch([task, self.rotate_wallpaper_if_due()]);
+                }
+                return task;
+            }
+            Message::Backdrop(surface_id, result) => match result {
+                Ok(prepared) => {
+                    // Resultado de um pedido já superado (outra imagem/tamanho) é descartado.
+                    if !self.backdrops.accept(surface_id, prepared) {
+                        tracing::debug!("fundo desatualizado descartado para {surface_id:?}");
+                    }
+                }
+                Err(err) => {
+                    // O pedido segue marcado como pendente: não há nova tentativa para o mesmo
+                    // tag, então este aviso sai uma vez só; a tela segue com a imagem original.
+                    tracing::warn!("fundo da superfície {surface_id:?} sem desfoque/análise: {err}");
+                    // O desfocado anterior era de outra imagem: volta à original deste tag.
+                    self.backdrops.drop_ready(surface_id);
+                }
+            },
+            Message::Wallpaper(slot, loaded) => {
+                if !wallpaper_slice_is_current(self.last_rotation_slot, slot) {
+                    tracing::debug!("papel de parede da fatia {slot} descartado (fatia velha)");
+                } else if let Some(loaded) = loaded {
+                    self.apply_loaded_wallpaper(loaded);
+                }
             }
             Message::OutputEvent(output_event, output) => {
                 match output_event {
@@ -1350,6 +1638,7 @@ impl App {
                         tracing::info!("output {}: removed", output.id());
                         match self.common.surface_ids.remove(&output) {
                             Some(surface_id) => {
+                                self.backdrops.forget(surface_id);
                                 self.common.surface_images.remove(&surface_id);
                                 self.common.surface_names.remove(&surface_id);
                                 self.common.window_size.remove(&surface_id);
@@ -1708,6 +1997,30 @@ mod tests {
         assert_eq!(pam_service_from(Some(OsStr::new(""))), DEFAULT_PAM_SERVICE);
     }
     #[test]
+    fn pam_service_keeps_existing_default() {
+        let got = resolve_pam_service(None, |n| n == DEFAULT_PAM_SERVICE || n == "login");
+        assert_eq!(got, DEFAULT_PAM_SERVICE);
+    }
+    #[test]
+    fn pam_service_falls_back_to_login_when_default_missing() {
+        // Arch/CachyOS: não há /etc/pam.d/cosmic-greeter; cair em `other` nega toda senha.
+        assert_eq!(resolve_pam_service(None, |n| n == "login"), "login");
+    }
+    #[test]
+    fn pam_service_env_missing_falls_back_to_login() {
+        let got = resolve_pam_service(Some(OsStr::new("nao-existe")), |n| n == "login");
+        assert_eq!(got, "login");
+    }
+    #[test]
+    fn pam_service_env_existing_wins() {
+        let got = resolve_pam_service(Some(OsStr::new("system-local-login")), |_| true);
+        assert_eq!(got, "system-local-login");
+    }
+    #[test]
+    fn pam_service_nothing_exists_keeps_candidate() {
+        assert_eq!(resolve_pam_service(None, |_| false), DEFAULT_PAM_SERVICE);
+    }
+    #[test]
     fn pam_service_rejects_paths() {
         assert_eq!(pam_service_from(Some(OsStr::new("../shadow"))), DEFAULT_PAM_SERVICE);
         assert_eq!(pam_service_from(Some(OsStr::new("a/b"))), DEFAULT_PAM_SERVICE);
@@ -1785,6 +2098,54 @@ mod tests {
         assert_eq!(apply_demo(&mut m, motion::DemoEvent::Menu(true), t0), Some(true));
         assert!(m.is_animating(), "abrir o menu anima o fade");
         assert_eq!(apply_demo(&mut m, motion::DemoEvent::Menu(false), t0), Some(false));
+    }
+
+    #[test]
+    fn wallpaper_is_reloaded_only_when_source_or_handle_changes() {
+        let a = (PathBuf::from("/w/a.png"), Some(UNIX_EPOCH));
+        let a_touched = (PathBuf::from("/w/a.png"), Some(UNIX_EPOCH + Duration::from_secs(1)));
+        let b = (PathBuf::from("/w/b.png"), Some(UNIX_EPOCH));
+        // Mesma origem com handle carregado: mantém (o desfoque pronto continua valendo).
+        assert!(wallpaper_unchanged(Some(&a), Some(&a), true));
+        // Arquivo trocado ou editado: recarrega.
+        assert!(!wallpaper_unchanged(Some(&a), Some(&b), true));
+        assert!(!wallpaper_unchanged(Some(&a), Some(&a_touched), true));
+        // Origem sem handle (leitura falhou antes): tenta de novo.
+        assert!(!wallpaper_unchanged(Some(&a), Some(&a), false));
+        // Sem papel de parede custom nos dois lados: nada a fazer; handle sobrando: limpa.
+        assert!(wallpaper_unchanged(None, None, false));
+        assert!(!wallpaper_unchanged(None, None, true));
+        assert!(!wallpaper_unchanged(None, Some(&a), false));
+    }
+
+    #[test]
+    fn rotated_wallpaper_is_accepted_only_for_the_current_slot() {
+        assert!(wallpaper_slice_is_current(Some(7), 7));
+        // Fatia velha (a rotação já andou, ou a config deixou de rotacionar): descartada.
+        assert!(!wallpaper_slice_is_current(Some(8), 7));
+        assert!(!wallpaper_slice_is_current(None, 7));
+    }
+
+    #[test]
+    fn rotated_wallpaper_load_skips_unchanged_and_loads_new() {
+        let dir = std::env::temp_dir().join(format!("aenes-locker-rot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("criar diretório temporário");
+        let a = dir.join("a.png");
+        fs::write(&a, b"conteudo-a").expect("gravar a");
+
+        // Nada carregado ainda: carrega o escolhido.
+        let loaded = load_rotated_wallpaper(Some(a.clone()), None, false).expect("carregar");
+        assert_eq!(loaded.source.as_ref().map(|(p, _)| p.as_path()), Some(a.as_path()));
+        assert!(loaded.handle.is_some());
+        // Mesmo arquivo (mesmo mtime) já carregado: nada a trocar, sem ler de novo.
+        assert!(load_rotated_wallpaper(Some(a.clone()), loaded.source.as_ref(), true).is_none());
+        // Escolha vazia com papel de parede custom carregado: limpa.
+        let cleared = load_rotated_wallpaper(None, loaded.source.as_ref(), true).expect("limpar");
+        assert!(cleared.source.is_none() && cleared.handle.is_none());
+        // Sem nada carregado nem escolhido: nada a fazer.
+        assert!(load_rotated_wallpaper(None, None, false).is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

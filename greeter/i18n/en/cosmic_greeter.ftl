@@ -39,3 +39,15 @@ auth-error-credentials = Incorrect password. Please check your keyboard layout a
 auth-error-denied = Access denied.
 auth-error-maxtries = Too many failed authentication attempts.
 auth-error-account = Account is unavailable or disabled.
+
+# Estilos do greeter (menus e widgets)
+sign-in-options = Sign-in options
+unlock-hint = Enter your password to unlock
+session-not-found = No session available
+battery-system = Battery
+battery-mouse = Mouse
+battery-keyboard = Keyboard
+battery-headset = Headset
+battery-gamepad = Controller
+battery-device = Device
+network = Network

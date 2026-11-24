@@ -44,16 +44,16 @@ CFG_SHOW_DATE="true"
 CFG_SHOW_AVATAR="true"
 CFG_SHOW_USERNAME="true"
 CFG_FONT_FAMILY="system"
-CFG_FONT_WEIGHT="light"
-CFG_CLOCK_SIZE="large"
+CFG_FONT_WEIGHT="normal"
+CFG_CLOCK_SIZE="medium"
 CFG_BLUR_RADIUS="0"
 CFG_DIM_OPACITY="0.0"
-CFG_CARD_OPACITY="0.58"
-CFG_CARD_RADIUS="18"
+CFG_CARD_OPACITY="0.0"
+CFG_CARD_RADIUS="16"
 CFG_ACCENT_COLOR=""
 CFG_THEME="dark"
 CFG_DEFAULT_USER=""
-CFG_SESSION="COSMIC"
+CFG_SESSION=""   # vazio = última sessão usada, escolhida pelo greeter
 CFG_ISOLATED_BINARY="true"
 
 # Flags CLI
@@ -93,6 +93,11 @@ die() {
     printf '[aenes-greeter] ERRO: %s\n' "$*" >&2
     exit 1
 }
+
+# Carregado como biblioteca (testes): nenhuma opção é interpretada.
+if [ "${APPLY_GREETER_LIB:-0}" = 1 ]; then
+    set --
+fi
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -271,7 +276,9 @@ parse_greeter_toml() {
             style)
                 val="$(unquote_toml_string "$val")"
                 case "${val,,}" in
-                    win11|android|macos|sidebar|editorial) CFG_STYLE="${val,,}" ;;
+                    win11|android|macos|ios|ipados) CFG_STYLE="${val,,}" ;;
+                    editorial) CFG_STYLE="ios" ;;
+                    sidebar) CFG_STYLE="ipados" ;;
                     *) CFG_STYLE="win11" ;;
                 esac
                 ;;
@@ -307,14 +314,14 @@ parse_greeter_toml() {
                 val="$(unquote_toml_string "$val")"
                 case "${val,,}" in
                     light|normal|semibold|bold) CFG_FONT_WEIGHT="${val,,}" ;;
-                    *) CFG_FONT_WEIGHT="light" ;;
+                    *) CFG_FONT_WEIGHT="normal" ;;
                 esac
                 ;;
             clock_size)
                 val="$(unquote_toml_string "$val")"
                 case "${val,,}" in
                     small|medium|large|huge) CFG_CLOCK_SIZE="${val,,}" ;;
-                    *) CFG_CLOCK_SIZE="large" ;;
+                    *) CFG_CLOCK_SIZE="medium" ;;
                 esac
                 ;;
             clock_24h)
@@ -398,8 +405,6 @@ parse_greeter_toml() {
         warn "default_user inválido ('$CFG_DEFAULT_USER'), ignorando."
         CFG_DEFAULT_USER=""
     fi
-
-    [ -n "$CFG_SESSION" ] || CFG_SESSION="COSMIC"
 }
 
 ron_escape() {
@@ -608,70 +613,32 @@ prepare_wallpaper() {
         *) ext="jpg" ;;
     esac
 
-    local need_fx="false"
-    if [ "$CFG_BLUR_RADIUS" -gt 0 ] || LC_ALL=C awk -v d="$CFG_DIM_OPACITY" 'BEGIN { exit !(d > 0.001) }'; then
-        need_fx="true"
-    fi
-
     if [ "$DRY_RUN" = "true" ]; then
-        log "[dry-run] Copiaria/processaria $src -> $STATE_DIR/wallpaper.jpg (blur=$CFG_BLUR_RADIUS, dim=$CFG_DIM_OPACITY)"
-        APPLIED_WALLPAPER="$STATE_DIR/wallpaper.jpg"
+        log "[dry-run] Copiaria $src -> $STATE_DIR/wallpaper.$ext (sem blur/dim: o greeter aplica)"
+        APPLIED_WALLPAPER="$STATE_DIR/wallpaper.$ext"
         return 0
     fi
 
     rm -f "$STATE_DIR"/wallpaper.* "$STATE_DIR"/wallpaper-source
-    install -Dm0644 "$src" "$STATE_DIR/wallpaper-source"
+    local dst="$STATE_DIR/wallpaper.$ext"
+    install -Dm0644 "$src" "$dst"
+    APPLIED_WALLPAPER="$dst"
+    log "Wallpaper copiado para $dst"
+}
 
-    if [ "$need_fx" = "true" ] && command -v python3 >/dev/null 2>&1 && python3 -c "import PIL" >/dev/null 2>&1; then
-        local dst="$STATE_DIR/wallpaper.jpg"
-        python3 - "$src" "$dst" "$CFG_BLUR_RADIUS" "$CFG_DIM_OPACITY" <<'PYEOF'
-import sys
-from PIL import Image, ImageFilter
-
-src, dst, blur_s, dim_s = sys.argv[1:5]
-blur = max(0.0, float(blur_s))
-dim = max(0.0, min(0.85, float(dim_s)))
-
-with Image.open(src) as img:
-    img = img.convert("RGB")
-    if blur > 0.0:
-        img = img.filter(ImageFilter.GaussianBlur(radius=blur))
-    if dim > 0.0:
-        black = Image.new("RGB", img.size, (0, 0, 0))
-        img = Image.blend(img, black, dim)
-    img.save(dst, "JPEG", quality=94, optimize=True)
-PYEOF
-        chmod 0644 "$dst"
-        APPLIED_WALLPAPER="$dst"
-        log "Wallpaper processado (blur=${CFG_BLUR_RADIUS}px, dim=${CFG_DIM_OPACITY}) em $dst"
-    elif [ "$need_fx" = "true" ] && (command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1); then
-        local dst="$STATE_DIR/wallpaper.jpg"
-        local im_cmd="convert"
-        command -v magick >/dev/null 2>&1 && im_cmd="magick"
-        local dim_pct
-        dim_pct="$(LC_ALL=C awk -v d="$CFG_DIM_OPACITY" 'BEGIN { printf "%d", d * 100 }')"
-        local args=("$src")
-        [ "$CFG_BLUR_RADIUS" -gt 0 ] && args+=(-blur "0x${CFG_BLUR_RADIUS}")
-        [ "$dim_pct" -gt 0 ] && args+=(-fill black -colorize "${dim_pct}%")
-        args+=(-quality 94 "$dst")
-        "$im_cmd" "${args[@]}"
-        chmod 0644 "$dst"
-        APPLIED_WALLPAPER="$dst"
-        log "Wallpaper processado via $im_cmd (blur=${CFG_BLUR_RADIUS}px, dim=${CFG_DIM_OPACITY}) em $dst"
-    else
-        local dst="$STATE_DIR/wallpaper.$ext"
-        install -Dm0644 "$src" "$dst"
-        APPLIED_WALLPAPER="$dst"
-        if [ "$need_fx" = "true" ]; then
-            warn "Pillow/ImageMagick não encontrados; wallpaper copiado sem blur/dim para $dst"
-        else
-            log "Wallpaper copiado para $dst"
-        fi
+# Cache de desfoque/análise do greeter: o boot roda como $GREETER_USER e só ele
+# consegue gravar aqui ($STATE_DIR é de root).
+prepare_cache_dir() {
+    local cache_dir="$STATE_DIR/cache"
+    if [ "$DRY_RUN" = "true" ]; then
+        log "[dry-run] Criaria $cache_dir (0700, dono $GREETER_USER)"
+        return 0
     fi
+    install -dm0700 -o "$GREETER_USER" -g "$GREETER_USER" "$cache_dir"
 }
 
 write_greeter_cosmic_config() {
-    local greeter_home cfg_root state_root is_dark uid=""
+    local greeter_home cfg_root state_root is_dark uid
     greeter_home="$(get_user_home "$GREETER_USER")"
     cfg_root="$greeter_home/.config/cosmic"
     state_root="$greeter_home/.local/state/cosmic"
@@ -681,13 +648,12 @@ write_greeter_cosmic_config() {
     if [ -n "$CFG_DEFAULT_USER" ]; then
         uid="$(id -u "$CFG_DEFAULT_USER" 2>/dev/null || true)"
         if [ -z "$uid" ] || [ "$uid" = "0" ]; then
-            warn "default_user '$CFG_DEFAULT_USER' não existe (ou UID=0); ignorando pré-seleção."
-            uid=""
+            warn "default_user '$CFG_DEFAULT_USER' não existe (ou UID=0); o greeter ignorará a pré-seleção."
         fi
     fi
 
     if [ "$DRY_RUN" = "true" ]; then
-        log "[dry-run] Gravaria cosmic-config do greeter em $cfg_root (is_dark=$is_dark, 24h=$CFG_CLOCK_24H, seconds=$CFG_SHOW_SECONDS, uid=${uid:-none}, session=$CFG_SESSION)"
+        log "[dry-run] Gravaria cosmic-config do greeter em $cfg_root (is_dark=$is_dark, 24h=$CFG_CLOCK_24H, seconds=$CFG_SHOW_SECONDS; usuário/sessão padrão ficam com o greeter)"
         return 0
     fi
 
@@ -702,20 +668,6 @@ write_greeter_cosmic_config() {
     printf '%s\n' "$is_dark" > "$cfg_root/com.system76.CosmicTheme.Mode/v1/is_dark"
     printf '%s\n' "$CFG_CLOCK_24H" > "$cfg_root/com.system76.CosmicAppletTime/v1/military_time"
     printf '%s\n' "$CFG_SHOW_SECONDS" > "$cfg_root/com.system76.CosmicAppletTime/v1/show_seconds"
-
-    if [ -n "$uid" ]; then
-        local esc_session
-        esc_session="$(ron_escape "$CFG_SESSION")"
-        printf 'Some(%s)\n' "$uid" > "$cfg_root/com.system76.CosmicGreeter/v1/last_user"
-        cat > "$cfg_root/com.system76.CosmicGreeter/v1/users" <<EOF
-{
-    $uid: (
-        uid: $uid,
-        last_session: Some("$esc_session"),
-    ),
-}
-EOF
-    fi
 
     if [ -n "$APPLIED_WALLPAPER" ]; then
         local esc_wp
@@ -901,6 +853,11 @@ enable_isolated_unit() {
     log "Unit aenes-greeter.service habilitada como display-manager.service (ativa no próximo login/boot)."
 }
 
+# Carregado como biblioteca pelos testes (tests/apply_greeter.sh): só as funções.
+if [ "${APPLY_GREETER_LIB:-0}" = 1 ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 # --- Execução principal ---
 
 case "$MODE" in
@@ -948,8 +905,9 @@ install_helper_and_polkit
 backup_existing_state
 ensure_isolated_binary "$SOURCE_DIR"
 prepare_wallpaper "$TARGET_HOME"
+prepare_cache_dir
 write_greeter_cosmic_config
 write_isolated_runtime_files
 enable_isolated_unit
 
-log "Configuração isolada aplicada com sucesso (binário: $ACTIVE_GREETER_BIN, tema: $CFG_THEME, sessão: $CFG_SESSION)."
+log "Configuração isolada aplicada com sucesso (binário: $ACTIVE_GREETER_BIN, tema: $CFG_THEME, sessão: ${CFG_SESSION:-última usada})."

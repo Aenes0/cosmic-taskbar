@@ -55,3 +55,10 @@
   encaixam. Para atualizar: `cargo update -p libcosmic --precise <commit>`.
 - **Arquivos grandes**: `src/bar/app.rs` tem ~3 000 linhas; `src/central/tray/components/app.rs` e
   `src/central/panels/mod.rs` vieram assim do Central. Dividir só quando houver mudança neles.
+- **Greeter: estilos novos sem prova ao vivo** (24/11): CPU com o bloqueio parado, rotação de papel de
+  parede preservando o texto digitado e troca de sessão no login não foram exercitados (o host não tem
+  injeção de teclado; prints cortados a pedido). Fontes Inter/Nunito dependem de
+  `sudo pacman -S inter-font ttf-nunito`; sem elas os estilos usam a fonte do sistema.
+- **Tela de login do boot ainda é a oficial**: `extras/greeter/apply-greeter.sh` (cria
+  `aenes-greeter.service` como display-manager, sem tocar no pacote `cosmic-greeter`) nunca rodou
+  com sudo; o bloqueio da sessão usa o fork via `~/.local/bin/cosmic-greeter`.

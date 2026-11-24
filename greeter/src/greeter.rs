@@ -39,9 +39,10 @@ use kdl::KdlDocument;
 use std::collections::{HashMap, hash_map};
 use std::error::Error;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs, io, process, thread};
 use tokio::process::Child;
 use tokio::time;
@@ -53,13 +54,30 @@ use wayland_client::Proxy;
 use wayland_client::protocol::wl_output::WlOutput;
 use zbus::{Connection, proxy};
 
+use crate::backdrop::{self, BackdropSet};
 use crate::common::{self, Common, DEFAULT_MENU_ITEM_HEIGHT, MAX_WIDTH};
 use crate::fl;
 use crate::login_ui;
+use crate::selection;
+use crate::styles;
 use crate::motion::{self, HoverTarget, Motion, Part};
 use crate::style_config::{self, StyleConfig};
 
 static USERNAME_ID: LazyLock<iced::id::Id> = LazyLock::new(|| iced::id::Id::new("username-id"));
+
+/// Papel de parede com que o login abre: nos modos rotativos escolhe pelo horário (o greeter não tem
+/// contador de bloqueios), para a primeira pintura já mostrar a imagem da vez.
+fn initial_wallpaper(cfg: &StyleConfig, now: u64) -> Option<PathBuf> {
+    cfg.pick_wallpaper_login_at(now)
+}
+
+/// Segundos desde a época Unix (0 se o relógio estiver antes dela).
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 #[proxy(
     interface = "com.system76.CosmicGreeter",
@@ -530,6 +548,10 @@ pub enum Message {
     FieldFocus(bool),
     /// Passo do roteiro de demo.
     DemoTick,
+    /// Desfoque e análise do fundo da superfície principal, prontos (ou o erro do job).
+    Backdrop(SurfaceId, Result<backdrop::Prepared, String>),
+    /// Papel de parede da rotação por horário, lido fora da thread de UI (caminho + imagem).
+    Wallpaper(u64, Option<(PathBuf, widget::image::Handle)>),
 }
 
 impl From<common::Message> for Message {
@@ -570,6 +592,12 @@ pub struct App {
     style_config: StyleConfig,
     /// Loaded custom/rotating wallpaper handle, if configured.
     custom_wallpaper: Option<widget::image::Handle>,
+    /// Caminho do `custom_wallpaper` (a rotação não recarrega o mesmo arquivo).
+    custom_wallpaper_path: Option<PathBuf>,
+    /// Desfoque e análise já calculados (ou pedidos) por superfície principal.
+    backdrops: BackdropSet<SurfaceId>,
+    /// Última fatia de rotação já aplicada (`rotate_interval`).
+    rotation_slot: Option<u64>,
 }
 
 #[derive(Default)]
@@ -618,6 +646,129 @@ impl App {
         .discard()
     }
 
+    /// Imagem de fundo da superfície principal `id`: o papel de parede configurado ou o do usuário.
+    fn surface_image(&self, id: SurfaceId) -> Option<&widget::image::Handle> {
+        self.custom_wallpaper
+            .as_ref()
+            .or_else(|| self.common.surface_images.get(&id))
+    }
+
+    /// Identidade do que a superfície `id` mostra; `None` sem imagem ou sem tamanho conhecido.
+    fn surface_backdrop_tag(&self, id: SurfaceId) -> Option<backdrop::Tag> {
+        backdrop::surface_tag(
+            self.surface_image(id)?,
+            self.style_config.blur_radius,
+            self.common.output_size(id),
+        )
+    }
+
+    /// Resultado pronto para o que `id` mostra agora (resultado de outra imagem não vale).
+    fn ready_backdrop(&self, id: SurfaceId) -> Option<&backdrop::Prepared> {
+        let tag = self.surface_backdrop_tag(id)?;
+        self.backdrops.get(id).filter(|prepared| prepared.tag == tag)
+    }
+
+    /// Dispara o desfoque/análise das superfícies cuja imagem ou tamanho mudou. Barato (um tag e
+    /// uma consulta por superfície); todo o trabalho pesado roda dentro do job.
+    fn spawn_backdrops(&mut self) -> Task<Message> {
+        let ids: Vec<SurfaceId> = self.common.surface_ids.values().copied().collect();
+        let mut tasks = Vec::new();
+        for id in ids {
+            let Some(tag) = self.surface_backdrop_tag(id) else {
+                continue;
+            };
+            if !self.backdrops.wants(id, tag) {
+                continue;
+            }
+            // `Path` não tem bytes em memória (ler aqui seria I/O na UI): sem eles não há job.
+            let Some(bytes) = self.surface_image(id).and_then(backdrop::handle_bytes) else {
+                continue;
+            };
+            self.backdrops.mark_pending(id, tag);
+            tasks.push(cosmic::task::future(async move {
+                // `cache_dir` toca o disco (stat/mkdir): também fora da thread de UI.
+                let cache = tokio::task::spawn_blocking(|| backdrop::cache_dir(true))
+                    .await
+                    .unwrap_or(None);
+                Message::Backdrop(id, backdrop::prepare_async(bytes, tag, cache).await)
+            }));
+        }
+        Task::batch(tasks)
+    }
+
+    /// Rotação por horário: quando a fatia muda, lê o próximo papel de parede fora da UI. Não mexe
+    /// em `prompt_opt`, foco nem no texto digitado.
+    fn rotate_wallpaper(&mut self) -> Task<Message> {
+        let now = unix_now();
+        let slot = self.style_config.rotation_slot(now);
+        if !style_config::rotation_due(self.rotation_slot, slot) {
+            return Task::none();
+        }
+        let Some(slot_value) = slot else {
+            return Task::none();
+        };
+        self.rotation_slot = slot;
+        let cfg = self.style_config.clone();
+        cosmic::task::future(async move {
+            let loaded = tokio::task::spawn_blocking(move || {
+                let path = initial_wallpaper(&cfg, now)?;
+                let handle = style_config::load_wallpaper_handle(&path)?;
+                Some((path, handle))
+            })
+            .await
+            .unwrap_or(None);
+            Message::Wallpaper(slot_value, loaded)
+        })
+    }
+
+    /// Menu de sessão (só o greeter): a lista vem de `session_names`, a marcada é a escolhida.
+    fn session_menu(&self) -> Option<styles::ChoiceMenu<Message>> {
+        if self.session_names.is_empty() {
+            return None;
+        }
+        Some(styles::ChoiceMenu {
+            open: self.dropdown_opt == Some(Dropdown::Session),
+            on_toggle: Message::DropdownToggle(Dropdown::Session),
+            label: fl!("sign-in-options"),
+            items: self
+                .session_names
+                .iter()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        name == &self.selected_session,
+                        Message::Session(name.clone()),
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    /// Menu de layout do teclado, só com 2+ layouts ativos.
+    fn keyboard_menu(&self) -> Option<styles::ChoiceMenu<Message>> {
+        if !style_config::wants_keyboard_menu(self.common.active_layouts.len()) {
+            return None;
+        }
+        Some(styles::ChoiceMenu {
+            open: self.dropdown_opt == Some(Dropdown::Keyboard),
+            on_toggle: Message::DropdownToggle(Dropdown::Keyboard),
+            label: fl!("keyboard-layout"),
+            items: self
+                .common
+                .active_layouts
+                .iter()
+                .enumerate()
+                .map(|(i, layout)| {
+                    (
+                        layout.description.clone(),
+                        i == self.common.current_keyboard_layout,
+                        Message::KeyboardLayout(i),
+                    )
+                })
+                .collect(),
+        })
+    }
+
     /// Tela estilizada (5 layouts + tipografia configurável).
     fn menu(&self, id: SurfaceId) -> Element<'_, Message> {
         crate::perf::count(crate::perf::Counter::View);
@@ -636,6 +787,7 @@ impl App {
             hour,
             minute,
             date: self.common.time.format_date(),
+            short_date: self.common.time.format_date_short(),
             look: self.motion.look(Part::Clock),
         };
 
@@ -664,7 +816,11 @@ impl App {
                     .on_focus(Message::FieldFocus(true))
                     .on_unfocus(Message::FieldFocus(false));
                 let submit = (!value.is_empty()).then(|| Message::Username(value.to_string()));
-                field = Some(login_ui::password_row_styled(input, submit, field_fx(), cfg));
+                field = Some(styles::FieldParts {
+                    input,
+                    submit,
+                    fx: field_fx(),
+                });
             } else if let Some((prompt, secret, Some(value))) = &self.common.prompt_opt {
                 let text_input_id = self
                     .common
@@ -697,59 +853,60 @@ impl App {
 
                 let submit = (accepts && !value.is_empty())
                     .then(|| Message::Auth(Some(value.clone())));
-                field = Some(login_ui::password_row_styled(
-                    text_input,
+                field = Some(styles::FieldParts {
+                    input: text_input,
                     submit,
-                    field_fx(),
-                    cfg,
-                ));
+                    fx: field_fx(),
+                });
             }
             // Prompt sem valor (ex.: PAM_TEXT_INFO do leitor de digital): só a linha de status.
         }
 
-        let avatar = cfg.show_avatar.then(|| {
-            login_ui::avatar(
-                user_idx
-                    .and_then(|i| self.flags.user_icons.get(i))
-                    .and_then(|icon| icon.as_ref()),
-                metrics.avatar,
-                self.motion.look(Part::Avatar),
-            )
-        });
         let full_name = user_data
             .map(|d| d.full_name.as_str())
             .unwrap_or(self.selected_username.username.as_str());
-        let name = cfg
-            .show_username
-            .then(|| login_ui::user_name_styled(full_name, self.motion.look(Part::Name), cfg));
-        let login = login_ui::LoginBlock {
-            avatar,
-            name,
-            field,
-            status: login_ui::status_view_styled(
-                self.current_status(),
-                self.motion.look(Part::Status),
-                cfg,
-            ),
-            look: field_look,
-        };
+        let icon = user_idx
+            .and_then(|i| self.flags.user_icons.get(i))
+            .and_then(|icon| icon.as_ref());
 
         let power = crate::power::menu_visible(self.flags.logind_available, self.flags.nested)
-            .then(|| {
-                login_ui::power_button(
-                    self.dropdown_opt == Some(Dropdown::Power),
-                    Message::DropdownToggle(Dropdown::Power),
-                    Message::Power,
-                    login_ui::PowerFx {
-                        look: self.motion.look(Part::Power),
-                        hover: self.motion.hover_t(id, HoverTarget::Power),
-                        menu: self.motion.menu_look(),
-                        hovers: Some(hovers(id, HoverTarget::Power)),
-                    },
-                )
+            .then(|| styles::PowerParts {
+                open: self.dropdown_opt == Some(Dropdown::Power),
+                on_toggle: Message::DropdownToggle(Dropdown::Power),
+                on_action: Message::Power,
+                fx: login_ui::PowerFx {
+                    look: self.motion.look(Part::Power),
+                    hover: self.motion.hover_t(id, HoverTarget::Power),
+                    menu: self.motion.menu_look(),
+                    hovers: Some(hovers(id, HoverTarget::Power)),
+                },
             });
 
-        login_ui::screen_styled(cfg, metrics, clock_data, login, power)
+        styles::view(styles::ScreenInput {
+            cfg,
+            metrics,
+            clock: clock_data,
+            user: styles::UserParts { icon, full_name },
+            field,
+            status: self.current_status(),
+            looks: styles::Looks {
+                clock: self.motion.look(Part::Clock),
+                avatar: self.motion.look(Part::Avatar),
+                name: self.motion.look(Part::Name),
+                field: field_look,
+                status: self.motion.look(Part::Status),
+                power: self.motion.look(Part::Power),
+            },
+            power,
+            session: self.session_menu(),
+            keyboard: self.keyboard_menu(),
+            system: &self.common.system_info,
+            backdrop: self
+                .common
+                .main_surface_of(id)
+                .and_then(|main| self.ready_backdrop(main))
+                .map(|prepared| &prepared.analysis),
+        })
     }
 
     /// Layout original do upstream (cartão com relógio grande); fica escondido, não apagado.
@@ -1418,37 +1575,32 @@ impl cosmic::Application for App {
             .collect();
         usernames.sort_by(|a, b| a.1.cmp(&b.1));
 
-        let last_user = flags.greeter_config.last_user.as_ref();
+        let style_config = StyleConfig::load();
 
-        let (username, uid) = last_user
-            .and_then(|last_user| {
-                flags
-                    .user_datas
-                    .iter()
-                    .find(|d| d.uid == last_user.get())
-                    .map(|x| (x.name.clone(), NonZeroU32::new(x.uid)))
-            })
-            .or_else(|| {
-                flags
-                    .user_datas
-                    .first()
-                    .map(|x| (x.name.clone(), NonZeroU32::new(x.uid)))
-            })
+        let users: Vec<(String, u32)> = flags
+            .user_datas
+            .iter()
+            .map(|x| (x.name.clone(), x.uid))
+            .collect();
+        let last_user_uid = flags.greeter_config.last_user.as_ref().map(|u| u.get());
+        let (username, uid) = selection::pick_user(&style_config.default_user, last_user_uid, &users)
+            .and_then(|i| flags.user_datas.get(i))
+            .map(|x| (x.name.clone(), NonZeroU32::new(x.uid)))
             .unwrap_or_default();
 
         let mut session_names: Vec<_> = flags.sessions.keys().map(|x| x.to_string()).collect();
         session_names.sort();
 
-        let selected_session = uid
-            .and_then(|uid| {
-                flags
-                    .greeter_config
-                    .users
-                    .get(&uid)
-                    .and_then(|user| user.last_session.clone())
-            })
-            .or_else(|| session_names.first().cloned())
-            .unwrap_or_default();
+        let last_session = uid.and_then(|uid| {
+            flags
+                .greeter_config
+                .users
+                .get(&uid)
+                .and_then(|user| user.last_session.as_deref())
+        });
+        let selected_session =
+            selection::pick_session(&style_config.session, last_session, &session_names)
+                .unwrap_or_default();
         let data_idx = flags.user_datas.iter().position(|d| d.name == username);
         let selected_username = NameIndexPair { username, data_idx };
         let accessibility = Accessibility {
@@ -1457,10 +1609,14 @@ impl cosmic::Application for App {
             ..Default::default()
         };
 
-        let style_config = StyleConfig::load();
-        let custom_wallpaper = style_config
-            .pick_wallpaper(0)
-            .and_then(|path| style_config::load_wallpaper_handle(&path));
+        // Modos rotativos: a imagem da vez (pelo horário), já na primeira pintura. A leitura do
+        // arquivo é a mesma de antes; decodificar/desfocar/hashear só no job de `backdrop`.
+        let now_secs = unix_now();
+        let custom_wallpaper_path = initial_wallpaper(&style_config, now_secs);
+        let custom_wallpaper = custom_wallpaper_path
+            .as_deref()
+            .and_then(style_config::load_wallpaper_handle);
+        let rotation_slot = style_config.rotation_slot(now_secs);
 
         let mut app = App {
             common,
@@ -1486,6 +1642,9 @@ impl cosmic::Application for App {
             demo_slot: 0,
             style_config,
             custom_wallpaper,
+            custom_wallpaper_path,
+            backdrops: BackdropSet::default(),
+            rotation_slot,
         };
         // Grava a chave do status sem fade (nada de fade de 150 ms na partida).
         let key = login_ui::status_key(&app.current_status());
@@ -1505,7 +1664,7 @@ impl cosmic::Application for App {
         let task = self.update_inner(message);
         let key = login_ui::status_key(&self.current_status());
         self.motion.observe_status(key, now);
-        task
+        Task::batch([task, self.spawn_backdrops()])
     }
 
     // Not used for layer surface window
@@ -1517,10 +1676,16 @@ impl cosmic::Application for App {
     fn view_window(&self, surface_id: SurfaceId) -> Element<'_, Self::Message> {
         crate::perf::count(crate::perf::Counter::WallpaperView);
         let img = self
-            .custom_wallpaper
-            .as_ref()
-            .or_else(|| self.common.surface_images.get(&surface_id))
+            .surface_image(surface_id)
             .unwrap_or(&self.common.fallback_background);
+        // A primeira pintura nunca espera o job: sem resultado pronto (ou de outro tag) é a original.
+        let blur = self.style_config.blur_radius;
+        let img = match self.surface_backdrop_tag(surface_id) {
+            Some(tag) => {
+                backdrop::pick_view_handle(blur, self.backdrops.get(surface_id), tag, img)
+            }
+            None => img,
+        };
         login_ui::wallpaper_view(img, self.style_config.dim_opacity)
     }
 
@@ -1543,7 +1708,8 @@ impl cosmic::Application for App {
             // Roteiro de demo (só aninhado com a variável de ambiente).
             motion::demo_ticks(self.flags.demo).map(|_| Message::DemoTick),
         ];
-        if self.style_config.show_seconds {
+        // Timer de 1 s só quando o estilo mostra segundos; a rotação usa o tick de minuto.
+        if self.style_config.needs_second_tick() {
             subs.push(
                 cosmic::iced::time::every(Duration::from_secs(1))
                     .map(|_| Message::Common(common::Message::Tick)),
@@ -1582,12 +1748,27 @@ impl App {
         self.common.error_opt = None;
         self.authenticating = false;
 
+        // A sessão escolhida pode ter sumido (config com nome inexistente, .desktop removido):
+        // recalcula a partir da configuração; sem nenhuma sessão, mostra o erro e não cai.
+        if !self.flags.sessions.contains_key(&self.selected_session) {
+            match selection::pick_session(&self.style_config.session, None, &self.session_names) {
+                Some(session) => self.selected_session = session,
+                None => {
+                    self.common.error_opt = Some(fl!("session-not-found"));
+                    return Task::none();
+                }
+            }
+        }
+
         match self.flags.sessions.get(&self.selected_session).cloned() {
             Some((cmd, env)) => {
                 self.send_request(Request::StartSession { cmd, env });
                 self.update_inner(Message::ConfigUpdateUser)
             }
-            None => todo!("session {:?} not found", self.selected_session),
+            None => {
+                self.common.error_opt = Some(fl!("session-not-found"));
+                Task::none()
+            }
         }
     }
 
@@ -1616,7 +1797,32 @@ impl App {
                     self.motion.set_focus(true, now);
                 }
 
-                return self.common.update(common_message);
+                let is_tick = matches!(&common_message, common::Message::Tick);
+                let task = self.common.update(common_message);
+                if is_tick {
+                    return Task::batch([task, self.rotate_wallpaper()]);
+                }
+                return task;
+            }
+            Message::Backdrop(surface_id, result) => {
+                match result {
+                    Ok(prepared) => {
+                        self.backdrops.accept(surface_id, prepared);
+                    }
+                    // O pedido fica marcado como pendente: o mesmo tag não é pedido de novo, então o
+                    // aviso sai uma vez por tag; a tela segue com a imagem original.
+                    Err(err) => tracing::warn!("desfoque do fundo indisponível: {err}"),
+                }
+            }
+            Message::Wallpaper(slot, loaded) => {
+                if self.rotation_slot == Some(slot) {
+                    if let Some((path, handle)) = loaded {
+                        if self.custom_wallpaper_path.as_ref() != Some(&path) {
+                            self.custom_wallpaper = Some(handle);
+                            self.custom_wallpaper_path = Some(path);
+                        }
+                    }
+                }
             }
             Message::OutputEvent(output_event, output) => {
                 match output_event {
@@ -1745,6 +1951,7 @@ impl App {
                         match self.common.surface_ids.remove(&output) {
                             Some(surface_id) => {
                                 self.common.surface_images.remove(&surface_id);
+                                self.backdrops.forget(surface_id);
                                 self.common.window_size.remove(&surface_id);
                                 if let Some(n) = self.common.surface_names.remove(&surface_id) {
                                     self.common.text_input_ids.remove(&n);
@@ -1829,7 +2036,10 @@ impl App {
                         .position(|d| d.name == username);
                     self.selected_username = NameIndexPair { username, data_idx };
                     self.common.surface_images.clear();
-                    if let Some(session) = data_idx.and_then(|i| {
+                    for surface_id in self.common.surface_ids.values() {
+                        self.backdrops.forget(*surface_id);
+                    }
+                    let last_session = data_idx.and_then(|i| {
                         self.flags
                             .user_datas
                             .get(i)
@@ -1842,9 +2052,14 @@ impl App {
                                         .and_then(|conf| conf.last_session.as_deref())
                                 })
                             })
-                    }) {
-                        session.clone_into(&mut self.selected_session);
-                    };
+                    });
+                    if let Some(session) = selection::pick_session(
+                        &self.style_config.session,
+                        last_session,
+                        &self.session_names,
+                    ) {
+                        self.selected_session = session;
+                    }
                     if let SocketState::Open = &self.socket_state {
                         self.common.prompt_opt = None;
                         self.send_request(Request::CancelSession);
@@ -2122,6 +2337,7 @@ impl App {
                 let mut commands = Vec::new();
                 for (_output, surface_id) in self.common.surface_ids.drain() {
                     self.common.surface_images.remove(&surface_id);
+                    self.backdrops.forget(surface_id);
                     self.common.surface_names.remove(&surface_id);
                     if let Some(n) = self.common.surface_names.remove(&surface_id) {
                         self.common.text_input_ids.remove(&n);
@@ -2482,5 +2698,55 @@ mod motion_tests {
         assert!(!m.exiting());
         assert!(!m.is_animating());
         assert_eq!(m.look(Part::Field), crate::motion::Look::REST);
+    }
+}
+
+#[cfg(test)]
+mod login_wallpaper_tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "cosmic_greeter_login_test_{}_{}",
+            name,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("cria o diretório de teste");
+        dir
+    }
+
+    #[test]
+    fn login_initial_wallpaper_uses_time() {
+        let dir = temp_dir("initial");
+        let a = dir.join("a.png");
+        let b = dir.join("b.png");
+        for p in [&a, &b] {
+            fs::write(p, b"img").expect("grava a imagem de teste");
+        }
+        let mut cfg = StyleConfig::default();
+        cfg.wallpaper_mode = "rotate_on_lock".into();
+        cfg.wallpaper_dir = dir.to_string_lossy().into_owned();
+        cfg.wallpaper_shuffle = false;
+        cfg.wallpaper_interval_mins = 10;
+
+        let first = initial_wallpaper(&cfg, 0);
+        let later = initial_wallpaper(&cfg, 600);
+        assert_eq!(first, Some(a));
+        assert_eq!(later, Some(b));
+        assert_ne!(first, later);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn login_initial_wallpaper_fixed_ignores_time() {
+        let dir = temp_dir("fixed");
+        let one = dir.join("one.png");
+        fs::write(&one, b"img").expect("grava a imagem de teste");
+        let mut cfg = StyleConfig::default();
+        cfg.wallpaper = one.to_string_lossy().into_owned();
+        assert_eq!(initial_wallpaper(&cfg, 0), Some(one.clone()));
+        assert_eq!(initial_wallpaper(&cfg, 99_999), Some(one));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

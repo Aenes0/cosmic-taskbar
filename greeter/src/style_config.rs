@@ -6,6 +6,7 @@
 //! `/var/lib/aenes-greeter/greeter.toml` when running as the `cosmic-greeter` user
 //! or when the user config file is absent).
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,10 +15,13 @@ use cosmic::iced::{Color, Font, font};
 
 const SYSTEM_FALLBACK_PATH: &str = "/var/lib/aenes-greeter/greeter.toml";
 
+/// Env var that points the nested test harness to an alternate config file.
+pub const CONFIG_OVERRIDE_ENV: &str = "AENES_GREETER_CONFIG";
+
 /// Visual and wallpaper configuration shared by `locker` and `greeter`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StyleConfig {
-    /// Layout style: `"win11"`, `"android"`, `"macos"`, `"sidebar"`, `"editorial"`.
+    /// Layout style: `"win11"`, `"android"`, `"macos"`, `"ios"`, `"ipados"`.
     pub style: String,
     /// Fixed wallpaper file path (used when `wallpaper_mode == "fixed"` or as fallback).
     pub wallpaper: String,
@@ -57,6 +61,10 @@ pub struct StyleConfig {
     pub card_radius: f32,
     /// Optional accent color (`""` for system accent, or `"#RRGGBB"`).
     pub accent_color: String,
+    /// User preselected on the login screen (`""` = none).
+    pub default_user: String,
+    /// Session name to start (`""` = default).
+    pub session: String,
 }
 
 impl Default for StyleConfig {
@@ -82,6 +90,8 @@ impl Default for StyleConfig {
             card_opacity: 0.0,
             card_radius: 16.0,
             accent_color: String::new(),
+            default_user: String::new(),
+            session: String::new(),
         }
     }
 }
@@ -114,14 +124,12 @@ impl StyleConfig {
             let val = val.trim();
             match key {
                 "style" => {
-                    let parsed = parse_toml_string(val).to_lowercase();
-                    if matches!(
-                        parsed.as_str(),
-                        "win11" | "android" | "macos" | "sidebar" | "editorial"
-                    ) {
-                        cfg.style = parsed;
+                    if let Some(style) = canonical_style(&parse_toml_string(val)) {
+                        cfg.style = style.to_owned();
                     }
                 }
+                "default_user" => cfg.default_user = parse_toml_string(val),
+                "session" => cfg.session = parse_toml_string(val),
                 "wallpaper" => cfg.wallpaper = parse_toml_string(val),
                 "wallpaper_mode" => {
                     let parsed = parse_toml_string(val).to_lowercase();
@@ -259,6 +267,44 @@ impl StyleConfig {
         }
     }
 
+    fn interval_period_secs(&self) -> u64 {
+        u64::from(self.wallpaper_interval_mins.max(1)) * 60
+    }
+
+    /// Current rotation slot (`now / period`), only in `rotate_interval` mode.
+    pub fn rotation_slot(&self, now_unix_secs: u64) -> Option<u64> {
+        (self.wallpaper_mode == "rotate_interval")
+            .then(|| now_unix_secs / self.interval_period_secs())
+    }
+
+    /// Wallpaper for the login screen: both rotating modes pick by time slot, since
+    /// the greeter has no lock counter.
+    pub fn pick_wallpaper_login_at(&self, now_unix_secs: u64) -> Option<PathBuf> {
+        match self.wallpaper_mode.as_str() {
+            "rotate_on_lock" | "rotate_interval" => {
+                let mut files = self
+                    .resolved_wallpaper_dir()
+                    .map(|d| scan_wallpapers(&d))
+                    .unwrap_or_default();
+                if files.is_empty() {
+                    return self.fixed_wallpaper_path();
+                }
+                if self.wallpaper_shuffle {
+                    let seed = 0x9E37_79B9_7F4A_7C15 ^ (files.len() as u64);
+                    deterministic_shuffle(&mut files, seed);
+                }
+                let idx = ((now_unix_secs / self.interval_period_secs()) as usize) % files.len();
+                files.into_iter().nth(idx)
+            }
+            _ => self.fixed_wallpaper_path(),
+        }
+    }
+
+    /// Whether the clock needs a one-second tick (Android never shows seconds).
+    pub fn needs_second_tick(&self) -> bool {
+        self.show_seconds && self.style != "android"
+    }
+
     fn fixed_wallpaper_path(&self) -> Option<PathBuf> {
         let trimmed = self.wallpaper.trim();
         if trimmed.is_empty() {
@@ -347,11 +393,53 @@ pub fn load_wallpaper_handle(path: &Path) -> Option<cosmic::widget::image::Handl
     }
 }
 
+/// Maps a raw `style` value (any case, including legacy names) to its canonical name.
+/// `editorial` becomes `ios` and `sidebar` becomes `ipados`; unknown values yield `None`.
+pub fn canonical_style(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_lowercase().as_str() {
+        "win11" => Some("win11"),
+        "android" => Some("android"),
+        "macos" => Some("macos"),
+        "ios" | "editorial" => Some("ios"),
+        "ipados" | "sidebar" => Some("ipados"),
+        _ => None,
+    }
+}
+
+/// `true` only when both slots are known and differ (the wallpaper must change).
+pub fn rotation_due(last: Option<u64>, now: Option<u64>) -> bool {
+    matches!((last, now), (Some(a), Some(b)) if a != b)
+}
+
+/// The keyboard layout menu is only useful with two or more active layouts.
+pub fn wants_keyboard_menu(active_layouts: usize) -> bool {
+    active_layouts >= 2
+}
+
 fn candidate_config_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::with_capacity(2);
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+    candidate_config_paths_from(
+        crate::power::nested_from_env(),
+        std::env::var_os(CONFIG_OVERRIDE_ENV).as_deref(),
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        dirs::home_dir(),
+    )
+}
+
+/// Pure resolution of the config search order. The override path is honoured only
+/// when running nested (test harness), never on a real greeter session.
+fn candidate_config_paths_from(
+    nested: bool,
+    override_path: Option<&OsStr>,
+    xdg: Option<&OsStr>,
+    home: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::with_capacity(3);
+    if nested && let Some(p) = override_path.filter(|v| !v.is_empty()) {
+        paths.push(PathBuf::from(p));
+    }
+    if let Some(xdg) = xdg.filter(|v| !v.is_empty()) {
         paths.push(PathBuf::from(xdg).join("cosmic-taskbar/greeter.toml"));
-    } else if let Some(home) = dirs::home_dir() {
+    } else if let Some(home) = home {
         paths.push(home.join(".config/cosmic-taskbar/greeter.toml"));
     }
     paths.push(PathBuf::from(SYSTEM_FALLBACK_PATH));
@@ -489,156 +577,4 @@ fn parse_toml_string(raw: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "cosmic_greeter_style_test_{}_{}",
-            name,
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn parse_all_fields_and_comments() {
-        let toml = r##"
-            # Full config
-            style = "android" # inline comment
-            wallpaper = "/tmp/wall.png"
-            wallpaper_mode = "rotate_on_lock"
-            wallpaper_dir = "/tmp/walls"
-            wallpaper_shuffle = false
-            wallpaper_interval_mins = 45
-            blur_radius = 24
-            dim_opacity = 0.35
-            theme = "light"
-            font_family = "mono"
-            font_weight = "bold"
-            clock_size = "huge"
-            clock_24h = false
-            show_seconds = true
-            show_date = false
-            show_avatar = false
-            show_username = false
-            card_opacity = 0.65
-            card_radius = 22.0
-            accent_color = "#ff5500"
-        "##;
-        let cfg = StyleConfig::parse(toml);
-        assert_eq!(cfg.style, "android");
-        assert_eq!(cfg.wallpaper, "/tmp/wall.png");
-        assert_eq!(cfg.wallpaper_mode, "rotate_on_lock");
-        assert_eq!(cfg.wallpaper_dir, "/tmp/walls");
-        assert!(!cfg.wallpaper_shuffle);
-        assert_eq!(cfg.wallpaper_interval_mins, 45);
-        assert_eq!(cfg.blur_radius, 24);
-        assert!((cfg.dim_opacity - 0.35).abs() < 1e-6);
-        assert_eq!(cfg.theme, "light");
-        assert_eq!(cfg.font_family, "mono");
-        assert_eq!(cfg.font_weight, "bold");
-        assert_eq!(cfg.clock_size, "huge");
-        assert!(!cfg.clock_24h);
-        assert!(cfg.show_seconds);
-        assert!(!cfg.show_date);
-        assert!(!cfg.show_avatar);
-        assert!(!cfg.show_username);
-        assert!((cfg.card_opacity - 0.65).abs() < 1e-6);
-        assert!((cfg.card_radius - 22.0).abs() < 1e-6);
-        assert_eq!(cfg.accent_color, "#ff5500");
-        assert!(cfg.accent_color_rgba().is_some());
-    }
-
-    #[test]
-    fn parse_clamps_and_rejects_invalid_enums() {
-        let toml = r#"
-            style = "invalid"
-            wallpaper_mode = "bogus"
-            wallpaper_interval_mins = 0
-            blur_radius = 999
-            dim_opacity = 2.5
-            card_opacity = -1.0
-            card_radius = 100.0
-            theme = "neon"
-            font_family = "comic"
-            font_weight = "black"
-            clock_size = "tiny"
-        "#;
-        let cfg = StyleConfig::parse(toml);
-        assert_eq!(cfg.style, "win11");
-        assert_eq!(cfg.wallpaper_mode, "fixed");
-        assert_eq!(cfg.wallpaper_interval_mins, 1);
-        assert_eq!(cfg.blur_radius, 60);
-        assert_eq!(cfg.dim_opacity, 0.85);
-        assert_eq!(cfg.card_opacity, 0.0);
-        assert_eq!(cfg.card_radius, 32.0);
-        assert_eq!(cfg.theme, "dark");
-        assert_eq!(cfg.font_family, "system");
-        assert_eq!(cfg.font_weight, "normal");
-        assert_eq!(cfg.clock_size, "medium");
-    }
-
-    #[test]
-    fn pick_wallpaper_fixed_and_rotate_modes() {
-        let dir = make_temp_dir("pick");
-        let sub = dir.join("sub");
-        let deep = sub.join("deep");
-        fs::create_dir_all(&deep).unwrap();
-
-        let a = dir.join("a.png");
-        let b = dir.join("b.JPG");
-        let c = sub.join("c.webp");
-        let ignored_txt = dir.join("notes.txt");
-        let ignored_deep = deep.join("d.png");
-        for p in [&a, &b, &c, &ignored_txt, &ignored_deep] {
-            fs::write(p, b"img").unwrap();
-        }
-
-        // Fixed mode
-        let mut cfg = StyleConfig::default();
-        cfg.wallpaper_mode = "fixed".into();
-        cfg.wallpaper = a.to_string_lossy().into_owned();
-        assert_eq!(cfg.pick_wallpaper_at(0, 0), Some(a.clone()));
-        assert_eq!(cfg.pick_wallpaper_at(5, 9999), Some(a.clone()));
-
-        // Rotate on lock (sequential)
-        cfg.wallpaper_mode = "rotate_on_lock".into();
-        cfg.wallpaper_dir = dir.to_string_lossy().into_owned();
-        cfg.wallpaper_shuffle = false;
-        assert_eq!(cfg.pick_wallpaper_at(0, 0), Some(a.clone()));
-        assert_eq!(cfg.pick_wallpaper_at(1, 0), Some(b.clone()));
-        assert_eq!(cfg.pick_wallpaper_at(2, 0), Some(c.clone()));
-        assert_eq!(cfg.pick_wallpaper_at(3, 0), Some(a.clone()));
-
-        // Rotate on lock (deterministic shuffle covers all 3)
-        cfg.wallpaper_shuffle = true;
-        let picks: Vec<PathBuf> = (0..3)
-            .map(|i| cfg.pick_wallpaper_at(i, 0).unwrap())
-            .collect();
-        assert_eq!(picks.len(), 3);
-        assert!(picks.contains(&a) && picks.contains(&b) && picks.contains(&c));
-
-        // Rotate interval (every 10 minutes = 600s)
-        cfg.wallpaper_mode = "rotate_interval".into();
-        cfg.wallpaper_interval_mins = 10;
-        cfg.wallpaper_shuffle = false;
-        assert_eq!(cfg.pick_wallpaper_at(0, 0), Some(a.clone()));
-        assert_eq!(cfg.pick_wallpaper_at(0, 599), Some(a.clone()));
-        assert_eq!(cfg.pick_wallpaper_at(0, 600), Some(b.clone()));
-        assert_eq!(cfg.pick_wallpaper_at(0, 1200), Some(c.clone()));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn hex_color_parsing() {
-        assert_eq!(parse_hex_color("#ffffff"), Some(Color::WHITE));
-        assert_eq!(parse_hex_color("000000"), Some(Color::BLACK));
-        assert_eq!(parse_hex_color(""), None);
-        assert_eq!(parse_hex_color("#12345"), None);
-        assert_eq!(parse_hex_color("#gggggg"), None);
-    }
-}
+mod tests;

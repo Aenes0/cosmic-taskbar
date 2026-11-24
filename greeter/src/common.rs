@@ -66,6 +66,7 @@ pub struct Common<M> {
     pub rectangles: HashMap<(SurfaceId, bool), iced::Rectangle>,
     pub include_menu: bool,
     pub subsurface_rects: HashMap<WlOutput, Rectangle>,
+    pub system_info: crate::sysinfo::SystemInfo,
     pub surface_ids: HashMap<WlOutput, SurfaceId>,
     pub subsurface_outputs: HashMap<SurfaceId, WlOutput>,
     pub surface_images: HashMap<SurfaceId, widget::image::Handle>,
@@ -80,7 +81,10 @@ pub enum Message {
     CapsLock(bool),
     Focus(SurfaceId),
     Key(Modifiers, Key, Option<SmolStr>),
-    NetworkIcon(Option<&'static str>),
+    /// Rede atual (`None` = sem conexão ativa).
+    Network(Option<crate::sysinfo::NetworkInfo>),
+    /// Baterias do sistema e periféricos; só chega quando a lista muda.
+    Batteries(Vec<crate::sysinfo::BatteryDevice>),
     OnScreenKeyboard,
     SubsurfaceOpened(SurfaceId),
     OutputEvent(OutputEvent, WlOutput),
@@ -131,6 +135,7 @@ impl<M: From<Message> + Send + 'static> Common<M> {
             power_info_opt: None,
             prompt_opt: None,
             subsurface_rects: HashMap::new(),
+            system_info: crate::sysinfo::SystemInfo::default(),
             surface_ids: HashMap::new(),
             surface_images: HashMap::new(),
             surface_names: HashMap::new(),
@@ -287,9 +292,15 @@ impl<M: From<Message> + Send + 'static> Common<M> {
                     }
                 }
             }
-            Message::NetworkIcon(network_icon_opt) => {
-                self.network_icon_opt =
-                    network_icon_opt.map(|name| widget::icon::from_name(name).into());
+            Message::Network(network_opt) => {
+                self.network_icon_opt = Some(
+                    widget::icon::from_name(crate::sysinfo::network_icon_name(network_opt.as_ref()))
+                        .into(),
+                );
+                self.system_info.network = network_opt;
+            }
+            Message::Batteries(batteries) => {
+                self.system_info.batteries = crate::sysinfo::sorted_batteries(batteries);
             }
             Message::OnScreenKeyboard => {
                 use cosmic_osk_config::Config;
@@ -381,6 +392,16 @@ impl<M: From<Message> + Send + 'static> Common<M> {
     pub fn screen_height(&self, id: SurfaceId) -> Option<f32> {
         let output = self.subsurface_outputs.get(&id)?;
         self.subsurface_rects.get(output).map(|rect| rect.height)
+    }
+
+    /// Superfície principal do monitor a que pertence a subsuperfície `sub`.
+    pub fn main_surface_of(&self, sub: SurfaceId) -> Option<SurfaceId> {
+        main_surface_in(&self.subsurface_outputs, &self.surface_ids, sub)
+    }
+
+    /// Tamanho lógico (arredondado) do monitor de `surface`, principal ou subsuperfície.
+    pub fn output_size(&self, surface: SurfaceId) -> Option<(u32, u32)> {
+        output_size_in(&self.subsurface_outputs, &self.surface_ids, &self.subsurface_rects, surface)
     }
 
     pub(crate) fn dropdown_blur_rects(&mut self, enable: bool) -> Task<M> {
@@ -479,12 +500,13 @@ impl<M: From<Message> + Send + 'static> Common<M> {
 
         #[cfg(feature = "networkmanager")]
         {
-            subscriptions.push(crate::networkmanager::subscription().map(Message::NetworkIcon));
+            subscriptions.push(crate::networkmanager::subscription().map(Message::Network));
         }
 
         #[cfg(feature = "upower")]
         {
             subscriptions.push(crate::upower::subscription().map(Message::PowerInfo));
+            subscriptions.push(crate::upower::devices_subscription().map(Message::Batteries));
         }
 
         Subscription::batch(subscriptions)
@@ -542,6 +564,33 @@ pub fn menu_rect(logical_size: Option<(i32, i32)>) -> Rectangle {
     Rectangle::new(iced::Point::ORIGIN, Size::new(w as f32, h as f32))
 }
 
+/// `main_surface_of` sobre mapas genéricos na chave do monitor (testável sem `WlOutput`).
+fn main_surface_in<O: Eq + std::hash::Hash>(
+    subsurface_outputs: &HashMap<SurfaceId, O>,
+    surface_ids: &HashMap<O, SurfaceId>,
+    sub: SurfaceId,
+) -> Option<SurfaceId> {
+    let output = subsurface_outputs.get(&sub)?;
+    surface_ids.get(output).copied()
+}
+
+/// `output_size` sobre mapas genéricos: acha o monitor pela subsuperfície ou pela superfície
+/// principal e arredonda o retângulo dele; dimensão não positiva vale `None`.
+fn output_size_in<O: Eq + std::hash::Hash>(
+    subsurface_outputs: &HashMap<SurfaceId, O>,
+    surface_ids: &HashMap<O, SurfaceId>,
+    subsurface_rects: &HashMap<O, Rectangle>,
+    surface: SurfaceId,
+) -> Option<(u32, u32)> {
+    let output = match subsurface_outputs.get(&surface) {
+        Some(output) => output,
+        None => surface_ids.iter().find(|(_, id)| **id == surface)?.0,
+    };
+    let rect = subsurface_rects.get(output)?;
+    let (w, h) = (rect.width.round(), rect.height.round());
+    if w >= 1. && h >= 1. { Some((w as u32, h as u32)) } else { None }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +603,32 @@ mod tests {
         let fallback = Rectangle::new(iced::Point::ORIGIN, Size::new(1920., 1080.));
         assert_eq!(menu_rect(None), fallback);
         assert_eq!(menu_rect(Some((0, 1440))), fallback);
+    }
+
+    // `WlOutput` não é construível sem uma conexão Wayland; o mapeamento é testado com chaves `u32`.
+    #[test]
+    fn main_surface_of_maps_subsurface() {
+        let main = SurfaceId::unique();
+        let sub = SurfaceId::unique();
+        let sub_outputs = HashMap::from([(sub, 7u32)]);
+        let surface_ids = HashMap::from([(7u32, main)]);
+        assert_eq!(main_surface_in(&sub_outputs, &surface_ids, sub), Some(main));
+        assert_eq!(main_surface_in(&sub_outputs, &surface_ids, SurfaceId::unique()), None);
+        assert_eq!(main_surface_in(&sub_outputs, &HashMap::new(), sub), None);
+    }
+
+    #[test]
+    fn output_size_rounds_rect_of_the_output() {
+        let main = SurfaceId::unique();
+        let sub = SurfaceId::unique();
+        let sub_outputs = HashMap::from([(sub, 7u32)]);
+        let surface_ids = HashMap::from([(7u32, main)]);
+        let rects = HashMap::from([(7u32, Rectangle::new(iced::Point::ORIGIN, Size::new(2560.4, 1439.6)))]);
+        // vale para a subsuperfície e para a superfície principal
+        assert_eq!(output_size_in(&sub_outputs, &surface_ids, &rects, sub), Some((2560, 1440)));
+        assert_eq!(output_size_in(&sub_outputs, &surface_ids, &rects, main), Some((2560, 1440)));
+        assert_eq!(output_size_in(&sub_outputs, &surface_ids, &rects, SurfaceId::unique()), None);
+        let empty = HashMap::from([(7u32, Rectangle::new(iced::Point::ORIGIN, Size::new(0., 0.)))]);
+        assert_eq!(output_size_in(&sub_outputs, &surface_ids, &empty, sub), None);
     }
 }

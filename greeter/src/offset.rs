@@ -187,17 +187,17 @@ mod tests {
 
     #[test]
     fn offset_moves_child_but_keeps_own_size() {
-        let mut w: Offset<'_, (), (), ()> = offset(space(), Vector::new(3.0, 5.0));
-        let mut tree = Tree::new(&w as &dyn Widget<(), (), ()>);
-        let node = w.layout(&mut tree, &(), &Limits::new(Size::ZERO, Size::new(100.0, 100.0)));
+        let mut w: Offset<'_, (), cosmic::Theme, cosmic::Renderer> = offset(space(), Vector::new(3.0, 5.0));
+        let mut tree = Tree::new(&w as &dyn Widget<(), cosmic::Theme, cosmic::Renderer>);
+        let node = w.layout(&mut tree, &cosmic::Renderer::new(cosmic::iced::Font::DEFAULT, cosmic::iced::Pixels(16.0)), &Limits::new(Size::ZERO, Size::new(100.0, 100.0)));
         assert_eq!(node.size(), Size::new(10.0, 20.0));
         assert_eq!(node.children()[0].bounds(), Rectangle::new([3.0, 5.0].into(), Size::new(10.0, 20.0)));
     }
     #[test]
     fn offset_tree_is_transparent() {
-        let w: Offset<'_, (), (), ()> = offset(space(), Vector::new(0.0, 12.0));
-        let a = Tree::new(&w as &dyn Widget<(), (), ()>);
-        let b = Tree::new(&space() as &dyn Widget<(), (), ()>);
+        let w: Offset<'_, (), cosmic::Theme, cosmic::Renderer> = offset(space(), Vector::new(0.0, 12.0));
+        let a = Tree::new(&w as &dyn Widget<(), cosmic::Theme, cosmic::Renderer>);
+        let b = Tree::new(&space() as &dyn Widget<(), cosmic::Theme, cosmic::Renderer>);
         assert_eq!(a.tag, b.tag);
         assert_eq!(a.children.len(), b.children.len());
     }
@@ -207,10 +207,10 @@ mod tests {
     fn offset_tree_is_transparent_for_stateful_child() {
         use cosmic::iced::advanced::widget::tree::Tag;
         use cosmic::iced::widget::{MouseArea, mouse_area};
-        let w: Offset<'_, (), (), ()> = offset(mouse_area(space()), Vector::new(0.0, 12.0));
-        let inner: MouseArea<'_, (), (), ()> = mouse_area(space());
-        let a = Tree::new(&w as &dyn Widget<(), (), ()>);
-        let b = Tree::new(&inner as &dyn Widget<(), (), ()>);
+        let w: Offset<'_, (), cosmic::Theme, cosmic::Renderer> = offset(mouse_area(space()), Vector::new(0.0, 12.0));
+        let inner: MouseArea<'_, (), cosmic::Theme, cosmic::Renderer> = mouse_area(space());
+        let a = Tree::new(&w as &dyn Widget<(), cosmic::Theme, cosmic::Renderer>);
+        let b = Tree::new(&inner as &dyn Widget<(), cosmic::Theme, cosmic::Renderer>);
         assert_ne!(b.tag, Tag::stateless());
         assert_eq!(a.tag, b.tag);
         assert_eq!(a.children.len(), 1);
