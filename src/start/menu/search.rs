@@ -3,14 +3,219 @@ use super::*;
 /// A search result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Hit {
+    /// Instant math expression result: `(expression, formatted_answer)`.
+    Calc(String, String),
+    /// Quick system command: `(icon_name, label, action_id)`.
+    Action(&'static str, &'static str, &'static str),
     App(usize),
     Window(String),
     File(usize),
 }
 
+struct QuickAction {
+    id: &'static str,
+    icon: &'static str,
+    label: &'static str,
+    keywords: &'static [&'static str],
+}
+
+const QUICK_ACTIONS: &[QuickAction] = &[
+    QuickAction {
+        id: "control-panel",
+        icon: "preferences-system-symbolic",
+        label: "Painel de Controle",
+        keywords: &["painel", "controle", "control panel", "ajustes", "sistema"],
+    },
+    QuickAction {
+        id: "lock",
+        icon: "system-lock-screen-symbolic",
+        label: "Bloquear tela",
+        keywords: &["bloquear", "trancar", "lock"],
+    },
+    QuickAction {
+        id: "suspend",
+        icon: "system-suspend-symbolic",
+        label: "Suspender computador",
+        keywords: &["suspender", "dormir", "sleep", "suspend"],
+    },
+    QuickAction {
+        id: "restart",
+        icon: "system-reboot-symbolic",
+        label: "Reiniciar computador",
+        keywords: &["reiniciar", "reboot", "restart"],
+    },
+    QuickAction {
+        id: "shutdown",
+        icon: "system-shutdown-symbolic",
+        label: "Desligar computador",
+        keywords: &["desligar", "shutdown", "poweroff"],
+    },
+    QuickAction {
+        id: "restart-panel",
+        icon: "view-refresh-symbolic",
+        label: "Reiniciar barra",
+        keywords: &["reiniciar barra", "reiniciar painel", "reload panel"],
+    },
+];
+
+/// Evaluates simple arithmetic expressions (`+ - * / % ^ ( )`, PT-BR `,` decimal)
+/// when the query contains at least one operator.
+fn eval_calc(raw: &str) -> Option<String> {
+    let s = raw.trim().replace(',', ".");
+    if s.is_empty() || !s.chars().any(|c| matches!(c, '+' | '-' | '*' | '/' | '%' | '^')) {
+        return None;
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | '*' | '/' | '%' | '^' | '(' | ')' | ' '))
+    {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut pos = 0usize;
+    let val = parse_expr(bytes, &mut pos)?;
+    skip_ws(bytes, &mut pos);
+    if pos != bytes.len() || !val.is_finite() {
+        return None;
+    }
+    let rounded = (val * 1_000_000.0).round() / 1_000_000.0;
+    if (rounded - rounded.round()).abs() < 1e-9 && rounded.abs() < 1e15 {
+        Some(format!("{}", rounded.round() as i64))
+    } else {
+        let formatted = format!("{rounded:.6}");
+        Some(formatted.trim_end_matches('0').trim_end_matches('.').to_owned())
+    }
+}
+
+fn skip_ws(b: &[u8], pos: &mut usize) {
+    while *pos < b.len() && b[*pos].is_ascii_whitespace() {
+        *pos += 1;
+    }
+}
+
+fn parse_expr(b: &[u8], pos: &mut usize) -> Option<f64> {
+    let mut left = parse_term(b, pos)?;
+    loop {
+        skip_ws(b, pos);
+        match b.get(*pos) {
+            Some(b'+') => {
+                *pos += 1;
+                left += parse_term(b, pos)?;
+            }
+            Some(b'-') => {
+                *pos += 1;
+                left -= parse_term(b, pos)?;
+            }
+            _ => return Some(left),
+        }
+    }
+}
+
+fn parse_term(b: &[u8], pos: &mut usize) -> Option<f64> {
+    let mut left = parse_power(b, pos)?;
+    loop {
+        skip_ws(b, pos);
+        match b.get(*pos) {
+            Some(b'*') => {
+                *pos += 1;
+                left *= parse_power(b, pos)?;
+            }
+            Some(b'/') => {
+                *pos += 1;
+                let r = parse_power(b, pos)?;
+                if r == 0.0 {
+                    return None;
+                }
+                left /= r;
+            }
+            Some(b'%') => {
+                *pos += 1;
+                let r = parse_power(b, pos)?;
+                if r == 0.0 {
+                    return None;
+                }
+                left %= r;
+            }
+            _ => return Some(left),
+        }
+    }
+}
+
+fn parse_power(b: &[u8], pos: &mut usize) -> Option<f64> {
+    let base = parse_unary(b, pos)?;
+    skip_ws(b, pos);
+    if b.get(*pos) == Some(&b'^') {
+        *pos += 1;
+        let exp = parse_power(b, pos)?;
+        Some(base.powf(exp))
+    } else {
+        Some(base)
+    }
+}
+
+fn parse_unary(b: &[u8], pos: &mut usize) -> Option<f64> {
+    skip_ws(b, pos);
+    match b.get(*pos) {
+        Some(b'+') => {
+            *pos += 1;
+            parse_unary(b, pos)
+        }
+        Some(b'-') => {
+            *pos += 1;
+            Some(-parse_unary(b, pos)?)
+        }
+        _ => parse_primary(b, pos),
+    }
+}
+
+fn parse_primary(b: &[u8], pos: &mut usize) -> Option<f64> {
+    skip_ws(b, pos);
+    if b.get(*pos) == Some(&b'(') {
+        *pos += 1;
+        let v = parse_expr(b, pos)?;
+        skip_ws(b, pos);
+        if b.get(*pos) != Some(&b')') {
+            return None;
+        }
+        *pos += 1;
+        return Some(v);
+    }
+    let start = *pos;
+    let mut dot = false;
+    while *pos < b.len() {
+        let ch = b[*pos];
+        if ch.is_ascii_digit() {
+            *pos += 1;
+        } else if ch == b'.' && !dot {
+            dot = true;
+            *pos += 1;
+        } else {
+            break;
+        }
+    }
+    if *pos == start {
+        return None;
+    }
+    std::str::from_utf8(&b[start..*pos]).ok()?.parse::<f64>().ok()
+}
+
+fn quick_action_message(action_id: &'static str) -> Message {
+    match action_id {
+        "control-panel" => Message::Tool(crate::start::tools::Tool::ControlPanel),
+        "lock" => Message::Spawn("loginctl", vec!["lock-session".into()]),
+        "suspend" => Message::Spawn("systemctl", vec!["suspend".into()]),
+        "restart" => Message::Spawn("cosmic-osd", vec!["restart".into()]),
+        "shutdown" => Message::Spawn("cosmic-osd", vec!["shutdown".into()]),
+        "restart-panel" => Message::Spawn("reiniciar-painel", Vec::new()),
+        _ => Message::Nothing,
+    }
+}
+
 impl StartMenu {
     pub(super) fn open_hit(&mut self, hit: Hit) -> app::Task<Message> {
         match hit {
+            Hit::Calc(_, answer) => cosmic::Application::update(self, Message::CopyText(answer)),
+            Hit::Action(_, _, id) => cosmic::Application::update(self, quick_action_message(id)),
             Hit::App(i) => self.launch(i, None),
             Hit::Window(id) => self.activate(id),
             Hit::File(i) => {
@@ -21,9 +226,23 @@ impl StartMenu {
     }
 
     pub(super) fn hits(&self) -> Vec<Hit> {
-        let query = fold(self.query.trim());
+        let raw = self.query.trim();
+        let query = fold(raw);
         if query.is_empty() {
             return Vec::new();
+        }
+        let mut hits: Vec<Hit> = Vec::new();
+        if let Some(answer) = eval_calc(raw) {
+            hits.push(Hit::Calc(raw.to_owned(), answer));
+        }
+        if query.len() >= 3 {
+            for qa in QUICK_ACTIONS {
+                if qa.keywords.iter().any(|k| k.starts_with(&query) || query.contains(k))
+                    || fold(qa.label).starts_with(&query)
+                {
+                    hits.push(Hit::Action(qa.icon, qa.label, qa.id));
+                }
+            }
         }
         let mut scored: Vec<(u8, &str, Hit)> = self
             .apps
@@ -50,7 +269,7 @@ impl StartMenu {
                 .then_with(|| a.1.chars().count().cmp(&b.1.chars().count()))
                 .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
         });
-        let mut hits: Vec<Hit> = scored.into_iter().map(|(_, _, hit)| hit).take(10).collect();
+        hits.extend(scored.into_iter().map(|(_, _, hit)| hit).take(10));
         hits.extend(
             self.windows
                 .iter()
@@ -143,17 +362,33 @@ impl StartMenu {
     fn hit_row(&self, i: usize, hit: &Hit, p: Palette) -> Option<(&'static str, Element<'_, Message>)> {
         let t = texts();
         let (heading, icon, title, message, target, key) = match hit {
+            Hit::Calc(expr, answer) => (
+                "Calculadora",
+                symbolic("accessories-calculator-symbolic"),
+                format!("{expr} = {answer}"),
+                Message::CopyText(answer.clone()),
+                None,
+                format!("calc:{answer}"),
+            ),
+            Hit::Action(icon_name, label, id) => (
+                "Ação rápida",
+                symbolic(icon_name),
+                (*label).to_owned(),
+                quick_action_message(id),
+                None,
+                format!("action:{id}"),
+            ),
             Hit::App(index) => {
                 let app = &self.apps[*index];
-                (t.apps, app.icon.clone(), app.name.clone(), Message::Launch(app.id.clone()), Target::App(app.id.clone()), app.id.clone())
+                (t.apps, app.icon.clone(), app.name.clone(), Message::Launch(app.id.clone()), Some(Target::App(app.id.clone())), app.id.clone())
             }
             Hit::Window(id) => {
                 let window = self.windows.iter().find(|w| w.id == *id)?;
-                (t.open_windows, self.window_icon(window), window.title.clone(), Message::Activate(id.clone()), Target::Window(id.clone()), id.clone())
+                (t.open_windows, self.window_icon(window), window.title.clone(), Message::Activate(id.clone()), Some(Target::Window(id.clone())), id.clone())
             }
             Hit::File(index) => {
                 let file = &self.recents[*index];
-                (t.documents, self.file_icon_of(file), file.name.clone(), Message::OpenFile(file.path.clone()), Target::File(file.path.clone()), file.path.clone())
+                (t.documents, self.file_icon_of(file), file.name.clone(), Message::OpenFile(file.path.clone()), Some(Target::File(file.path.clone())), file.path.clone())
             }
         };
         let size = px(if i == 0 { 32.0 } else { 20.0 });
@@ -169,7 +404,13 @@ impl StartMenu {
             .width(Length::Fill)
             .class(flat_class(p, i == self.selected))
             .on_press(message);
-        let row = widget::mouse_area(button).on_right_press(Message::MenuFor(target, id.clone()));
+        let row: Element<'_, Message> = if let Some(target) = target {
+            widget::mouse_area(button)
+                .on_right_press(Message::MenuFor(target, id.clone()))
+                .into()
+        } else {
+            button.into()
+        };
         Some((heading, widget::container(row).width(Length::Fill).id(id).into()))
     }
 
@@ -177,6 +418,18 @@ impl StartMenu {
     fn detail_panel(&self, chosen: &Hit, p: Palette) -> Element<'_, Message> {
         let t = texts();
         let (icon, title, kind, actions): (icon::Handle, String, String, Vec<(String, Message)>) = match chosen {
+            Hit::Calc(expr, answer) => (
+                symbolic("accessories-calculator-symbolic"),
+                answer.clone(),
+                format!("Resultado de {expr}"),
+                vec![("Copiar resultado".to_owned(), Message::CopyText(answer.clone()))],
+            ),
+            Hit::Action(icon_name, label, id) => (
+                symbolic(icon_name),
+                (*label).to_owned(),
+                "Ação rápida do sistema".to_owned(),
+                vec![("Executar agora".to_owned(), quick_action_message(id))],
+            ),
             Hit::App(index) => {
                 let app = &self.apps[*index];
                 let pinned = self.pinned.iter().any(|id| *id == app.id);
@@ -258,5 +511,25 @@ impl StartMenu {
                 ..Default::default()
             }))
             .into()
+    }
+}
+
+#[cfg(test)]
+mod calc_tests {
+    use super::eval_calc;
+
+    #[test]
+    fn evaluates_basic_and_br_decimal_expressions() {
+        assert_eq!(eval_calc("2 + 2").as_deref(), Some("4"));
+        assert_eq!(eval_calc("1500 * 0,85").as_deref(), Some("1275"));
+        assert_eq!(eval_calc("(240 + 60) / 4").as_deref(), Some("75"));
+        assert_eq!(eval_calc("2^10").as_deref(), Some("1024"));
+    }
+
+    #[test]
+    fn ignores_plain_numbers_and_text() {
+        assert_eq!(eval_calc("2026"), None);
+        assert_eq!(eval_calc("firefox"), None);
+        assert_eq!(eval_calc("10 / 0"), None);
     }
 }

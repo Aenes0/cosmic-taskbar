@@ -100,6 +100,44 @@ impl Section {
         }
     }
 
+    pub const GROUPS: &[(&'static str, &'static [Section])] = &[
+        (
+            "Sistema",
+            &[Section::Power, Section::Displays, Section::Network, Section::Camera],
+        ),
+        (
+            "Aparência & Barra",
+            &[
+                Section::Bar,
+                Section::Central,
+                Section::Monitor,
+                Section::Notifications,
+                Section::Login,
+            ],
+        ),
+        ("Proteção & Dados", &[Section::Security, Section::Backup]),
+        ("Avançado", &[Section::DevicesOsd, Section::Optional, Section::System]),
+    ];
+
+    pub fn keywords(self) -> &'static str {
+        match self {
+            Section::Power => "energia bateria cpu gpu watts desempenho economia perfil suspender tela ccd turbo",
+            Section::Bar => "barra taskbar tray icones espacamento atalho print captura screenshot",
+            Section::Monitor => "monitor esquerda cpu gpu temperatura ventoinha clima sensores processos",
+            Section::Central => "central direita relogio calendario clipboard notificacoes tema escuro nao perturbe",
+            Section::Notifications => "notificacoes toast aviso pop-up som tempo posicao cor opacidade",
+            Section::DevicesOsd => "osd logitech teclado mouse caps lock pilula aviso",
+            Section::Camera => "camera audio microfone iriun webcam privacidade som",
+            Section::Network => "rede wifi ethernet ip dns vpn bluetooth",
+            Section::Security => "seguranca privacidade firewall ufw dns dot trackers mac vpn kernel usbguard",
+            Section::Backup => "backup sincronizacao restic snapper btrfs ssd trim claude",
+            Section::Displays => "monitores brilho escala ddc resolucao hz tela papel parede wallpaper janela dividida padding gap foco prioridade pipocando",
+            Section::Login => "login bloqueio greeter senha avatar fundo tela bloqueio",
+            Section::Optional => "pacotes opcionais instalar apps extras",
+            Section::System => "sistema servicos atualizacoes systemd daemon logs",
+        }
+    }
+
     pub fn icon(self) -> &'static str {
         match self {
             Section::Power => "battery-good-symbolic",
@@ -292,7 +330,12 @@ pub enum Message {
     RefreshAll,
     ActionDone(String),
     DismissNotice,
+    SearchChanged(String),
+    SearchSubmit,
     ToggleSecurityAdvanced,
+    TogglePowerAdvanced,
+    SetWindowGaps(u32, u32),
+    SetActivationPolicy(&'static str),
     None,
 }
 
@@ -341,7 +384,11 @@ pub struct ControlPanel {
     screenshot_config: ScreenshotConfig,
     // Login (Greeter)
     greeter: data::GreeterConfig,
+    search: String,
     security_show_advanced: bool,
+    power_show_advanced: bool,
+    window_gaps: (u32, u32),
+    activation_policy: String,
     busy: bool,
     notice: Option<String>,
 }
@@ -495,7 +542,11 @@ impl cosmic::Application for ControlPanel {
             osd_config: osd_config::load_or_default(),
             screenshot_config: ScreenshotConfig::load(),
             greeter: data::load_greeter_config(),
+            search: String::new(),
             security_show_advanced: false,
+            power_show_advanced: false,
+            window_gaps: services::window_gaps(),
+            activation_policy: services::activation_policy(),
             busy: false,
             notice: None,
         };
@@ -1585,8 +1636,42 @@ impl cosmic::Application for ControlPanel {
             Message::DismissNotice => {
                 self.notice = None;
             }
+            Message::SearchChanged(q) => {
+                self.search = q;
+            }
+            Message::SearchSubmit => {
+                let q = self.search.trim().to_lowercase();
+                if !q.is_empty()
+                    && let Some(&sec) = Section::ALL.iter().find(|s| {
+                        s.label().to_lowercase().contains(&q) || s.keywords().contains(&q)
+                    })
+                {
+                    self.section = sec;
+                }
+            }
             Message::ToggleSecurityAdvanced => {
                 self.security_show_advanced = !self.security_show_advanced;
+            }
+            Message::TogglePowerAdvanced => {
+                self.power_show_advanced = !self.power_show_advanced;
+            }
+            Message::SetWindowGaps(outer, inner) => {
+                self.window_gaps = (outer, inner);
+                services::set_window_gaps(outer, inner);
+                self.notice = Some(format!(
+                    "Espaçamento de janela dividida aplicado: margem externa {} px · entre janelas {} px.",
+                    outer, inner
+                ));
+            }
+            Message::SetActivationPolicy(policy) => {
+                self.activation_policy = policy.to_owned();
+                services::set_activation_policy(policy);
+                let label = match policy {
+                    "Urgent" => "Não roubar foco (apenas destacar na barra)",
+                    "FocusIfActiveWorkspace" => "Focar apenas na área de trabalho atual",
+                    _ => "Sempre focar (padrão COSMIC)",
+                };
+                self.notice = Some(format!("Prioridade de foco de janelas: {label}."));
             }
             Message::None => {}
         }

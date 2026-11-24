@@ -798,10 +798,12 @@ impl App {
                         if !privacy.microphone.is_empty() {
                             let orange: fn(&cosmic::Theme) -> iced::Color =
                                 |theme| theme.cosmic().warning_color().into();
-                            icons.push(at(
+                            let mic_btn = widget::mouse_area(icon_btn(
                                 colored("audio-input-microphone-symbolic", Some(orange)),
-                                Page::Sound,
-                            ));
+                                Message::ToggleMicrophone,
+                            ))
+                            .on_right_press(Message::OpenAt(Page::Sound));
+                            icons.push(mic_btn.into());
                         }
                     }
                 }
@@ -813,20 +815,21 @@ impl App {
                         Show::Never => false,
                     };
                     if bell {
-                        if new == 0 {
-                            icons.push(at(panel_icon("notification-symbolic"), Page::Main));
+                        let bell_content = if new == 0 {
+                            panel_icon("notification-symbolic")
                         } else {
                             let accent: fn(&cosmic::Theme) -> iced::Color =
                                 |theme| theme.cosmic().accent_color().into();
-                            icons.push(at(
-                                with_text(
-                                    colored("notification-new-symbolic", Some(accent)),
-                                    new.to_string(),
-                                    true,
-                                ),
-                                Page::Main,
-                            ));
-                        }
+                            with_text(
+                                colored("notification-new-symbolic", Some(accent)),
+                                new.to_string(),
+                                true,
+                            )
+                        };
+                        let area = widget::mouse_area(icon_btn(bell_content, Message::OpenAt(Page::Main)))
+                            .on_right_press(Message::OpenAt(Page::DoNotDisturb))
+                            .on_middle_press(Message::ToggleDoNotDisturb);
+                        icons.push(area.into());
                     }
                 }
                 BarItem::Tile(Tile::Power) => {
@@ -847,7 +850,10 @@ impl App {
                         )
                         .center(Length::Fixed(f32::from(size)))
                         .into();
-                        icons.push(at(content, Page::Power));
+                        let area = widget::mouse_area(icon_btn(content, Message::OpenAt(Page::Power)))
+                            .on_right_press(Message::OpenAt(Page::Power))
+                            .on_middle_press(Message::NextPowerProfile);
+                        icons.push(area.into());
                     }
                 }
                 BarItem::Tile(tile) => {
@@ -938,7 +944,9 @@ impl App {
                             .padding(if horizontal { [0, major] } else { [major, 0] })
                             .class(theme::Button::AppletIcon);
                         let clock_el: Element<'_, Message> = if in_corner {
-                            button.on_press_down(Message::CornerPress).into()
+                            widget::mouse_area(button.on_press_down(Message::CornerPress))
+                                .on_middle_press(Message::ToggleDoNotDisturb)
+                                .into()
                         } else {
                             button.on_press(Message::None).into()
                         };

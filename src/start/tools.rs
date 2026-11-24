@@ -143,6 +143,11 @@ fn items() -> &'static [Option<(&'static str, &'static str, Tool)>] {
             Some(("system-file-manager-symbolic", t.file_explorer, Tool::Run("cosmic-files", Vec::new()))),
             Some(("system-search-symbolic", t.search, Tool::Search)),
             Some(("system-run-symbolic", t.run, Tool::Run("cosmic-launcher", Vec::new()))),
+            Some((
+                "view-refresh-symbolic",
+                if crate::shared::locale::portuguese() { "Reiniciar barra" } else { "Restart bar" },
+                Tool::Run("reiniciar-painel", Vec::new()),
+            )),
             None,
             Some(("system-shutdown-symbolic", t.shut_down_or_sign_out, Tool::PowerMenu)),
             Some(("user-desktop-symbolic", t.desktop, Tool::ShowDesktop)),

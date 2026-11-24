@@ -149,6 +149,45 @@ fn action_pill_style(accent_rgb: Option<[f32; 3]>) -> theme::Button {
     }
 }
 
+/// Extracts a 2FA/OTP verification code (4–8 digits) when the notification text
+/// clearly refers to a verification/login code.
+pub fn extract_otp_code(summary: &str, body: &str) -> Option<String> {
+    let combined = format!("{summary} {body}");
+    let lower = combined.to_lowercase();
+    const KEYWORDS: &[&str] = &[
+        "código",
+        "codigo",
+        "code",
+        "otp",
+        "pin",
+        "token",
+        "verificação",
+        "verificacao",
+        "verification",
+        "autenticação",
+        "autenticacao",
+        "2fa",
+        "confirmação",
+        "confirmacao",
+        "acesso",
+        "login",
+    ];
+    if !KEYWORDS.iter().any(|k| lower.contains(k)) {
+        return None;
+    }
+    for raw in combined.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
+        let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+        // Match pure digit tokens or `123-456` split codes (4..=8 digits).
+        if (4..=8).contains(&digits.len())
+            && raw.chars().all(|c| c.is_ascii_digit() || c == '-')
+            && !(digits.len() == 4 && (digits.starts_with("19") || digits.starts_with("20")))
+        {
+            return Some(digits);
+        }
+    }
+    None
+}
+
 /// Renders the stack of active floating toast notifications.
 pub fn view<'a, M: Clone + 'static>(
     toasts: &'a [Toast],
@@ -156,6 +195,7 @@ pub fn view<'a, M: Clone + 'static>(
     on_dismiss: impl Fn(u32) -> M + Copy + 'a,
     on_invoke: impl Fn(u32, String) -> M + Copy + 'a,
     on_hover: impl Fn(bool) -> M + Copy + 'a,
+    on_copy_otp: impl Fn(u32, String) -> M + Copy + 'a,
 ) -> Element<'a, M> {
     let gap = match cfg.format {
         NotifFormat::Full => 10,
@@ -163,7 +203,7 @@ pub fn view<'a, M: Clone + 'static>(
     };
     let cards: Vec<Element<'a, M>> = toasts
         .iter()
-        .map(|toast| render_one(&toast.notification, cfg, on_dismiss, on_invoke))
+        .map(|toast| render_one(&toast.notification, cfg, on_dismiss, on_invoke, on_copy_otp))
         .collect();
     let stack = widget::column::with_children(cards)
         .spacing(gap)
@@ -179,6 +219,7 @@ fn render_one<'a, M: Clone + 'static>(
     cfg: &'a NotifConfig,
     on_dismiss: impl Fn(u32) -> M + Copy + 'a,
     on_invoke: impl Fn(u32, String) -> M + Copy + 'a,
+    on_copy_otp: impl Fn(u32, String) -> M + Copy + 'a,
 ) -> Element<'a, M> {
     let app_icon = if n.icon.starts_with('/') {
         widget::icon::from_path(n.icon.clone().into())
@@ -302,7 +343,18 @@ fn render_one<'a, M: Clone + 'static>(
         }
     }
 
-    // Action buttons (excluding duplicate "default" when named actions exist)
+    // Action buttons (including automatic 1-click "Copiar código" for 2FA/OTP notifications)
+    let mut action_btns: Vec<Element<'a, M>> = Vec::new();
+    if let Some(code) = extract_otp_code(&n.summary, &n.body) {
+        let label = format!("Copiar {code}");
+        action_btns.push(
+            button::custom(widget::text::caption(label))
+                .padding([5, 12])
+                .class(action_pill_style(accent_rgb))
+                .on_press(on_copy_otp(id, code))
+                .into(),
+        );
+    }
     if cfg.show_actions && !n.actions.is_empty() {
         let named: Vec<&(String, String)> = n
             .actions
@@ -314,20 +366,19 @@ fn render_one<'a, M: Clone + 'static>(
         } else {
             named
         };
-        if !to_show.is_empty() {
-            let btns: Vec<Element<'a, M>> = to_show
-                .into_iter()
-                .take(3)
-                .map(|(key, label)| {
-                    button::custom(widget::text::caption(label.as_str()))
-                        .padding([5, 12])
-                        .class(action_pill_style(accent_rgb))
-                        .on_press(on_invoke(id, key.clone()))
-                        .into()
-                })
-                .collect();
-            rows.push(widget::row::with_children(btns).spacing(6).into());
+        let remaining = 3usize.saturating_sub(action_btns.len());
+        for (key, label) in to_show.into_iter().take(remaining) {
+            action_btns.push(
+                button::custom(widget::text::caption(label.as_str()))
+                    .padding([5, 12])
+                    .class(action_pill_style(accent_rgb))
+                    .on_press(on_invoke(id, key.clone()))
+                    .into(),
+            );
         }
+    }
+    if !action_btns.is_empty() {
+        rows.push(widget::row::with_children(action_btns).spacing(6).into());
     }
 
     widget::container(widget::column::with_children(rows).spacing(6))

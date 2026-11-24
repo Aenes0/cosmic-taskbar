@@ -1853,6 +1853,77 @@ pub fn set_tiling_config(key: &str, value: bool) {
     }
 }
 
+/// Reads the current tiling window gaps `(outer, inner)` in logical pixels
+/// from COSMIC's active theme config (`v2/gaps`).
+pub fn window_gaps() -> (u32, u32) {
+    for id in [
+        "com.system76.CosmicTheme.Dark",
+        "com.system76.CosmicTheme.Dark.Builder",
+        "com.system76.CosmicTheme.Light",
+    ] {
+        if let Ok(cfg) = Config::new(id, 2)
+            && let Ok(gaps) = cfg.get::<(u32, u32)>("gaps")
+        {
+            return gaps;
+        }
+    }
+    (0, 0)
+}
+
+/// Applies tiling window gaps `(outer, inner)` across Dark/Light themes and builders
+/// so `cosmic-comp` updates split-window padding immediately.
+pub fn set_window_gaps(outer: u32, inner: u32) {
+    for id in [
+        "com.system76.CosmicTheme.Dark",
+        "com.system76.CosmicTheme.Dark.Builder",
+        "com.system76.CosmicTheme.Light",
+        "com.system76.CosmicTheme.Light.Builder",
+    ] {
+        if let Ok(cfg) = Config::new(id, 2)
+            && let Err(err) = cfg.set("gaps", (outer, inner))
+        {
+            tracing::warn!("cannot set gaps on {id}: {err}");
+        }
+    }
+}
+
+/// Reads `com.system76.CosmicComp/v1/activation_policy` as a wire string
+/// (`"Urgent"`, `"FocusIfActiveWorkspace"`, or `"Focus"`).
+pub fn activation_policy() -> String {
+    let raw = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .and_then(|base| {
+            std::fs::read_to_string(base.join("cosmic/com.system76.CosmicComp/v1/activation_policy")).ok()
+        })
+        .unwrap_or_else(|| "Focus".to_owned());
+    match raw.trim() {
+        "Urgent" => "Urgent".to_owned(),
+        "FocusIfActiveWorkspace" => "FocusIfActiveWorkspace".to_owned(),
+        _ => "Focus".to_owned(),
+    }
+}
+
+/// Writes `com.system76.CosmicComp/v1/activation_policy` directly in RON format
+/// so `cosmic-comp` reloads window focus/stealing behavior immediately.
+pub fn set_activation_policy(policy: &str) {
+    let valid = matches!(policy, "Urgent" | "FocusIfActiveWorkspace" | "Focus");
+    if !valid {
+        return;
+    }
+    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+    {
+        let dir = base.join("cosmic/com.system76.CosmicComp/v1");
+        if std::fs::create_dir_all(&dir).is_ok()
+            && let Err(err) = std::fs::write(dir.join("activation_policy"), format!("{policy}\n"))
+        {
+            tracing::warn!("cannot write activation_policy: {err}");
+        }
+    }
+}
+
 /// Switch high contrast on or off in both themes, as COSMIC's accessibility
 /// applet does.
 pub fn set_high_contrast(enabled: bool) {

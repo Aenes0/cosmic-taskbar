@@ -505,6 +505,23 @@ impl cosmic::Application for StartMenu {
                 }
                 return self.hide();
             }
+            Message::CopyText(value) => {
+                std::thread::spawn(move || {
+                    use std::io::Write;
+                    if let Ok(mut child) = std::process::Command::new("wl-copy")
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                    {
+                        if let Some(mut stdin) = child.stdin.take() {
+                            let _ = stdin.write_all(value.as_bytes());
+                        }
+                        let _ = child.wait();
+                    }
+                });
+                return self.hide();
+            }
             Message::Nothing => {}
             Message::PreviewHot(id) => self.preview_hot = id,
         }

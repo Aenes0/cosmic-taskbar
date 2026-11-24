@@ -43,18 +43,20 @@ fn dimmed(theme: &cosmic::Theme) -> iced::widget::text::Style {
 
 fn card_box<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     widget::container(content)
-        .padding(14)
+        .padding(16)
         .width(Length::Fill)
         .class(theme::Container::custom(|theme| {
             let c = card(theme.cosmic());
+            let mut border_col: Color = theme.cosmic().background(theme.transparent).divider.into();
+            border_col.a *= 0.65;
             widget::container::Style {
                 background: Some(Background::Color(c.base.into())),
                 text_color: Some(c.on.into()),
                 icon_color: Some(c.on.into()),
                 border: iced::Border {
-                    radius: theme.cosmic().corner_radii.radius_m.into(),
-                    width: 1.0,
-                    color: theme.cosmic().background(theme.transparent).divider.into(),
+                    radius: crate::shared::tokens::POPUP_RADIUS.into(),
+                    width: crate::shared::tokens::HAIRLINE_WIDTH,
+                    color: border_col,
                 },
                 ..Default::default()
             }
@@ -133,24 +135,66 @@ fn toggle_row<'a>(label: &'a str, value: bool, msg: Message) -> Element<'a, Mess
 
 pub fn view(app: &ControlPanel) -> Element<'_, Message> {
     let spacing = theme::spacing();
+    let query = app.search.trim().to_lowercase();
 
-    // Left navigation sidebar
-    let mut nav_items: Vec<Element<'_, Message>> = Vec::with_capacity(Section::ALL.len());
-    for sec in Section::ALL {
-        let selected = app.section == sec;
-        let row = widget::row::with_children(vec![
-            widget::icon::icon(icon(sec.icon())).size(17).into(),
-            widget::text::body(sec.label()).into(),
-        ])
-        .spacing(10)
-        .align_y(Alignment::Center);
+    // Left navigation sidebar: instant search + clean grouped categories
+    let search_box = widget::search_input("Buscar ajuste...", &app.search)
+        .on_input(Message::SearchChanged)
+        .on_submit(|_| Message::SearchSubmit)
+        .width(Length::Fill);
+
+    let mut nav_items: Vec<Element<'_, Message>> = Vec::with_capacity(Section::ALL.len() + 6);
+    for &(group_title, sections) in Section::GROUPS {
+        let matching: Vec<Section> = sections
+            .iter()
+            .copied()
+            .filter(|sec| {
+                query.is_empty()
+                    || sec.label().to_lowercase().contains(&query)
+                    || sec.keywords().contains(&query)
+            })
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+        if !nav_items.is_empty() {
+            nav_items.push(widget::space::vertical().height(Length::Fixed(6.0)).into());
+        }
         nav_items.push(
-            button::custom(row)
-                .padding([8, 12])
-                .width(Length::Fill)
-                .class(chip_class(selected))
-                .on_press(Message::SelectSection(sec))
-                .into(),
+            widget::container(
+                widget::text::caption(group_title)
+                    .font(cosmic::font::semibold())
+                    .class(theme::Text::Custom(dimmed)),
+            )
+            .padding([4, 10])
+            .into(),
+        );
+        for sec in matching {
+            let selected = app.section == sec;
+            let row = widget::row::with_children(vec![
+                widget::icon::icon(icon(sec.icon())).size(16).into(),
+                widget::text::body(sec.label()).into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center);
+            nav_items.push(
+                button::custom(row)
+                    .padding([7, 10])
+                    .width(Length::Fill)
+                    .class(chip_class(selected))
+                    .on_press(Message::SelectSection(sec))
+                    .into(),
+            );
+        }
+    }
+    if nav_items.is_empty() {
+        nav_items.push(
+            widget::container(
+                widget::text::caption("Nenhum ajuste encontrado.")
+                    .class(theme::Text::Custom(dimmed)),
+            )
+            .padding([12, 10])
+            .into(),
         );
     }
 
@@ -179,30 +223,33 @@ pub fn view(app: &ControlPanel) -> Element<'_, Message> {
     );
 
     let nav_list = widget::scrollable(
-        widget::column::with_children(nav_items).spacing(spacing.space_xxs),
+        widget::column::with_children(nav_items).spacing(2),
     )
     .height(Length::Fill);
 
     let sidebar = widget::container(
         widget::column::with_children(vec![
+            search_box.into(),
             nav_list.into(),
             widget::column::with_children(sidebar_footer)
                 .spacing(spacing.space_xxs)
                 .into(),
         ])
-        .spacing(spacing.space_xs)
+        .spacing(spacing.space_s)
         .height(Length::Fill),
     )
-    .width(Length::Fixed(248.0))
+    .width(Length::Fixed(256.0))
     .height(Length::Fill)
     .padding(spacing.space_s)
     .class(theme::Container::custom(|theme| {
         let bg = theme.cosmic().background(theme.transparent);
+        let mut div: Color = bg.divider.into();
+        div.a *= 0.65;
         widget::container::Style {
             background: Some(Background::Color(bg.base.into())),
             border: iced::Border {
                 width: 1.0,
-                color: bg.divider.into(),
+                color: div,
                 ..Default::default()
             },
             ..Default::default()
@@ -263,13 +310,17 @@ pub fn view(app: &ControlPanel) -> Element<'_, Message> {
     };
     main_col.push(page_content);
 
-    let right = widget::scrollable(
+    let centered_content = widget::container(
         widget::container(widget::column::with_children(main_col).spacing(spacing.space_m))
-            .padding(spacing.space_l)
+            .max_width(860.0)
             .width(Length::Fill),
     )
-    .width(Length::Fill)
-    .height(Length::Fill);
+    .padding(spacing.space_l)
+    .center_x(Length::Fill);
+
+    let right = widget::scrollable(centered_content)
+        .width(Length::Fill)
+        .height(Length::Fill);
 
     widget::row::with_children(vec![sidebar.into(), right.into()])
         .width(Length::Fill)
@@ -399,6 +450,37 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
         .spacing(spacing.space_xs),
     ));
 
+    // Collapsible toggle for technical CPU/GPU tuning sliders so everyday users
+    // see clean profile selection & screen timeouts first.
+    items.push(
+        widget::row::with_children(vec![
+            widget::column::with_children(vec![
+                widget::text::heading(format!("Ajuste fino de CPU e GPU ({})", editing.label())).into(),
+                widget::text::caption(
+                    "Limites de frequência, núcleos ativos, watts e clock da GPU. Os padrões do perfil já são otimizados para seu hardware.",
+                )
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+            ])
+            .spacing(2)
+            .width(Length::Fill)
+            .into(),
+            action_btn(
+                if app.power_show_advanced {
+                    "Ocultar ajuste fino"
+                } else {
+                    "Mostrar ajuste fino"
+                },
+                Message::TogglePowerAdvanced,
+                false,
+            ),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    );
+
+    if app.power_show_advanced {
     // --- 1. CPU card ---
     let hw_max = topo.hw_max_mhz.max(5500).max(t.cpu_max_mhz);
     let freq_label = if t.cpu_max_mhz == 0 {
@@ -647,6 +729,7 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
         );
     }
     items.push(card_box(widget::column::with_children(gpu_rows).spacing(spacing.space_xs)));
+    } // end if app.power_show_advanced
 
     // --- 3. Screen, Login Lock & Suspend per profile ---
     let idle_chips = |current: u32, presets: &[u32], make: fn(u32) -> Message| {
@@ -3432,6 +3515,99 @@ fn displays_view(app: &ControlPanel) -> Element<'_, Message> {
     } else {
         items.push(card_box(widget::text::caption("Lendo monitores...")));
     }
+
+    // Window tiling padding (gaps) & activation focus policy
+    let (gap_outer, gap_inner) = app.window_gaps;
+    let gap_presets: Vec<Element<'_, Message>> = [
+        ((0, 0), "Sem folga (0 px)"),
+        ((0, 4), "Compacto (4 px)"),
+        ((4, 8), "Padrão COSMIC (8 px)"),
+        ((8, 12), "Folgado (12 px)"),
+    ]
+    .into_iter()
+    .map(|((o, i), lbl)| small_chip(lbl, gap_outer == o && gap_inner == i, Message::SetWindowGaps(o, i)))
+    .collect();
+    let px_options: [(u32, &'static str); 4] = [(0, "0 px"), (4, "4 px"), (8, "8 px"), (12, "12 px")];
+    let outer_chips: Vec<Element<'_, Message>> = px_options
+        .into_iter()
+        .map(|(px, lbl)| small_chip(lbl, gap_outer == px, Message::SetWindowGaps(px, gap_inner)))
+        .collect();
+    let inner_chips: Vec<Element<'_, Message>> = px_options
+        .into_iter()
+        .map(|(px, lbl)| small_chip(lbl, gap_inner == px, Message::SetWindowGaps(gap_outer, px)))
+        .collect();
+    let policy_desc = match app.activation_policy.as_str() {
+        "Urgent" => "Recomendado · Comandos automatizados e apps em segundo plano não saltam na sua frente; apenas acendem na barra.",
+        "FocusIfActiveWorkspace" => "Traz a janela para frente apenas se ela já estiver na sua área de trabalho atual.",
+        _ => "Padrão COSMIC · Qualquer app ou script que abrir janela pode roubar o foco imediatamente.",
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Janelas: Modo Dividido & Prioridade de Foco").into(),
+            widget::text::caption(
+                "Controla a folga (padding) ao encaixar janelas lado a lado e impede que comandos automatizados fiquem pipocando na tela.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Folga no modo janela dividida").width(Length::Fill).into(),
+                widget::row::with_children(gap_presets).spacing(6).into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::caption("Margem externa da tela")
+                    .class(theme::Text::Custom(dimmed))
+                    .width(Length::Fill)
+                    .into(),
+                widget::row::with_children(outer_chips).spacing(4).into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::caption("Espaço entre janelas divididas")
+                    .class(theme::Text::Custom(dimmed))
+                    .width(Length::Fill)
+                    .into(),
+                widget::row::with_children(inner_chips).spacing(4).into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::divider::horizontal::default().into(),
+            widget::row::with_children(vec![
+                widget::text::body("Prioridade de foco de novas janelas").width(Length::Fill).into(),
+                widget::row::with_children(vec![
+                    small_chip(
+                        "Não roubar foco (Recomendado)",
+                        app.activation_policy == "Urgent",
+                        Message::SetActivationPolicy("Urgent"),
+                    ),
+                    small_chip(
+                        "Só na área atual",
+                        app.activation_policy == "FocusIfActiveWorkspace",
+                        Message::SetActivationPolicy("FocusIfActiveWorkspace"),
+                    ),
+                    small_chip(
+                        "Sempre focar",
+                        app.activation_policy == "Focus",
+                        Message::SetActivationPolicy("Focus"),
+                    ),
+                ])
+                .spacing(6)
+                .into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(policy_desc)
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+        ])
+        .spacing(spacing.space_s),
+    ));
 
     // Visual utilities
     items.push(card_box(

@@ -102,6 +102,8 @@ pub enum Message {
     ToastInvoke(u32, String),
     /// Pointer entered or left the floating toast stack (pauses auto-dismiss).
     ToastHover(bool),
+    /// Copy an extracted 2FA/OTP code to the clipboard and dismiss the toast.
+    ToastCopyOtp(u32, String),
     /// Centered transient OSD pill (e.g. `logi-osd` keyboard/device status).
     Osd(toast::OsdPill),
 }
@@ -572,7 +574,9 @@ impl cosmic::Application for Panels {
             }
             Message::NotificationsChanged => {
                 self.notif_config = NotifConfig::load();
-                let dnd = DO_NOT_DISTURB.get();
+                let in_call = !self.central.privacy.camera.is_empty()
+                    || !self.central.privacy.microphone.is_empty();
+                let dnd = DO_NOT_DISTURB.get() || in_call;
                 let list = notifications::load();
                 let live_ids: HashSet<u32> = list
                     .iter()
@@ -629,6 +633,25 @@ impl cosmic::Application for Panels {
             Message::ToastHover(hovered) => {
                 self.toast_hovered = hovered;
                 self.last_toast_tick = Some(Instant::now());
+            }
+            Message::ToastCopyOtp(id, code) => {
+                self.toasts.retain(|t| t.notification.id != id);
+                let sync = self.sync_toast_surface();
+                std::thread::spawn(move || {
+                    use std::io::Write;
+                    if let Ok(mut child) = std::process::Command::new("wl-copy")
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                    {
+                        if let Some(mut stdin) = child.stdin.take() {
+                            let _ = stdin.write_all(code.as_bytes());
+                        }
+                        let _ = child.wait();
+                    }
+                });
+                return sync;
             }
             Message::Osd(pill) => {
                 self.osd = Some(pill);
@@ -751,6 +774,7 @@ impl cosmic::Application for Panels {
                 Message::ToastDismiss,
                 Message::ToastInvoke,
                 Message::ToastHover,
+                Message::ToastCopyOtp,
             );
             return cosmic::widget::autosize::autosize(
                 stack,

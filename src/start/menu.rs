@@ -331,6 +331,8 @@ pub enum Message {
     ConfirmUninstall,
     UninstallDone(Result<(), String>),
     Spawn(&'static str, Vec<String>),
+    /// Copies a string (e.g. calculator result) to the Wayland clipboard and closes the menu.
+    CopyText(String),
     Nothing,
     /// The window card the pointer is on in the preview, if any.
     PreviewHot(Option<String>),
