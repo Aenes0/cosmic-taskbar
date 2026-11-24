@@ -32,11 +32,25 @@ APPLY_BIN="/usr/local/bin/apply-greeter"
 POLKIT_DST="/usr/share/polkit-1/actions/io.github.Aenes0.CosmicGreeterApply.policy"
 
 # Defaults do schema ~/.config/cosmic-taskbar/greeter.toml
+CFG_STYLE="win11"
 CFG_WALLPAPER=""
+CFG_WALLPAPER_MODE="fixed"
+CFG_WALLPAPER_DIR=""
+CFG_WALLPAPER_SHUFFLE="true"
+CFG_WALLPAPER_INTERVAL_MINS="30"
 CFG_CLOCK_24H="true"
 CFG_SHOW_SECONDS="false"
+CFG_SHOW_DATE="true"
+CFG_SHOW_AVATAR="true"
+CFG_SHOW_USERNAME="true"
+CFG_FONT_FAMILY="system"
+CFG_FONT_WEIGHT="light"
+CFG_CLOCK_SIZE="large"
 CFG_BLUR_RADIUS="0"
 CFG_DIM_OPACITY="0.0"
+CFG_CARD_OPACITY="0.58"
+CFG_CARD_RADIUS="18"
+CFG_ACCENT_COLOR=""
 CFG_THEME="dark"
 CFG_DEFAULT_USER=""
 CFG_SESSION="COSMIC"
@@ -254,14 +268,69 @@ parse_greeter_toml() {
         val="$(trim "${clean#*=}")"
 
         case "$key" in
+            style)
+                val="$(unquote_toml_string "$val")"
+                case "${val,,}" in
+                    win11|android|macos|sidebar|editorial) CFG_STYLE="${val,,}" ;;
+                    *) CFG_STYLE="win11" ;;
+                esac
+                ;;
             wallpaper)
                 CFG_WALLPAPER="$(unquote_toml_string "$val")"
+                ;;
+            wallpaper_mode)
+                val="$(unquote_toml_string "$val")"
+                case "${val,,}" in
+                    fixed|rotate_on_lock|rotate_interval) CFG_WALLPAPER_MODE="${val,,}" ;;
+                    *) CFG_WALLPAPER_MODE="fixed" ;;
+                esac
+                ;;
+            wallpaper_dir)
+                CFG_WALLPAPER_DIR="$(unquote_toml_string "$val")"
+                ;;
+            wallpaper_shuffle)
+                CFG_WALLPAPER_SHUFFLE="$(parse_bool "$val" "$CFG_WALLPAPER_SHUFFLE")"
+                ;;
+            wallpaper_interval_mins)
+                if [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -ge 1 ]; then
+                    CFG_WALLPAPER_INTERVAL_MINS="$val"
+                fi
+                ;;
+            font_family)
+                val="$(unquote_toml_string "$val")"
+                case "${val,,}" in
+                    system|sans|mono|serif) CFG_FONT_FAMILY="${val,,}" ;;
+                    *) CFG_FONT_FAMILY="system" ;;
+                esac
+                ;;
+            font_weight)
+                val="$(unquote_toml_string "$val")"
+                case "${val,,}" in
+                    light|normal|semibold|bold) CFG_FONT_WEIGHT="${val,,}" ;;
+                    *) CFG_FONT_WEIGHT="light" ;;
+                esac
+                ;;
+            clock_size)
+                val="$(unquote_toml_string "$val")"
+                case "${val,,}" in
+                    small|medium|large|huge) CFG_CLOCK_SIZE="${val,,}" ;;
+                    *) CFG_CLOCK_SIZE="large" ;;
+                esac
                 ;;
             clock_24h)
                 CFG_CLOCK_24H="$(parse_bool "$val" "$CFG_CLOCK_24H")"
                 ;;
             show_seconds)
                 CFG_SHOW_SECONDS="$(parse_bool "$val" "$CFG_SHOW_SECONDS")"
+                ;;
+            show_date)
+                CFG_SHOW_DATE="$(parse_bool "$val" "$CFG_SHOW_DATE")"
+                ;;
+            show_avatar)
+                CFG_SHOW_AVATAR="$(parse_bool "$val" "$CFG_SHOW_AVATAR")"
+                ;;
+            show_username)
+                CFG_SHOW_USERNAME="$(parse_bool "$val" "$CFG_SHOW_USERNAME")"
                 ;;
             blur_radius)
                 if [[ "$val" =~ ^[0-9]+$ ]]; then
@@ -273,6 +342,22 @@ parse_greeter_toml() {
             dim_opacity)
                 if [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
                     CFG_DIM_OPACITY="$val"
+                fi
+                ;;
+            card_opacity)
+                if [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                    CFG_CARD_OPACITY="$val"
+                fi
+                ;;
+            card_radius)
+                if [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                    CFG_CARD_RADIUS="${val%%.*}"
+                fi
+                ;;
+            accent_color)
+                val="$(unquote_toml_string "$val")"
+                if [ -z "$val" ] || [[ "$val" =~ ^#[0-9A-Fa-f]{6}$ ]]; then
+                    CFG_ACCENT_COLOR="$val"
                 fi
                 ;;
             theme)
@@ -450,6 +535,12 @@ ensure_isolated_binary() {
         if needs_install_bin "$src_dir"; then
             local owner owner_home cargo_bin
             owner="$(stat -c '%U' "$src_dir")"
+            if [ "$owner" = "root" ] && [ -n "${TARGET_USER:-}" ] && [ "$TARGET_USER" != "root" ]; then
+                owner="$TARGET_USER"
+            fi
+            if [ "$owner" = "root" ]; then
+                die "Recusado compilar cargo como root por segurança (ajuste o dono de $src_dir)."
+            fi
             owner_home="$(get_user_home "$owner")"
             cargo_bin="$owner_home/.cargo/bin"
             if needs_compile "$src_dir"; then
@@ -658,10 +749,32 @@ EOF
 }
 
 write_isolated_runtime_files() {
-    local esc_wp esc_user esc_session
-    esc_wp="$(toml_escape "$CFG_WALLPAPER")"
+    local esc_wp esc_wp_dir esc_user esc_session esc_accent
+    local mirrored_wp_dir=""
+    if [ "$CFG_WALLPAPER_MODE" != "fixed" ] && [ -n "$CFG_WALLPAPER_DIR" ]; then
+        local src_wp_dir="$CFG_WALLPAPER_DIR"
+        if [[ "$src_wp_dir" == "~/"* ]]; then
+            src_wp_dir="$TARGET_HOME/${src_wp_dir#\~/}"
+        fi
+        if [ -d "$src_wp_dir" ] && [ "$DRY_RUN" != "true" ]; then
+            mirrored_wp_dir="$STATE_DIR/wallpapers"
+            rm -rf "$mirrored_wp_dir"
+            install -dm0755 "$mirrored_wp_dir"
+            local img_f img_count=0
+            while IFS= read -r -d '' img_f; do
+                install -m0644 "$img_f" "$mirrored_wp_dir/$(basename "$img_f")"
+                img_count=$((img_count + 1))
+                [ "$img_count" -ge 100 ] && break
+            done < <(find "$src_wp_dir" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.bmp' -o -iname '*.avif' \) -print0 2>/dev/null)
+            log "Espelhados $img_count wallpapers rotativos em $mirrored_wp_dir (0644 root:root)"
+        fi
+    fi
+
+    esc_wp="$(toml_escape "${APPLIED_WALLPAPER:-$CFG_WALLPAPER}")"
+    esc_wp_dir="$(toml_escape "${mirrored_wp_dir:-$CFG_WALLPAPER_DIR}")"
     esc_user="$(toml_escape "$CFG_DEFAULT_USER")"
     esc_session="$(toml_escape "$CFG_SESSION")"
+    esc_accent="$(toml_escape "$CFG_ACCENT_COLOR")"
 
     if [ "$DRY_RUN" = "true" ]; then
         log "[dry-run] Gravaria $STATE_DIR/greeter.toml, $STATE_DIR/env, $START_WRAPPER, $GREETD_CFG e $SYSTEMD_UNIT"
@@ -670,12 +783,26 @@ write_isolated_runtime_files() {
 
     cat > "$STATE_DIR/greeter.toml" <<EOF
 # Snapshot aplicado automaticamente por apply-greeter.sh
+style = "$CFG_STYLE"
 wallpaper = "$esc_wp"
+wallpaper_mode = "$CFG_WALLPAPER_MODE"
+wallpaper_dir = "$esc_wp_dir"
+wallpaper_shuffle = $CFG_WALLPAPER_SHUFFLE
+wallpaper_interval_mins = $CFG_WALLPAPER_INTERVAL_MINS
+theme = "$CFG_THEME"
+font_family = "$CFG_FONT_FAMILY"
+font_weight = "$CFG_FONT_WEIGHT"
+clock_size = "$CFG_CLOCK_SIZE"
 clock_24h = $CFG_CLOCK_24H
 show_seconds = $CFG_SHOW_SECONDS
+show_date = $CFG_SHOW_DATE
+show_avatar = $CFG_SHOW_AVATAR
+show_username = $CFG_SHOW_USERNAME
 blur_radius = $CFG_BLUR_RADIUS
 dim_opacity = $CFG_DIM_OPACITY
-theme = "$CFG_THEME"
+card_opacity = $CFG_CARD_OPACITY
+card_radius = $CFG_CARD_RADIUS
+accent_color = "$esc_accent"
 default_user = "$esc_user"
 session = "$esc_session"
 isolated_binary = $CFG_ISOLATED_BINARY

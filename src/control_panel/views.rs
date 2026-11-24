@@ -2615,37 +2615,42 @@ fn login_view(app: &ControlPanel) -> Element<'_, Message> {
 
     let mut items: Vec<Element<'_, Message>> = vec![
         widget::row::with_children(vec![
-            widget::text::title3("Tela de Login (Greeter)").width(Length::Fill).into(),
-            action_btn("Salvar rascunho", Message::GreeterSaveOnly, false),
-            action_btn("Aplicar na tela de login", Message::GreeterApply, true),
+            widget::text::title3("Tela de Login & Bloqueio")
+                .width(Length::Fill)
+                .into(),
+            action_btn("Testar bloqueio agora", Message::GreeterTestLock, false),
+            action_btn("Aplicar no login (boot)", Message::GreeterApply, true),
         ])
         .spacing(8)
         .align_y(Alignment::Center)
         .into(),
     ];
 
-    // Status card
+    // Status & security card
     items.push(card_box(
         widget::column::with_children(vec![
             widget::row::with_children(vec![
-                widget::text::heading("Greeter isolado (aenes-greeter)")
+                widget::text::heading("Greeter & Lockscreen isolados (aenes-greeter)")
                     .width(Length::Fill)
                     .into(),
                 status_badge(
                     opt.greeter_service_enabled,
-                    "Serviço ativado",
+                    "Serviço boot ativo",
                     if opt.greeter_isolated_installed {
-                        "Instalado (inativo)"
+                        "Instalado (inativo no boot)"
                     } else {
-                        "Usando padrão do sistema"
+                        "Lockscreen em ~/.local/bin"
                     },
                 ),
             ])
             .align_y(Alignment::Center)
             .into(),
-            kv_row("Arquivo de configuração", cfg_path.to_string_lossy().into_owned()),
+            kv_row(
+                "Configuração ativa (salva automaticamente)",
+                cfg_path.to_string_lossy().into_owned(),
+            ),
             widget::text::caption(
-                "Mantém o binário e as configs isolados em /usr/local/bin/aenes-greeter e /var/lib/aenes-greeter/ para que atualizações do pacman nunca sobrescrevam sua tela de login. Aplica no próximo logout/boot sem encerrar a sessão atual.",
+                "Alterações abaixo valem imediatamente na tela de bloqueio (Win+L / inatividade). Use \"Aplicar no login (boot)\" para espelhar com segurança para /var/lib/aenes-greeter/ (sem expor sua pasta pessoal ao serviço de boot).",
             )
             .class(theme::Text::Custom(dimmed))
             .into(),
@@ -2653,26 +2658,85 @@ fn login_view(app: &ControlPanel) -> Element<'_, Message> {
         .spacing(spacing.space_xs),
     ));
 
-    // Visual & wallpaper card
-    let theme_chips = widget::row::with_children(vec![
-        small_chip("Escuro (dark)", g.theme == "dark", Message::GreeterTheme("dark".to_owned())),
-        small_chip("Claro (light)", g.theme == "light", Message::GreeterTheme("light".to_owned())),
-    ])
+    // 5 Layout Styles card
+    let style_options: &[(&str, &str, &str)] = &[
+        ("win11", "Windows 11", "Relógio central no topo + cartão de vidro centralizado"),
+        ("android", "Android / Pixel", "Relógio gigante em 2 linhas (HH / MM) + login embaixo"),
+        ("macos", "macOS Sonoma", "Relógio leve no topo + barra compacta de senha na base"),
+        ("sidebar", "Painel Lateral", "Coluna de vidro à esquerda + relógio amplo à direita"),
+        ("editorial", "Editorial", "Relógio no canto inferior esquerdo + cartão à direita"),
+    ];
+    let style_chips = widget::row::with_children(
+        style_options
+            .iter()
+            .map(|(id, label, _)| {
+                small_chip(
+                    *label,
+                    g.style == *id,
+                    Message::GreeterStyle((*id).to_owned()),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
     .spacing(6);
+    let active_style_desc = style_options
+        .iter()
+        .find(|(id, _, _)| *id == g.style)
+        .map(|(_, _, desc)| *desc)
+        .unwrap_or("Layout personalizado da tela de bloqueio e login.");
 
     items.push(card_box(
         widget::column::with_children(vec![
-            widget::text::heading("Aparência & Papel de parede").into(),
-            widget::row::with_children(vec![
-                widget::text::body("Tema da tela de login").width(Length::Fill).into(),
-                theme_chips.into(),
-            ])
-            .align_y(Alignment::Center)
-            .into(),
+            widget::text::heading("Estilo da Tela (5 layouts)").into(),
+            style_chips.into(),
+            widget::text::caption(active_style_desc)
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // Wallpaper & rotation card
+    let wp_mode_chips = widget::row::with_children(vec![
+        small_chip(
+            "Fixo",
+            g.wallpaper_mode == "fixed",
+            Message::GreeterWallpaperMode("fixed".to_owned()),
+        ),
+        small_chip(
+            "Trocar a cada bloqueio",
+            g.wallpaper_mode == "rotate_on_lock",
+            Message::GreeterWallpaperMode("rotate_on_lock".to_owned()),
+        ),
+        small_chip(
+            "Trocar por intervalo",
+            g.wallpaper_mode == "rotate_interval",
+            Message::GreeterWallpaperMode("rotate_interval".to_owned()),
+        ),
+    ])
+    .spacing(6);
+
+    let mut wp_rows: Vec<Element<'_, Message>> = vec![
+        widget::text::heading("Papel de Parede & Rotação").into(),
+        widget::row::with_children(vec![
+            widget::text::body("Modo do papel de parede")
+                .width(Length::Fill)
+                .into(),
+            wp_mode_chips.into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    ];
+
+    if g.wallpaper_mode == "fixed" {
+        wp_rows.push(
             widget::column::with_children(vec![
-                widget::text::caption("Papel de parede (caminho absoluto ou vazio para usar o do usuário)")
-                    .class(theme::Text::Custom(dimmed))
-                    .into(),
+                widget::text::caption(
+                    "Papel de parede fixo (caminho absoluto ou vazio para usar o do sistema)",
+                )
+                .class(theme::Text::Custom(dimmed))
+                .into(),
                 widget::text_input(
                     "/home/usuario/Imagens/wallpaper.jpg".to_owned(),
                     g.wallpaper.clone(),
@@ -2683,40 +2747,152 @@ fn login_view(app: &ControlPanel) -> Element<'_, Message> {
             ])
             .spacing(4)
             .into(),
-            widget::row::with_children(vec![
-                widget::text::caption(format!("Desfoque (blur): {} px", g.blur_radius))
-                    .width(Length::Fixed(165.0))
-                    .into(),
-                widget::slider(0.0..=60.0, g.blur_radius as f32, |v| {
-                    Message::GreeterBlurRadius(v.round() as u32)
-                })
+        );
+    } else {
+        wp_rows.push(
+            widget::column::with_children(vec![
+                widget::text::caption(
+                    "Pasta de papéis de parede (suporta jpg, jpeg, png, webp, avif, bmp)",
+                )
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+                widget::text_input(
+                    "~/Imagens/Wallpapers".to_owned(),
+                    g.wallpaper_dir.clone(),
+                )
+                .on_input(Message::GreeterWallpaperDirInput)
                 .width(Length::Fill)
                 .into(),
             ])
-            .spacing(10)
-            .align_y(Alignment::Center)
+            .spacing(4)
             .into(),
-            widget::row::with_children(vec![
-                widget::text::caption(format!("Escurecimento: {:.0}%", g.dim_opacity * 100.0))
-                    .width(Length::Fixed(165.0))
-                    .into(),
-                widget::slider(0.0..=85.0, (g.dim_opacity * 100.0).round(), |v| {
-                    Message::GreeterDimOpacity(v / 100.0)
+        );
+        wp_rows.push(toggle_row(
+            "Ordem aleatória (shuffle)",
+            g.wallpaper_shuffle,
+            Message::GreeterToggleShuffle,
+        ));
+        if g.wallpaper_mode == "rotate_interval" {
+            let interval_chips = widget::row::with_children(
+                [
+                    (5_u32, "5 min"),
+                    (15, "15 min"),
+                    (30, "30 min"),
+                    (60, "1 h"),
+                    (180, "3 h"),
+                    (1440, "24 h"),
+                ]
+                .into_iter()
+                .map(|(mins, label)| {
+                    small_chip(
+                        label,
+                        g.wallpaper_interval_mins == mins,
+                        Message::GreeterIntervalMins(mins),
+                    )
                 })
-                .width(Length::Fill)
+                .collect::<Vec<_>>(),
+            )
+            .spacing(6);
+            wp_rows.push(
+                widget::row::with_children(vec![
+                    widget::text::body("Intervalo de rotação")
+                        .width(Length::Fill)
+                        .into(),
+                    interval_chips.into(),
+                ])
+                .spacing(8)
+                .align_y(Alignment::Center)
                 .into(),
-            ])
-            .spacing(10)
-            .align_y(Alignment::Center)
+            );
+        }
+    }
+
+    wp_rows.push(widget::divider::horizontal::default().into());
+    wp_rows.push(
+        widget::row::with_children(vec![
+            widget::text::caption(format!("Desfoque (blur): {} px", g.blur_radius))
+                .width(Length::Fixed(185.0))
+                .into(),
+            widget::slider(0.0..=60.0, g.blur_radius as f32, |v| {
+                Message::GreeterBlurRadius(v.round() as u32)
+            })
+            .width(Length::Fill)
             .into(),
         ])
-        .spacing(spacing.space_xs),
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into(),
+    );
+    wp_rows.push(
+        widget::row::with_children(vec![
+            widget::text::caption(format!("Escurecimento: {:.0}%", g.dim_opacity * 100.0))
+                .width(Length::Fixed(185.0))
+                .into(),
+            widget::slider(0.0..=85.0, (g.dim_opacity * 100.0).round(), |v| {
+                Message::GreeterDimOpacity(v / 100.0)
+            })
+            .width(Length::Fill)
+            .into(),
+        ])
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into(),
+    );
+
+    items.push(card_box(
+        widget::column::with_children(wp_rows).spacing(spacing.space_xs),
     ));
 
-    // Clock & session card
+    // Typography, Clock & Visibility card
+    let font_family_chips = widget::row::with_children(vec![
+        small_chip("Sistema", g.font_family == "system", Message::GreeterFontFamily("system".to_owned())),
+        small_chip("Sans", g.font_family == "sans", Message::GreeterFontFamily("sans".to_owned())),
+        small_chip("Mono", g.font_family == "mono", Message::GreeterFontFamily("mono".to_owned())),
+        small_chip("Serif", g.font_family == "serif", Message::GreeterFontFamily("serif".to_owned())),
+    ])
+    .spacing(6);
+
+    let font_weight_chips = widget::row::with_children(vec![
+        small_chip("Leve", g.font_weight == "light", Message::GreeterFontWeight("light".to_owned())),
+        small_chip("Normal", g.font_weight == "normal", Message::GreeterFontWeight("normal".to_owned())),
+        small_chip("Semibold", g.font_weight == "semibold", Message::GreeterFontWeight("semibold".to_owned())),
+        small_chip("Negrito", g.font_weight == "bold", Message::GreeterFontWeight("bold".to_owned())),
+    ])
+    .spacing(6);
+
+    let clock_size_chips = widget::row::with_children(vec![
+        small_chip("Pequeno", g.clock_size == "small", Message::GreeterClockSize("small".to_owned())),
+        small_chip("Médio", g.clock_size == "medium", Message::GreeterClockSize("medium".to_owned())),
+        small_chip("Grande", g.clock_size == "large", Message::GreeterClockSize("large".to_owned())),
+        small_chip("Gigante", g.clock_size == "huge", Message::GreeterClockSize("huge".to_owned())),
+    ])
+    .spacing(6);
+
     items.push(card_box(
         widget::column::with_children(vec![
-            widget::text::heading("Relógio, Usuário & Isolamento").into(),
+            widget::text::heading("Tipografia, Relógio & Elementos").into(),
+            widget::row::with_children(vec![
+                widget::text::body("Fonte do relógio").width(Length::Fill).into(),
+                font_family_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Peso da fonte").width(Length::Fill).into(),
+                font_weight_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Tamanho do relógio").width(Length::Fill).into(),
+                clock_size_chips.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::divider::horizontal::default().into(),
             toggle_row(
                 "Relógio no formato 24 horas",
                 g.clock_24h,
@@ -2727,7 +2903,116 @@ fn login_view(app: &ControlPanel) -> Element<'_, Message> {
                 g.show_seconds,
                 Message::GreeterToggleShowSeconds,
             ),
-            widget::divider::horizontal::default().into(),
+            toggle_row(
+                "Exibir data abaixo do relógio",
+                g.show_date,
+                Message::GreeterToggleShowDate,
+            ),
+            toggle_row(
+                "Exibir avatar do usuário",
+                g.show_avatar,
+                Message::GreeterToggleShowAvatar,
+            ),
+            toggle_row(
+                "Exibir nome do usuário",
+                g.show_username,
+                Message::GreeterToggleShowUsername,
+            ),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // Card Glass, Theme & Accent color
+    let theme_chips = widget::row::with_children(vec![
+        small_chip("Escuro (dark)", g.theme == "dark", Message::GreeterTheme("dark".to_owned())),
+        small_chip("Claro (light)", g.theme == "light", Message::GreeterTheme("light".to_owned())),
+    ])
+    .spacing(6);
+
+    let accent_presets = widget::row::with_children(
+        [
+            ("", "Padrão"),
+            ("#60A5FA", "Azul"),
+            ("#A78BFA", "Roxo"),
+            ("#34D399", "Verde"),
+            ("#FBBF24", "Âmbar"),
+            ("#F472B6", "Rosa"),
+        ]
+        .into_iter()
+        .map(|(hex, label)| {
+            small_chip(
+                label,
+                g.accent_color.eq_ignore_ascii_case(hex),
+                Message::GreeterAccentColor(hex.to_owned()),
+            )
+        })
+        .collect::<Vec<_>>(),
+    )
+    .spacing(6);
+
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Cartão de Vidro, Tema & Destaque").into(),
+            widget::row::with_children(vec![
+                widget::text::body("Tema da tela de login").width(Length::Fill).into(),
+                theme_chips.into(),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::caption(format!(
+                    "Opacidade do cartão: {:.0}%",
+                    g.card_opacity * 100.0
+                ))
+                .width(Length::Fixed(185.0))
+                .into(),
+                widget::slider(0.0..=95.0, (g.card_opacity * 100.0).round(), |v| {
+                    Message::GreeterCardOpacity(v / 100.0)
+                })
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::caption(format!(
+                    "Arredondamento dos cantos: {:.0} px",
+                    g.card_radius
+                ))
+                .width(Length::Fixed(185.0))
+                .into(),
+                widget::slider(4.0..=32.0, g.card_radius.round(), |v| {
+                    Message::GreeterCardRadius(v.round())
+                })
+                .width(Length::Fill)
+                .into(),
+            ])
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Cor de destaque").width(Length::Fill).into(),
+                accent_presets.into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text_input(
+                "#60A5FA (ou vazio para cor do tema)".to_owned(),
+                g.accent_color.clone(),
+            )
+            .on_input(Message::GreeterAccentColor)
+            .width(Length::Fill)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // User, Session & Isolation card
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Usuário, Sessão & Isolamento").into(),
             widget::row::with_children(vec![
                 widget::column::with_children(vec![
                     widget::text::caption("Usuário pré-selecionado (vazio = último usuário)")
@@ -2758,7 +3043,7 @@ fn login_view(app: &ControlPanel) -> Element<'_, Message> {
             .into(),
             widget::divider::horizontal::default().into(),
             toggle_row(
-                "Usar binário isolado (/usr/local/bin/aenes-greeter)",
+                "Usar binário isolado (/usr/local/bin/aenes-greeter no boot)",
                 g.isolated_binary,
                 Message::GreeterToggleIsolatedBinary,
             ),

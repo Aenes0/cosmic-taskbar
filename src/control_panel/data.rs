@@ -69,15 +69,38 @@ pub struct SystemSnapshot {
     pub update_timer_active: bool,
 }
 
-/// User preferences for the isolated login screen (`~/.config/cosmic-taskbar/greeter.toml`).
+/// User preferences for the isolated login & lock screen (`~/.config/cosmic-taskbar/greeter.toml`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GreeterConfig {
+    /// Layout style: `"win11"`, `"android"`, `"macos"`, `"sidebar"`, `"editorial"`.
+    pub style: String,
     pub wallpaper: String,
+    /// Wallpaper mode: `"fixed"`, `"rotate_on_lock"`, `"rotate_interval"`.
+    pub wallpaper_mode: String,
+    /// Directory scanned for rotating wallpapers.
+    pub wallpaper_dir: String,
+    pub wallpaper_shuffle: bool,
+    pub wallpaper_interval_mins: u32,
     pub theme: String,
+    /// Font family: `"system"`, `"sans"`, `"mono"`, `"serif"`.
+    pub font_family: String,
+    /// Font weight: `"light"`, `"normal"`, `"semibold"`, `"bold"`.
+    pub font_weight: String,
+    /// Clock size: `"small"`, `"medium"`, `"large"`, `"huge"`.
+    pub clock_size: String,
     pub clock_24h: bool,
     pub show_seconds: bool,
+    pub show_date: bool,
+    pub show_avatar: bool,
+    pub show_username: bool,
     pub blur_radius: u32,
     pub dim_opacity: f32,
+    /// Glass card opacity behind password block (`0.0..=0.95`).
+    pub card_opacity: f32,
+    /// Glass card corner radius in px (`4..=32`).
+    pub card_radius: f32,
+    /// Custom accent hex (`""` = system accent, or `"#RRGGBB"`).
+    pub accent_color: String,
     pub default_user: String,
     pub session: String,
     pub isolated_binary: bool,
@@ -86,12 +109,26 @@ pub struct GreeterConfig {
 impl Default for GreeterConfig {
     fn default() -> Self {
         Self {
+            style: "win11".to_owned(),
             wallpaper: String::new(),
+            wallpaper_mode: "fixed".to_owned(),
+            wallpaper_dir: String::new(),
+            wallpaper_shuffle: true,
+            wallpaper_interval_mins: 30,
             theme: "dark".to_owned(),
+            font_family: "system".to_owned(),
+            font_weight: "normal".to_owned(),
+            clock_size: "medium".to_owned(),
             clock_24h: true,
             show_seconds: false,
+            show_date: true,
+            show_avatar: true,
+            show_username: true,
             blur_radius: 0,
             dim_opacity: 0.0,
+            card_opacity: 0.0,
+            card_radius: 16.0,
+            accent_color: String::new(),
             default_user: String::new(),
             session: "COSMIC".to_owned(),
             isolated_binary: true,
@@ -187,11 +224,52 @@ pub fn parse_greeter_toml(text: &str) -> GreeterConfig {
         let key = key.trim();
         let val = val.trim();
         match key {
+            "style" => {
+                let parsed = parse_toml_string(val).to_lowercase();
+                if matches!(parsed.as_str(), "win11" | "android" | "macos" | "sidebar" | "editorial") {
+                    cfg.style = parsed;
+                }
+            }
             "wallpaper" => cfg.wallpaper = parse_toml_string(val),
+            "wallpaper_mode" => {
+                let parsed = parse_toml_string(val).to_lowercase();
+                if matches!(parsed.as_str(), "fixed" | "rotate_on_lock" | "rotate_interval") {
+                    cfg.wallpaper_mode = parsed;
+                }
+            }
+            "wallpaper_dir" => cfg.wallpaper_dir = parse_toml_string(val),
+            "wallpaper_shuffle" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    cfg.wallpaper_shuffle = b;
+                }
+            }
+            "wallpaper_interval_mins" => {
+                if let Ok(n) = val.parse::<u32>() {
+                    cfg.wallpaper_interval_mins = n.clamp(1, 1440);
+                }
+            }
             "theme" => {
                 let parsed = parse_toml_string(val).to_lowercase();
                 if matches!(parsed.as_str(), "dark" | "light") {
                     cfg.theme = parsed;
+                }
+            }
+            "font_family" => {
+                let parsed = parse_toml_string(val).to_lowercase();
+                if matches!(parsed.as_str(), "system" | "sans" | "mono" | "serif") {
+                    cfg.font_family = parsed;
+                }
+            }
+            "font_weight" => {
+                let parsed = parse_toml_string(val).to_lowercase();
+                if matches!(parsed.as_str(), "light" | "normal" | "semibold" | "bold") {
+                    cfg.font_weight = parsed;
+                }
+            }
+            "clock_size" => {
+                let parsed = parse_toml_string(val).to_lowercase();
+                if matches!(parsed.as_str(), "small" | "medium" | "large" | "huge") {
+                    cfg.clock_size = parsed;
                 }
             }
             "clock_24h" => {
@@ -204,6 +282,21 @@ pub fn parse_greeter_toml(text: &str) -> GreeterConfig {
                     cfg.show_seconds = b;
                 }
             }
+            "show_date" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    cfg.show_date = b;
+                }
+            }
+            "show_avatar" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    cfg.show_avatar = b;
+                }
+            }
+            "show_username" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    cfg.show_username = b;
+                }
+            }
             "blur_radius" => {
                 if let Ok(n) = val.parse::<u32>() {
                     cfg.blur_radius = n.min(60);
@@ -214,6 +307,17 @@ pub fn parse_greeter_toml(text: &str) -> GreeterConfig {
                     cfg.dim_opacity = f.clamp(0.0, 0.85);
                 }
             }
+            "card_opacity" => {
+                if let Ok(f) = val.parse::<f32>() {
+                    cfg.card_opacity = f.clamp(0.0, 0.95);
+                }
+            }
+            "card_radius" => {
+                if let Ok(f) = val.parse::<f32>() {
+                    cfg.card_radius = f.clamp(4.0, 32.0);
+                }
+            }
+            "accent_color" => cfg.accent_color = parse_toml_string(val),
             "default_user" => cfg.default_user = parse_toml_string(val),
             "session" => {
                 let parsed = parse_toml_string(val);
@@ -234,24 +338,52 @@ pub fn parse_greeter_toml(text: &str) -> GreeterConfig {
 
 pub fn format_greeter_toml(cfg: &GreeterConfig) -> String {
     format!(
-        "# Configuração da Tela de Login isolada (aenes-greeter)\n\
+        "# Configuração da Tela de Login e Bloqueio isolada (aenes-greeter)\n\
          # Editado pelo Painel de Controle do cosmic-taskbar\n\
          \n\
+         style = {}\n\
          wallpaper = {}\n\
+         wallpaper_mode = {}\n\
+         wallpaper_dir = {}\n\
+         wallpaper_shuffle = {}\n\
+         wallpaper_interval_mins = {}\n\
          theme = {}\n\
+         font_family = {}\n\
+         font_weight = {}\n\
+         clock_size = {}\n\
          clock_24h = {}\n\
          show_seconds = {}\n\
+         show_date = {}\n\
+         show_avatar = {}\n\
+         show_username = {}\n\
          blur_radius = {}\n\
          dim_opacity = {:.2}\n\
+         card_opacity = {:.2}\n\
+         card_radius = {:.0}\n\
+         accent_color = {}\n\
          default_user = {}\n\
          session = {}\n\
          isolated_binary = {}\n",
+        escape_toml_string(&cfg.style),
         escape_toml_string(&cfg.wallpaper),
+        escape_toml_string(&cfg.wallpaper_mode),
+        escape_toml_string(&cfg.wallpaper_dir),
+        cfg.wallpaper_shuffle,
+        cfg.wallpaper_interval_mins.clamp(1, 1440),
         escape_toml_string(&cfg.theme),
+        escape_toml_string(&cfg.font_family),
+        escape_toml_string(&cfg.font_weight),
+        escape_toml_string(&cfg.clock_size),
         cfg.clock_24h,
         cfg.show_seconds,
+        cfg.show_date,
+        cfg.show_avatar,
+        cfg.show_username,
         cfg.blur_radius.min(60),
         cfg.dim_opacity.clamp(0.0, 0.85),
+        cfg.card_opacity.clamp(0.0, 0.95),
+        cfg.card_radius.clamp(4.0, 32.0),
+        escape_toml_string(&cfg.accent_color),
         escape_toml_string(&cfg.default_user),
         escape_toml_string(&cfg.session),
         cfg.isolated_binary,
@@ -724,12 +856,26 @@ mod tests {
     #[test]
     fn greeter_toml_round_trip() {
         let cfg = GreeterConfig {
+            style: "android".to_owned(),
             wallpaper: "/home/user/Imagens/wall #1.jpg".to_owned(),
+            wallpaper_mode: "rotate_interval".to_owned(),
+            wallpaper_dir: "/home/user/Imagens/Wallpapers".to_owned(),
+            wallpaper_shuffle: false,
+            wallpaper_interval_mins: 45,
             theme: "light".to_owned(),
+            font_family: "mono".to_owned(),
+            font_weight: "bold".to_owned(),
+            clock_size: "huge".to_owned(),
             clock_24h: false,
             show_seconds: true,
+            show_date: false,
+            show_avatar: false,
+            show_username: true,
             blur_radius: 18,
             dim_opacity: 0.45,
+            card_opacity: 0.72,
+            card_radius: 24.0,
+            accent_color: "#60A5FA".to_owned(),
             default_user: "alexandre".to_owned(),
             session: "COSMIC".to_owned(),
             isolated_binary: true,

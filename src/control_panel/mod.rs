@@ -244,16 +244,31 @@ pub enum Message {
     ScreenshotToggleSound,
     ScreenshotReset,
     RefreshDisplays,
-    // Login (Greeter)
+    // Login (Greeter & Lockscreen)
+    GreeterStyle(String),
     GreeterWallpaperInput(String),
+    GreeterWallpaperMode(String),
+    GreeterWallpaperDirInput(String),
+    GreeterToggleShuffle,
+    GreeterIntervalMins(u32),
     GreeterTheme(String),
+    GreeterFontFamily(String),
+    GreeterFontWeight(String),
+    GreeterClockSize(String),
     GreeterToggleClock24h,
     GreeterToggleShowSeconds,
+    GreeterToggleShowDate,
+    GreeterToggleShowAvatar,
+    GreeterToggleShowUsername,
     GreeterBlurRadius(u32),
     GreeterDimOpacity(f32),
+    GreeterCardOpacity(f32),
+    GreeterCardRadius(f32),
+    GreeterAccentColor(String),
     GreeterDefaultUserInput(String),
     GreeterSessionInput(String),
     GreeterToggleIsolatedBinary,
+    GreeterTestLock,
     GreeterSaveOnly,
     GreeterApply,
     // Optional packages
@@ -1316,13 +1331,45 @@ impl cosmic::Application for ControlPanel {
                     ))
                 });
             }
-            // Login (Greeter)
+            // Login (Greeter & Lockscreen)
+            Message::GreeterStyle(val) => {
+                self.greeter.style = val;
+                self.persist_greeter_config();
+            }
             Message::GreeterWallpaperInput(val) => {
                 self.greeter.wallpaper = val;
                 self.persist_greeter_config();
             }
+            Message::GreeterWallpaperMode(val) => {
+                self.greeter.wallpaper_mode = val;
+                self.persist_greeter_config();
+            }
+            Message::GreeterWallpaperDirInput(val) => {
+                self.greeter.wallpaper_dir = val;
+                self.persist_greeter_config();
+            }
+            Message::GreeterToggleShuffle => {
+                self.greeter.wallpaper_shuffle = !self.greeter.wallpaper_shuffle;
+                self.persist_greeter_config();
+            }
+            Message::GreeterIntervalMins(mins) => {
+                self.greeter.wallpaper_interval_mins = mins.clamp(1, 1440);
+                self.persist_greeter_config();
+            }
             Message::GreeterTheme(theme) => {
                 self.greeter.theme = theme;
+                self.persist_greeter_config();
+            }
+            Message::GreeterFontFamily(val) => {
+                self.greeter.font_family = val;
+                self.persist_greeter_config();
+            }
+            Message::GreeterFontWeight(val) => {
+                self.greeter.font_weight = val;
+                self.persist_greeter_config();
+            }
+            Message::GreeterClockSize(val) => {
+                self.greeter.clock_size = val;
                 self.persist_greeter_config();
             }
             Message::GreeterToggleClock24h => {
@@ -1333,6 +1380,18 @@ impl cosmic::Application for ControlPanel {
                 self.greeter.show_seconds = !self.greeter.show_seconds;
                 self.persist_greeter_config();
             }
+            Message::GreeterToggleShowDate => {
+                self.greeter.show_date = !self.greeter.show_date;
+                self.persist_greeter_config();
+            }
+            Message::GreeterToggleShowAvatar => {
+                self.greeter.show_avatar = !self.greeter.show_avatar;
+                self.persist_greeter_config();
+            }
+            Message::GreeterToggleShowUsername => {
+                self.greeter.show_username = !self.greeter.show_username;
+                self.persist_greeter_config();
+            }
             Message::GreeterBlurRadius(radius) => {
                 self.greeter.blur_radius = radius.min(60);
                 self.persist_greeter_config();
@@ -1340,6 +1399,22 @@ impl cosmic::Application for ControlPanel {
             Message::GreeterDimOpacity(val) => {
                 self.greeter.dim_opacity = ((val * 100.0).round() / 100.0).clamp(0.0, 0.85);
                 self.persist_greeter_config();
+            }
+            Message::GreeterCardOpacity(val) => {
+                self.greeter.card_opacity = ((val * 100.0).round() / 100.0).clamp(0.0, 0.95);
+                self.persist_greeter_config();
+            }
+            Message::GreeterCardRadius(r) => {
+                self.greeter.card_radius = r.round().clamp(4.0, 32.0);
+                self.persist_greeter_config();
+            }
+            Message::GreeterAccentColor(hex) => {
+                let valid = hex.trim().is_empty()
+                    || crate::central::notifications::config::parse_hex_color(&hex).is_some();
+                self.greeter.accent_color = hex;
+                if valid {
+                    self.persist_greeter_config();
+                }
             }
             Message::GreeterDefaultUserInput(val) => {
                 self.greeter.default_user = val;
@@ -1352,6 +1427,14 @@ impl cosmic::Application for ControlPanel {
             Message::GreeterToggleIsolatedBinary => {
                 self.greeter.isolated_binary = !self.greeter.isolated_binary;
                 self.persist_greeter_config();
+            }
+            Message::GreeterTestLock => {
+                self.persist_greeter_config();
+                self.notice = Some(data::spawn_app(
+                    "loginctl",
+                    &["lock-session"],
+                    "Bloqueio de tela",
+                ));
             }
             Message::GreeterSaveOnly => match data::save_greeter_config(&self.greeter) {
                 Ok(path) => {
