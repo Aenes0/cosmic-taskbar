@@ -459,9 +459,12 @@ pub fn apply_idle_timeouts_to_dir(dir: &Path, tuning: &ProfileTuning) -> io::Res
 
 /// Applies idle timeouts immediately as the user and invokes `economia-energia`
 /// via `pkexec` so hardware settings for `profile_id` take effect right away.
-pub async fn apply_profile_now(profile_id: &str, tuning: &ProfileTuning) -> String {
+///
+/// `Ok` = the hardware received the plan (a failed idle-timeout write only adds a warning to the
+/// text); `Err` = it did not (unknown plan, script missing, `pkexec` cancelled or failed).
+pub async fn apply_profile_now(profile_id: &str, tuning: &ProfileTuning) -> Result<String, String> {
     let Some(kind) = PowerProfileKind::from_id(profile_id) else {
-        return format!("Plano de energia desconhecido: {profile_id}");
+        return Err(format!("Plano de energia desconhecido: {profile_id}"));
     };
     let idle_err = apply_idle_timeouts(tuning).err();
 
@@ -478,13 +481,13 @@ pub async fn apply_profile_now(profile_id: &str, tuning: &ProfileTuning) -> Stri
             .await
             .is_ok()
     {
-        return match idle_err {
+        return Ok(match idle_err {
             Some(e) => format!(
                 "Plano {} aplicado via daemon (sem senha), mas houve erro ao salvar tempos de tela: {e}",
                 kind.label()
             ),
-            None => format!("✓ Plano {} salvo e aplicado automaticamente (sem senha).", kind.label()),
-        };
+            None => format!("Plano {} salvo e aplicado automaticamente (sem senha).", kind.label()),
+        });
     }
 
     let installed = PathBuf::from("/usr/local/bin/economia-energia");
@@ -495,16 +498,16 @@ pub async fn apply_profile_now(profile_id: &str, tuning: &ProfileTuning) -> Stri
         if local.is_file() {
             (true, local)
         } else {
-            return match idle_err {
+            return Err(match idle_err {
                 Some(e) => format!("Falha ao gravar CosmicIdle ({e}) e economia-energia não encontrado."),
                 None => "Configuração salva e tempos de tela aplicados, mas economia-energia não foi encontrado.".to_owned(),
-            };
+            });
         }
     } else {
-        return match idle_err {
+        return Err(match idle_err {
             Some(e) => format!("Falha ao gravar CosmicIdle ({e}) e /usr/local/bin/economia-energia não está instalado."),
             None => "Configuração salva e tempos de tela aplicados, mas /usr/local/bin/economia-energia não está instalado.".to_owned(),
-        };
+        });
     };
 
     let mut cmd = Command::new("pkexec");
@@ -514,18 +517,18 @@ pub async fn apply_profile_now(profile_id: &str, tuning: &ProfileTuning) -> Stri
     cmd.arg(&script).arg(kind.id());
 
     match cmd.output().await {
-        Ok(out) if out.status.success() => match idle_err {
+        Ok(out) if out.status.success() => Ok(match idle_err {
             Some(e) => format!(
                 "Plano {} aplicado no hardware, mas houve erro ao salvar tempos de tela: {e}",
                 kind.label()
             ),
             None => format!("Plano {} salvo e aplicado com sucesso.", kind.label()),
-        },
+        }),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_owned();
             let detail = if !stderr.is_empty() { stderr } else { stdout };
-            if detail.is_empty() {
+            Err(if detail.is_empty() {
                 format!(
                     "Configuração salva, mas economia-energia retornou código {} (autenticação cancelada ou erro).",
                     out.status.code().unwrap_or(-1)
@@ -535,9 +538,9 @@ pub async fn apply_profile_now(profile_id: &str, tuning: &ProfileTuning) -> Stri
                     "Configuração salva, mas economia-energia falhou: {}",
                     detail.lines().last().unwrap_or(&detail)
                 )
-            }
+            })
         }
-        Err(err) => format!("Configuração salva, mas falhou ao executar pkexec: {err}"),
+        Err(err) => Err(format!("Configuração salva, mas falhou ao executar pkexec: {err}")),
     }
 }
 

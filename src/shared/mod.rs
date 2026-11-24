@@ -10,4 +10,5 @@ pub mod locale;
 pub mod logging;
 pub mod overlay;
 pub mod preview_card;
+pub mod rates;
 pub mod tokens;

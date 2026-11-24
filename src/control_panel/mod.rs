@@ -7,12 +7,29 @@
 //! display DDC/visuals, isolated login screen (Greeter), optional packages, and
 //! auto-updater/services.
 
+mod chrome;
 mod data;
+mod feedback;
+mod health;
+mod metrics;
+mod nav;
+mod pending;
 mod power_config;
 mod screenshot_config;
+mod search_index;
+mod undo;
 mod views;
 
-use power_config::{CpuTopologyInfo, PowerProfileKind, PowerProfilesConfig};
+use std::time::{Duration, Instant};
+
+use cosmic::Application as _;
+
+use feedback::{Recent, RecentChange, ToastKind, Toasts};
+use health::{TimerTimes, UnitHealth};
+use metrics::HomeMetrics;
+use nav::{Category, category_of};
+use pending::{Applied, ApplyAction};
+use power_config::{CpuTopologyInfo, PowerProfileKind, PowerProfilesConfig, ProfileTuning};
 use screenshot_config::{OpenMode as ScreenshotOpenMode, ScreenshotConfig};
 
 use cosmic::{
@@ -20,6 +37,7 @@ use cosmic::{
     iced::{self, Subscription, event, window},
 };
 
+use crate::central::monitor::sample::Reading;
 use crate::central::{
     audio::{self, Privacy},
     bar_spacing::BarSpacing,
@@ -47,6 +65,8 @@ pub const APP_ID: &str = "io.github.Aenes0.CosmicControlPanel";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
+    Home,
+    Capture,
     Power,
     Bar,
     Monitor,
@@ -64,7 +84,9 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 14] = [
+    #[cfg(test)]
+    pub const ALL: [Section; 16] = [
+        Section::Home,
         Section::Power,
         Section::Bar,
         Section::Monitor,
@@ -77,12 +99,15 @@ impl Section {
         Section::Backup,
         Section::Displays,
         Section::Login,
+        Section::Capture,
         Section::Optional,
         Section::System,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
+            Section::Home => "Visão geral",
+            Section::Capture => "Captura de tela",
             Section::Power => "Energia & Bateria",
             Section::Bar => "Barra & Tray",
             Section::Monitor => "Monitor (Esquerda)",
@@ -90,56 +115,21 @@ impl Section {
             Section::Notifications => "Notificações",
             Section::DevicesOsd => "OSD de Dispositivos",
             Section::Camera => "Câmeras & Áudio",
-            Section::Network => "Rede",
+            Section::Network => "Rede & VPN",
             Section::Security => "Segurança & Privacidade",
             Section::Backup => "Backup & Sincronização",
-            Section::Displays => "Monitores & Visuais",
+            Section::Displays => "Monitores & Janelas",
             Section::Login => "Tela de Login",
             Section::Optional => "Pacotes & Opcionais",
             Section::System => "Atualizações & Serviços",
         }
     }
 
-    pub const GROUPS: &[(&'static str, &'static [Section])] = &[
-        (
-            "Sistema",
-            &[Section::Power, Section::Displays, Section::Network, Section::Camera],
-        ),
-        (
-            "Aparência & Barra",
-            &[
-                Section::Bar,
-                Section::Central,
-                Section::Monitor,
-                Section::Notifications,
-                Section::Login,
-            ],
-        ),
-        ("Proteção & Dados", &[Section::Security, Section::Backup]),
-        ("Avançado", &[Section::DevicesOsd, Section::Optional, Section::System]),
-    ];
-
-    pub fn keywords(self) -> &'static str {
-        match self {
-            Section::Power => "energia bateria cpu gpu watts desempenho economia perfil suspender tela ccd turbo",
-            Section::Bar => "barra taskbar tray icones espacamento atalho print captura screenshot",
-            Section::Monitor => "monitor esquerda cpu gpu temperatura ventoinha clima sensores processos",
-            Section::Central => "central direita relogio calendario clipboard notificacoes tema escuro nao perturbe",
-            Section::Notifications => "notificacoes toast aviso pop-up som tempo posicao cor opacidade",
-            Section::DevicesOsd => "osd logitech teclado mouse caps lock pilula aviso",
-            Section::Camera => "camera audio microfone iriun webcam privacidade som",
-            Section::Network => "rede wifi ethernet ip dns vpn bluetooth",
-            Section::Security => "seguranca privacidade firewall ufw dns dot trackers mac vpn kernel usbguard",
-            Section::Backup => "backup sincronizacao restic snapper btrfs ssd trim claude",
-            Section::Displays => "monitores brilho escala ddc resolucao hz tela papel parede wallpaper janela dividida padding gap foco prioridade pipocando",
-            Section::Login => "login bloqueio greeter senha avatar fundo tela bloqueio",
-            Section::Optional => "pacotes opcionais instalar apps extras",
-            Section::System => "sistema servicos atualizacoes systemd daemon logs",
-        }
-    }
 
     pub fn from_arg(arg: &str) -> Option<Section> {
         match arg.trim().to_ascii_lowercase().as_str() {
+            "home" | "inicio" => Some(Section::Home),
+            "capture" | "captura" | "print" | "screenshot" => Some(Section::Capture),
             "power" | "energia" => Some(Section::Power),
             "bar" | "barra" | "tray" => Some(Section::Bar),
             "monitor" => Some(Section::Monitor),
@@ -160,6 +150,8 @@ impl Section {
 
     pub fn icon(self) -> &'static str {
         match self {
+            Section::Home => "go-home-symbolic",
+            Section::Capture => "applets-screenshooter-symbolic",
             Section::Power => "battery-good-symbolic",
             Section::Bar => "view-app-grid-symbolic",
             Section::Monitor => "utilities-system-monitor-symbolic",
@@ -215,8 +207,8 @@ pub enum Message {
     PowerSataAlpm(String),
     PowerToggleAudioSave,
     PowerToggleWifiSave,
-    PowerSaveOnly,
-    PowerSaveAndApply,
+    /// Barra "Aplicar" de Energia: ativa o plano em edição e aplica no hardware.
+    ApplyPower,
     PowerResetDefaults,
     // Bar & Tray
     SetBarSpacing(BarSpacing),
@@ -276,8 +268,8 @@ pub enum Message {
     OsdBatteryCritical(u8),
     OsdBatteryIntervalMins(u64),
     OsdEmojiCommand(String),
-    OsdSaveOnly,
-    OsdSaveAndRestart,
+    /// Barra "Aplicar" do OSD: reinicia o serviço com a configuração gravada.
+    ApplyOsd,
     OsdReset,
     OsdRunDemo,
     // Camera
@@ -349,14 +341,51 @@ pub enum Message {
     RestartUserUnit(&'static str),
     RefreshAll,
     ActionDone(String),
-    DismissNotice,
-    SearchChanged(String),
-    SearchSubmit,
-    ToggleSecurityAdvanced,
-    TogglePowerAdvanced,
+    /// Fim de uma aplicação (Energia/OSD): como `ActionDone`, e marca o que foi aplicado se deu certo.
+    ApplyDone(Applying, Result<String, String>),
     SetWindowGaps(u32, u32),
     SetActivationPolicy(&'static str),
+    // Moldura (painel-b)
+    SelectCategory(Category),
+    OpenPalette,
+    ClosePalette,
+    PaletteQuery(String),
+    PaletteMove(i32),
+    PaletteActivate { run: bool },
+    /// Clique numa linha da paleta: seleciona e ativa (ação executa, ajuste e página nativa abrem).
+    PaletteClick(usize),
+    OpenNative(&'static str),
+    JumpTo(&'static str),
+    ToggleAdvanced,
+    DismissToast(u64),
+    /// Desfaz a mudança recente `idx` (reenvia a `Message` guardada com o valor anterior).
+    Undo(usize),
+    /// Desfaz uma mudança de Energia no plano em que ela foi feita, mesmo que o plano em edição tenha mudado.
+    UndoAsProfile(PowerProfileKind, Box<Message>),
+    /// Um segundo passou: expira avisos (só enquanto houver aviso visível).
+    Tick,
+    /// Hora de ler as métricas da Visão geral (só com a Visão geral aberta).
+    MetricsTick,
+    MetricsRead(Box<Reading>),
+    WindowFocus(bool),
+    /// Saúde das unidades rastreadas e horários do timer do backup.
+    HealthLoaded(Vec<(&'static str, UnitHealth)>, TimerTimes),
     None,
+}
+
+/// O que um `ApplyDone` aplicou, para marcar como "aplicado" só quando deu certo.
+#[derive(Clone, Debug)]
+pub enum Applying {
+    Power(PowerProfileKind, Box<ProfileTuning>),
+    Osd(Box<osd_config::Config>),
+}
+
+/// Estado da paleta Ctrl K (aberta quando `ControlPanel::palette` é `Some`).
+#[derive(Clone, Debug, Default)]
+pub struct PaletteState {
+    pub query: String,
+    /// Índice em `chrome::flat_results(&query)`.
+    pub cursor: usize,
 }
 
 pub struct ControlPanel {
@@ -404,13 +433,98 @@ pub struct ControlPanel {
     screenshot_config: ScreenshotConfig,
     // Login (Greeter)
     greeter: data::GreeterConfig,
-    search: String,
-    security_show_advanced: bool,
-    power_show_advanced: bool,
     window_gaps: (u32, u32),
     activation_policy: String,
+    /// Uma ação de fundo está rodando: desabilita os botões de ação da página e a barra Aplicar.
     busy: bool,
-    notice: Option<String>,
+    /// Aviso `Progress` que mostra o `busy`, para tirá-lo quando a ação termina.
+    busy_toast: Option<u64>,
+    /// Reenviando a `Message` guardada de um "Desfazer": não vira nova mudança recente.
+    undoing: bool,
+    // Moldura (painel-b)
+    toasts: Toasts<Message>,
+    recent: Recent<Message>,
+    applied: Applied,
+    palette: Option<PaletteState>,
+    metrics: Option<HomeMetrics>,
+    last_reading: Option<Reading>,
+    metrics_inflight: bool,
+    focused: bool,
+    /// Grupos avançados da seção atual visíveis (substitui `power_show_advanced`/`security_show_advanced`).
+    advanced_open: bool,
+    /// Último grupo escolhido em "Ir para" (destaca o atalho).
+    scroll_to: Option<&'static str>,
+    /// Saúde (carregada/ativa) das unidades rastreadas da seção Atualizações & Serviços.
+    unit_health: Vec<(&'static str, UnitHealth)>,
+    backup_times: TimerTimes,
+}
+
+/// Rajadas do mesmo ajuste dentro desta janela viram uma entrada só em "Alterados recentemente".
+const RECENT_COALESCE_WINDOW: Duration = Duration::from_secs(3);
+/// Espera entre abrir o avançado e rolar até um grupo dele.
+const JUMP_AFTER_EXPAND: Duration = Duration::from_millis(80);
+/// Cadência do `Tick` que expira avisos.
+const TOAST_TICK: Duration = Duration::from_secs(1);
+
+/// Tipo do aviso a partir do texto das mensagens antigas (`✓`/`✗`/`Falha`/`Erro`, e também
+/// "Não foi possível…", que `spawn_app` devolve quando nem abriu).
+fn legacy_kind(text: &str) -> ToastKind {
+    let kind = feedback::kind_from_legacy(text);
+    if kind == ToastKind::Info && text.trim_start().starts_with("Não foi possível") {
+        ToastKind::Error
+    } else {
+        kind
+    }
+}
+
+/// Texto da barra "Aplicar" de Energia.
+fn apply_bar_label(pending: &ApplyAction, editing: PowerProfileKind) -> String {
+    match pending {
+        ApplyAction::ApplyHardware => "Aplicar no hardware".to_owned(),
+        ApplyAction::ActivateAndApply(_) => format!("Ativar e aplicar {}", editing.label()),
+    }
+}
+
+/// Indicador de salvamento do cabeçalho.
+fn save_status(pending_count: usize) -> String {
+    match pending_count {
+        0 => "Tudo salvo".to_owned(),
+        1 => "1 ajuste para aplicar".to_owned(),
+        n => format!("{n} ajustes para aplicar"),
+    }
+}
+
+/// Fecha um "Aplicar": só um sucesso marca o que foi aplicado (Energia ou OSD); uma falha deixa a
+/// pendência acesa e vira aviso de erro. Devolve o tipo e o texto do aviso.
+fn settle_apply(
+    applied: &mut pending::Applied,
+    what: &Applying,
+    result: Result<String, String>,
+) -> (ToastKind, String) {
+    match result {
+        Ok(msg) => {
+            let text = match what {
+                Applying::Power(kind, tuning) => {
+                    applied.mark_power(*kind, tuning);
+                    msg
+                }
+                Applying::Osd(cfg) => {
+                    applied.mark_osd(cfg);
+                    format!("Configuração do OSD aplicada. {msg}")
+                }
+            };
+            (ToastKind::Success, text)
+        }
+        Err(msg) => (ToastKind::Error, msg),
+    }
+}
+
+/// Cursor da paleta depois de `delta` passos numa lista de `len` itens (dá a volta nas pontas).
+fn moved_cursor(cursor: usize, delta: i32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    (cursor as i64 + i64::from(delta)).rem_euclid(len as i64) as usize
 }
 
 pub fn run() -> cosmic::iced::Result {
@@ -453,9 +567,298 @@ impl ControlPanel {
         items
     }
 
+    /// Troca de seção: recomeça no topo, com o avançado recolhido, e recarrega o que a seção lê do disco.
+    fn select_section(&mut self, sec: Section) -> app::Task<Message> {
+        self.section = sec;
+        self.advanced_open = false;
+        self.scroll_to = None;
+        Task::batch([views::scroll_page_to(0.0), self.section_load_task(sec)])
+    }
+
+    fn section_load_task(&mut self, sec: Section) -> app::Task<Message> {
+        if sec == Section::Home {
+            // Leitura nova: dois pontos próximos, não a média desde a última visita.
+            self.metrics = None;
+            self.last_reading = None;
+            return self.read_metrics();
+        }
+        if sec == Section::Displays && self.displays.is_none() {
+            return Task::future(async {
+                cosmic::action::app(Message::DisplaysLoaded(
+                    services::displays(services::DdcRead::All).await,
+                ))
+            });
+        }
+        if sec == Section::Camera {
+            return Task::future(async {
+                cosmic::action::app(Message::CameraLoaded(services::camera().await))
+            });
+        }
+        if sec == Section::Bar {
+            self.panel_icons = PanelIcons::load();
+            self.bar_spacing = BarSpacing::load();
+            self.tray_config = data::load_tray_config();
+        }
+        if sec == Section::Monitor {
+            self.monitor_settings = MonitorSettings::load();
+            self.weather_place = monitor::config::weather_place();
+        }
+        if sec == Section::Central {
+            self.central_layout = Layout::load();
+            self.dark_mode = DARK_MODE.get();
+            self.do_not_disturb = DO_NOT_DISTURB.get();
+            self.tiling_config = services::tiling_config();
+            self.touchpad = services::touchpad();
+            self.hot_edge = services::hot_edge();
+        }
+        if sec == Section::Notifications {
+            let prev_accent = self.notif_config.accent_hex.clone();
+            let prev_bg = self.notif_config.bg_hex.clone();
+            self.notif_config = NotifConfig::load();
+            if !prev_accent.is_empty()
+                && crate::central::notifications::config::parse_hex_color(&prev_accent).is_none()
+            {
+                self.notif_config.accent_hex = prev_accent;
+            }
+            if !prev_bg.is_empty()
+                && crate::central::notifications::config::parse_hex_color(&prev_bg).is_none()
+            {
+                self.notif_config.bg_hex = prev_bg;
+            }
+        }
+        if sec == Section::DevicesOsd {
+            self.osd_config = osd_config::load_or_default();
+        }
+        if sec == Section::Login {
+            self.greeter = data::load_greeter_config();
+        }
+        if sec == Section::Optional {
+            return Task::future(async {
+                cosmic::action::app(Message::SnapshotLoaded(data::load_snapshot().await))
+            });
+        }
+        Task::none()
+    }
+
+    /// Registra em "Alterados recentemente" a mudança simples de valor que `msg` vai fazer
+    /// (antes de ela ser aplicada, para guardar o valor anterior no "Desfazer").
+    fn record_recent(&mut self, msg: &Message) {
+        let Some(d) = undo::describe(self, msg) else {
+            return;
+        };
+        let change = RecentChange {
+            label: format!("{} → {}", d.label, d.value),
+            section: d.section,
+            at: Instant::now(),
+            undo: Some(d.undo),
+        };
+        let items = undo::coalesce(
+            self.recent.items().to_vec(),
+            change,
+            d.coalesce,
+            RECENT_COALESCE_WINDOW,
+        );
+        self.recent = Recent::default();
+        for c in items.into_iter().rev() {
+            self.recent.record(c);
+        }
+    }
+
+    /// Enter / Ctrl+Enter na paleta: ajuste → seção, avançado e grupo; ação → executa (Ctrl+Enter
+    /// com mapeamento simples) ou vai à seção; página nativa → `cosmic-settings <página>`.
+    fn activate_palette(&mut self, run: bool) -> app::Task<Message> {
+        let Some(p) = self.palette.as_ref() else {
+            return Task::none();
+        };
+        let results = chrome::flat_results(&p.query);
+        let Some(entry) = results.get(p.cursor).copied() else {
+            return Task::none();
+        };
+        self.palette = None;
+        match entry.kind {
+            search_index::EntryKind::Native => match entry.native_page {
+                Some(page) => self.update(Message::OpenNative(page)),
+                None => Task::none(),
+            },
+            search_index::EntryKind::Action => match chrome::action_message(entry).filter(|_| run) {
+                Some(action) => self.update(action),
+                None => self.go_to(entry.section, false, None),
+            },
+            search_index::EntryKind::Setting => {
+                self.go_to(entry.section, entry.advanced, Some(entry.group))
+            }
+        }
+    }
+
+    /// Vai à seção, abre o avançado se preciso e rola até o grupo.
+    fn go_to(&mut self, section: Section, advanced: bool, group: Option<&'static str>) -> app::Task<Message> {
+        let load = self.section_load_task(section);
+        self.section = section;
+        self.advanced_open = advanced;
+        self.scroll_to = None;
+        let scroll = match group {
+            Some(g) => Task::done(cosmic::action::app(Message::JumpTo(g))),
+            None => views::scroll_page_to(0.0),
+        };
+        Task::batch([load, scroll])
+    }
+
+    /// "Ir para": rola o scrollable da página até o grupo. O iced não informa onde um bloco está
+    /// dentro do scrollable, então a posição é aproximada: `índice do grupo / total de grupos`.
+    fn jump_to(&mut self, group: &'static str) -> app::Task<Message> {
+        if !self.advanced_open && chrome::is_advanced_group(self.section, group) {
+            // Primeiro abre o avançado; o salto espera a página ganhar o conteúdo novo.
+            self.advanced_open = true;
+            return Task::future(async move {
+                tokio::time::sleep(JUMP_AFTER_EXPAND).await;
+                cosmic::action::app(Message::JumpTo(group))
+            });
+        }
+        self.scroll_to = Some(group);
+        let groups = chrome::section_groups(self.section);
+        match chrome::jump_fraction(&groups, group, self.advanced_open) {
+            Some(fraction) => views::scroll_page_to(fraction),
+            None => Task::none(),
+        }
+    }
+
+    /// Aviso tipado no canto da janela.
+    fn toast(&mut self, kind: ToastKind, text: impl Into<String>) {
+        self.toasts.push(kind, text, None, Instant::now());
+    }
+
+    /// Aviso cujo tipo vem do texto (`✓`/`✗`/`Falha`/`Erro`); o `✓`/`✗` sai, o ícone já diz.
+    fn toast_legacy(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        let kind = legacy_kind(&text);
+        let shown = text
+            .trim_start()
+            .strip_prefix(['✓', '✗'])
+            .map_or(text.as_str(), str::trim_start)
+            .to_owned();
+        self.toast(kind, shown);
+    }
+
+    /// Começa uma ação de fundo: `busy` + aviso `Progress`.
+    fn begin_busy(&mut self, text: impl Into<String>) {
+        if let Some(id) = self.busy_toast.take() {
+            self.toasts.dismiss(id);
+        }
+        self.busy = true;
+        let id = self.toasts.push(ToastKind::Progress, text, None, Instant::now());
+        self.busy_toast = Some(id);
+    }
+
+    /// Termina a ação de fundo: tira o `busy` e o aviso `Progress`.
+    fn end_busy(&mut self) {
+        self.busy = false;
+        if let Some(id) = self.busy_toast.take() {
+            self.toasts.dismiss(id);
+        }
+    }
+
+    fn active_profile_kind(&self) -> Option<PowerProfileKind> {
+        self.power
+            .as_ref()
+            .and_then(|p| PowerProfileKind::from_id(&p.active))
+    }
+
+    /// O que o botão "Aplicar" da página Energia faria agora (`None` = nada pendente). Sem daemon
+    /// (plano ativo desconhecido) compara com a marca do plano em edição e oferece aplicar no
+    /// hardware; a oferta de ativar outro plano só existe aqui, na barra da página.
+    pub(crate) fn power_apply(&self) -> Option<ApplyAction> {
+        pending::power_pending(
+            &self.power_config,
+            &self.applied,
+            self.editing_profile,
+            self.active_profile_kind(),
+        )
+    }
+
+    /// O plano em edição tem ajuste de hardware gravado e ainda não aplicado (contagem do
+    /// cabeçalho, ponto do trilho e alerta do Início; olhar outro plano não conta).
+    pub(crate) fn power_dirty(&self) -> bool {
+        pending::power_dirty(&self.power_config, &self.applied, self.editing_profile)
+    }
+
+    /// O OSD gravado difere do que estava no último reinício do serviço.
+    pub(crate) fn osd_apply(&self) -> bool {
+        pending::osd_pending(&self.osd_config, &self.applied)
+    }
+
+    /// Quantos itens esperam "Aplicar" (Energia e OSD).
+    pub(crate) fn pending_count(&self) -> usize {
+        usize::from(self.power_dirty()) + usize::from(self.osd_apply())
+    }
+
+    /// Ponto âmbar do trilho para a categoria.
+    pub(crate) fn category_alert(&self, cat: Category) -> bool {
+        chrome::category_alert(
+            cat,
+            &self.unit_health,
+            self.power_dirty(),
+            self.osd_apply(),
+        )
+    }
+
+    /// Lê saúde das unidades rastreadas e horários do backup (somente leitura).
+    fn load_health(&self) -> app::Task<Message> {
+        let units: Vec<(&'static str, bool)> = self
+            .snapshot
+            .units
+            .iter()
+            .map(|u| (u.unit, u.is_system))
+            .collect();
+        Task::future(async move {
+            let mut out = Vec::with_capacity(units.len());
+            for (unit, system) in units {
+                out.push((unit, health::unit_health(unit, system).await));
+            }
+            let backup = health::backup_timer().await;
+            cosmic::action::app(Message::HealthLoaded(out, backup))
+        })
+    }
+
+    /// Uma leitura das métricas fora da thread da UI.
+    fn read_metrics(&mut self) -> app::Task<Message> {
+        if self.metrics_inflight {
+            return Task::none();
+        }
+        self.metrics_inflight = true;
+        Task::future(async {
+            let reading = tokio::task::spawn_blocking(metrics::read_now).await;
+            match reading {
+                Ok(r) => cosmic::action::app(Message::MetricsRead(Box::new(r))),
+                Err(_) => cosmic::action::app(Message::None),
+            }
+        })
+    }
+
+    /// Termina uma ação (`ActionDone`/`ApplyDone`): aviso com o resultado e recarga do estado.
+    fn finish_action(&mut self, msg: String) -> app::Task<Message> {
+        self.end_busy();
+        self.toast_legacy(msg);
+        self.after_action()
+    }
+
+    /// Como `finish_action`, mas com o tipo do aviso já decidido (resultado de `Result`).
+    fn finish_action_as(&mut self, kind: ToastKind, text: String) -> app::Task<Message> {
+        self.end_busy();
+        self.toast(kind, text);
+        self.after_action()
+    }
+
+    /// Recarga do estado depois de uma ação.
+    fn after_action(&mut self) -> app::Task<Message> {
+        self.cpu_topology = power_config::detect_cpu_topology();
+        Task::future(async {
+            cosmic::action::app(Message::SnapshotLoaded(data::load_snapshot().await))
+        })
+    }
+
     fn persist_power_config(&mut self, sync_idle: bool) {
         if let Err(err) = self.power_config.save() {
-            self.notice = Some(format!("Falha ao salvar perfis de energia: {err}"));
+            self.toast(ToastKind::Error, format!("Falha ao salvar perfis de energia: {err}"));
             return;
         }
         if sync_idle
@@ -466,26 +869,26 @@ impl ControlPanel {
         {
             let tuning = self.power_config.get(self.editing_profile);
             if let Err(err) = power_config::apply_idle_timeouts(tuning) {
-                self.notice = Some(format!("Falha ao aplicar tempos de tela/login: {err}"));
+                self.toast(ToastKind::Error, format!("Falha ao aplicar tempos de tela/login: {err}"));
             }
         }
     }
 
     fn persist_osd_config(&mut self) {
         if let Err(err) = self.osd_config.normalized().save() {
-            self.notice = Some(err);
+            self.toast(ToastKind::Error, err);
         }
     }
 
     fn persist_greeter_config(&mut self) {
         if let Err(err) = data::save_greeter_config(&self.greeter) {
-            self.notice = Some(err);
+            self.toast(ToastKind::Error, err);
         }
     }
 
     fn persist_screenshot_config(&mut self) {
         if let Err(err) = self.screenshot_config.save() {
-            self.notice = Some(format!("Falha ao salvar config de captura: {err}"));
+            self.toast(ToastKind::Error, format!("Falha ao salvar config de captura: {err}"));
         }
     }
 
@@ -530,9 +933,17 @@ impl cosmic::Application for ControlPanel {
         let hardware = data::read_hardware();
         let power_config = PowerProfilesConfig::load(hardware.is_intel, hardware.is_laptop);
         let cpu_topology = power_config::detect_cpu_topology();
-        let app = Self {
+        let osd_config = osd_config::load_or_default();
+        // O que está em disco ao abrir é a linha de base do "aplicado" (o plano ativo só é
+        // conhecido depois; ao chegar, `Update::PowerProfiles` refaz a marca do ativo).
+        let mut applied = Applied::default();
+        for kind in PowerProfileKind::ALL {
+            applied.mark_power(kind, power_config.get(kind));
+        }
+        applied.mark_osd(&osd_config);
+        let mut app = Self {
             core,
-            section: initial_section.unwrap_or(Section::Power),
+            section: initial_section.unwrap_or(Section::Home),
             snapshot: data::SystemSnapshot {
                 hardware,
                 ..data::SystemSnapshot::default()
@@ -570,19 +981,32 @@ impl cosmic::Application for ControlPanel {
             editing_profile: PowerProfileKind::Balanced,
             cpu_topology,
             notif_config: NotifConfig::load(),
-            osd_config: osd_config::load_or_default(),
+            osd_config,
             screenshot_config: ScreenshotConfig::load(),
             greeter: data::load_greeter_config(),
-            search: String::new(),
-            security_show_advanced: false,
-            power_show_advanced: false,
             window_gaps: services::window_gaps(),
             activation_policy: services::activation_policy(),
             busy: false,
-            notice: None,
+            busy_toast: None,
+            undoing: false,
+            toasts: Toasts::default(),
+            recent: Recent::default(),
+            applied,
+            palette: None,
+            metrics: None,
+            last_reading: None,
+            metrics_inflight: false,
+            focused: true,
+            advanced_open: false,
+            scroll_to: None,
+            unit_health: Vec::new(),
+            backup_times: TimerTimes::default(),
         };
-        let load = app.reload_all();
-        (app, load)
+        let mut tasks = vec![app.reload_all()];
+        if app.section == Section::Home {
+            tasks.push(app.read_metrics());
+        }
+        (app, Task::batch(tasks))
     }
 
     fn core(&self) -> &app::Core {
@@ -593,85 +1017,67 @@ impl cosmic::Application for ControlPanel {
         &mut self.core
     }
 
+    fn header_start(&self) -> Vec<Element<'_, Message>> {
+        views::header_start(self)
+    }
+
     fn header_center(&self) -> Vec<Element<'_, Message>> {
-        vec![cosmic::widget::text::title4("Painel de Controle").into()]
+        views::header_center(self)
+    }
+
+    fn header_end(&self) -> Vec<Element<'_, Message>> {
+        views::header_end(self)
     }
 
     fn update(&mut self, message: Message) -> app::Task<Message> {
+        if !self.undoing {
+            self.record_recent(&message);
+        }
         match message {
             Message::SelectSection(sec) => {
-                self.section = sec;
-                if sec == Section::Displays && self.displays.is_none() {
-                    return Task::future(async {
-                        cosmic::action::app(Message::DisplaysLoaded(
-                            services::displays(services::DdcRead::All).await,
-                        ))
-                    });
-                }
-                if sec == Section::Camera {
-                    return Task::future(async {
-                        cosmic::action::app(Message::CameraLoaded(services::camera().await))
-                    });
-                }
-                if sec == Section::Bar {
-                    self.panel_icons = PanelIcons::load();
-                    self.bar_spacing = BarSpacing::load();
-                    self.tray_config = data::load_tray_config();
-                }
-                if sec == Section::Monitor {
-                    self.monitor_settings = MonitorSettings::load();
-                    self.weather_place = monitor::config::weather_place();
-                }
-                if sec == Section::Central {
-                    self.central_layout = Layout::load();
-                    self.dark_mode = DARK_MODE.get();
-                    self.do_not_disturb = DO_NOT_DISTURB.get();
-                    self.tiling_config = services::tiling_config();
-                    self.touchpad = services::touchpad();
-                    self.hot_edge = services::hot_edge();
-                }
-                if sec == Section::Notifications {
-                    let prev_accent = self.notif_config.accent_hex.clone();
-                let prev_bg = self.notif_config.bg_hex.clone();
-                self.notif_config = NotifConfig::load();
-                if !prev_accent.is_empty()
-                    && crate::central::notifications::config::parse_hex_color(&prev_accent).is_none()
-                {
-                    self.notif_config.accent_hex = prev_accent;
-                }
-                if !prev_bg.is_empty()
-                    && crate::central::notifications::config::parse_hex_color(&prev_bg).is_none()
-                {
-                    self.notif_config.bg_hex = prev_bg;
-                }
-                }
-                if sec == Section::DevicesOsd {
-                    self.osd_config = osd_config::load_or_default();
-                }
-                if sec == Section::Login {
-                    self.greeter = data::load_greeter_config();
-                }
-                if sec == Section::Optional {
-                    return Task::future(async {
-                        cosmic::action::app(Message::SnapshotLoaded(data::load_snapshot().await))
-                    });
-                }
+                return self.select_section(sec);
+            }
+            Message::SelectCategory(cat) => {
+                let target = if category_of(self.section) == cat {
+                    self.section
+                } else {
+                    cat.sections().first().copied().unwrap_or(Section::Home)
+                };
+                return self.select_section(target);
             }
             Message::SnapshotLoaded(snapshot) => {
                 self.snapshot = snapshot;
                 self.tray_config = data::load_tray_config();
+                return self.load_health();
+            }
+            Message::HealthLoaded(units, backup) => {
+                self.unit_health = units;
+                self.backup_times = backup;
             }
             Message::ServiceUpdate(update) => match update {
                 Update::Network(net) => self.network = net,
                 Update::Battery(bat) => self.battery = bat,
                 Update::Peripherals(p) => self.peripherals = p,
                 Update::PowerProfiles(p) => {
+                    let old_active = self.active_profile_kind();
+                    let new_active = p
+                        .as_ref()
+                        .and_then(|pp| PowerProfileKind::from_id(&pp.active));
                     if self.power.is_none()
-                        && let Some(active) = p.as_ref().and_then(|pp| PowerProfileKind::from_id(&pp.active))
+                        && let Some(active) = new_active
                     {
                         self.editing_profile = active;
                     }
                     self.power = p;
+                    // Troca de plano (aqui ou pelo Central): o daemon aplica o plano novo, então o
+                    // que está gravado dele passa a ser o "aplicado". Um sinal que só repete o
+                    // plano ativo (outra propriedade mudou) não apaga uma pendência real.
+                    if new_active != old_active
+                        && let Some(kind) = new_active
+                    {
+                        self.applied.forget_power(kind);
+                        self.applied.mark_power(kind, self.power_config.get(kind));
+                    }
                 }
                 Update::Microphone(m) => self.microphone = m,
                 Update::Brightness(b) => self.brightness = b,
@@ -715,8 +1121,9 @@ impl cosmic::Application for ControlPanel {
             }
             // Power
             Message::SetPowerProfile(profile) => {
-                self.busy = true;
-                self.notice = Some(format!("Alterando plano de energia para {profile}..."));
+                // A marca de "aplicado" só muda em `Update::PowerProfiles`, quando o daemon confirma
+                // que o plano ativo mudou: clicar no plano que já é o ativo não aplica nada.
+                self.begin_busy(format!("Alterando plano de energia para {profile}..."));
                 return Task::future(async move {
                     let msg = match services::set_power_profile(profile.clone()).await {
                         Ok(()) => format!("✓ Plano de energia alterado para {profile}."),
@@ -864,31 +1271,21 @@ impl cosmic::Application for ControlPanel {
                 t.wifi_power_save = !t.wifi_power_save;
                 self.persist_power_config(false);
             }
-            Message::PowerSaveOnly => match self.power_config.save() {
-                Ok(()) => {
-                    self.notice = Some(format!(
-                        "Perfis de energia salvos em {}.",
-                        PowerProfilesConfig::config_path().display()
-                    ));
-                }
-                Err(err) => {
-                    self.notice = Some(format!("Falha ao salvar perfis de energia: {err}"));
-                }
-            },
-            Message::PowerSaveAndApply => {
-                if let Err(err) = self.power_config.save() {
-                    self.notice = Some(format!("Falha ao salvar perfis de energia: {err}"));
+            // Cada mudança de Energia já grava em `persist_power_config`; "Aplicar" só ativa o plano
+            // em edição e o aplica no hardware (mesmo caminho do antigo "Salvar e aplicar plano").
+            Message::ApplyPower => {
+                if self.busy {
                     return Task::none();
                 }
                 let kind = self.editing_profile;
                 let profile_id = kind.id().to_owned();
                 let tuning = self.power_config.get(kind).clone();
-                self.busy = true;
-                self.notice = Some(format!("Aplicando plano {}...", kind.label()));
+                let applying = Applying::Power(kind, Box::new(tuning.clone()));
+                self.begin_busy(format!("Aplicando plano {}...", kind.label()));
                 return Task::future(async move {
                     _ = services::set_power_profile(profile_id.clone()).await;
-                    let msg = power_config::apply_profile_now(&profile_id, &tuning).await;
-                    cosmic::action::app(Message::ActionDone(msg))
+                    let result = power_config::apply_profile_now(&profile_id, &tuning).await;
+                    cosmic::action::app(Message::ApplyDone(applying, result))
                 });
             }
             Message::PowerResetDefaults => {
@@ -896,13 +1293,16 @@ impl cosmic::Application for ControlPanel {
                 self.power_config = PowerProfilesConfig::defaults_for(hw.is_intel, hw.is_laptop);
                 match self.power_config.save() {
                     Ok(()) => {
-                        self.notice = Some(
-                            "Padrões do hardware restaurados e salvos. Clique em \"Salvar e aplicar plano\" para aplicar agora."
-                                .to_owned(),
+                        self.toast(
+                            ToastKind::Success,
+                            "Padrões do hardware restaurados e salvos. Use \"Aplicar\" para aplicar agora.",
                         );
                     }
                     Err(err) => {
-                        self.notice = Some(format!("Padrões restaurados, mas falhou ao salvar: {err}"));
+                        self.toast(
+                            ToastKind::Error,
+                            format!("Padrões restaurados, mas falhou ao salvar: {err}"),
+                        );
                     }
                 }
             }
@@ -939,7 +1339,7 @@ impl cosmic::Application for ControlPanel {
                 data::save_tray_hidden(hidden);
             }
             Message::RestartPanel => {
-                self.busy = true;
+                self.begin_busy("Reiniciando o painel...");
                 return Task::future(async {
                     let msg =
                         data::run_user_tool("reiniciar-painel", &[], "Painel reiniciado.").await;
@@ -999,7 +1399,7 @@ impl cosmic::Application for ControlPanel {
             }
             Message::MonitorReset => {
                 self.monitor_settings.reset();
-                self.notice = Some("Layout do Monitor restaurado para o padrão.".to_owned());
+                self.toast(ToastKind::Success, "Layout do Monitor restaurado para o padrão.");
             }
             Message::WeatherQueryInput(query) => {
                 self.weather_query = query;
@@ -1029,7 +1429,7 @@ impl cosmic::Application for ControlPanel {
                 self.weather_place = place;
                 self.weather_query.clear();
                 self.weather_results = None;
-                self.notice = Some(format!("Local do clima definido para {label}."));
+                self.toast(ToastKind::Success, format!("Local do clima definido para {label}."));
             }
             // Central (Right panel)
             Message::CentralToggleSectionFold(sec) => {
@@ -1065,30 +1465,32 @@ impl cosmic::Application for ControlPanel {
                 services::set_hot_edge(self.hot_edge);
             }
             Message::CentralOpenHotEdge => {
-                self.notice = Some(data::spawn_app("cosmic-ext-hot-edge", &[], "Hot Edge"));
+                self.toast_legacy(data::spawn_app("cosmic-ext-hot-edge", &[], "Hot Edge"));
             }
             Message::CentralResetTiles => {
                 data::reset_central_tiles();
-                self.notice =
-                    Some("Grade de tiles da Central restaurada para o padrão.".to_owned());
+                self.toast(
+                    ToastKind::Success,
+                    "Grade de tiles da Central restaurada para o padrão.",
+                );
             }
             // Notifications
             Message::NotifTimeout(secs) => {
                 self.notif_config.timeout_secs = secs;
                 if let Err(err) = self.notif_config.save() {
-                    self.notice = Some(err);
+                    self.toast(ToastKind::Error, err);
                 }
             }
             Message::NotifFormat(fmt) => {
                 self.notif_config.format = fmt;
                 if let Err(err) = self.notif_config.save() {
-                    self.notice = Some(err);
+                    self.toast(ToastKind::Error, err);
                 }
             }
             Message::NotifPosition(pos) => {
                 self.notif_config.position = pos;
                 if let Err(err) = self.notif_config.save() {
-                    self.notice = Some(err);
+                    self.toast(ToastKind::Error, err);
                 }
             }
             Message::NotifOpacity(val) => {
@@ -1097,7 +1499,7 @@ impl cosmic::Application for ControlPanel {
                     crate::central::notifications::config::MAX_OPACITY,
                 );
                 if let Err(err) = self.notif_config.save() {
-                    self.notice = Some(err);
+                    self.toast(ToastKind::Error, err);
                 }
             }
             Message::NotifCornerRadius(r) => {
@@ -1106,7 +1508,7 @@ impl cosmic::Application for ControlPanel {
                     crate::central::notifications::config::MAX_CORNER_RADIUS,
                 );
                 if let Err(err) = self.notif_config.save() {
-                    self.notice = Some(err);
+                    self.toast(ToastKind::Error, err);
                 }
             }
             Message::NotifMaxBodyLines(lines) => {
@@ -1115,25 +1517,25 @@ impl cosmic::Application for ControlPanel {
                     crate::central::notifications::config::MAX_BODY_LINES,
                 );
                 if let Err(err) = self.notif_config.save() {
-                    self.notice = Some(err);
+                    self.toast(ToastKind::Error, err);
                 }
             }
             Message::NotifToggleShowBody => {
                 self.notif_config.show_body = !self.notif_config.show_body;
                 if let Err(err) = self.notif_config.save() {
-                    self.notice = Some(err);
+                    self.toast(ToastKind::Error, err);
                 }
             }
             Message::NotifToggleShowActions => {
                 self.notif_config.show_actions = !self.notif_config.show_actions;
                 if let Err(err) = self.notif_config.save() {
-                    self.notice = Some(err);
+                    self.toast(ToastKind::Error, err);
                 }
             }
             Message::NotifToggleGroupByApp => {
                 self.notif_config.group_by_app = !self.notif_config.group_by_app;
                 if let Err(err) = self.notif_config.save() {
-                    self.notice = Some(err);
+                    self.toast(ToastKind::Error, err);
                 }
             }
             Message::NotifAccentHex(hex) => {
@@ -1141,7 +1543,7 @@ impl cosmic::Application for ControlPanel {
                     || crate::central::notifications::config::parse_hex_color(&hex).is_some();
                 self.notif_config.accent_hex = hex;
                 if valid && let Err(err) = self.notif_config.save() {
-                    self.notice = Some(err);
+                    self.toast(ToastKind::Error, err);
                 }
             }
             Message::NotifBgHex(hex) => {
@@ -1149,15 +1551,18 @@ impl cosmic::Application for ControlPanel {
                     || crate::central::notifications::config::parse_hex_color(&hex).is_some();
                 self.notif_config.bg_hex = hex;
                 if valid && let Err(err) = self.notif_config.save() {
-                    self.notice = Some(err);
+                    self.toast(ToastKind::Error, err);
                 }
             }
             Message::NotifReset => {
                 self.notif_config = NotifConfig::default();
-                self.notice = Some(match self.notif_config.save() {
-                    Ok(()) => "Configurações de notificações restauradas para o padrão.".to_owned(),
-                    Err(err) => err,
-                });
+                match self.notif_config.save() {
+                    Ok(()) => self.toast(
+                        ToastKind::Success,
+                        "Configurações de notificações restauradas para o padrão.",
+                    ),
+                    Err(err) => self.toast(ToastKind::Error, err),
+                }
             }
             Message::NotifSendTest => {
                 let timeout_ms = if self.notif_config.timeout_secs == 0 {
@@ -1165,7 +1570,7 @@ impl cosmic::Application for ControlPanel {
                 } else {
                     (self.notif_config.timeout_secs * 1000).to_string()
                 };
-                self.notice = Some(data::spawn_app(
+                self.toast_legacy(data::spawn_app(
                     "notify-send",
                     &[
                         "-a",
@@ -1212,36 +1617,33 @@ impl cosmic::Application for ControlPanel {
                 };
                 self.persist_osd_config();
             }
-            Message::OsdSaveOnly => {
-                self.osd_config = self.osd_config.normalized();
-                self.notice = Some(match self.osd_config.save() {
-                    Ok(path) => format!(
-                        "Configuração do OSD salva em {}. Reinicie o serviço para aplicar.",
-                        path.display()
-                    ),
-                    Err(err) => err,
-                });
-            }
-            Message::OsdSaveAndRestart => {
-                self.osd_config = self.osd_config.normalized();
-                if let Err(err) = self.osd_config.save() {
-                    self.notice = Some(err);
+            // Cada mudança do OSD já grava em `persist_osd_config`; "Aplicar" só reinicia o serviço.
+            Message::ApplyOsd => {
+                if self.busy {
                     return Task::none();
                 }
-                self.busy = true;
-                return Task::future(async {
+                self.osd_config = self.osd_config.normalized();
+                if let Err(err) = self.osd_config.save() {
+                    self.toast(ToastKind::Error, err);
+                    return Task::none();
+                }
+                let applying = Applying::Osd(Box::new(self.osd_config.clone()));
+                self.begin_busy("Reiniciando o OSD de Dispositivos...");
+                return Task::future(async move {
                     let msg = data::restart_user_unit("logi-osd.service").await;
-                    cosmic::action::app(Message::ActionDone(format!(
-                        "Configuração salva. {msg}"
-                    )))
+                    let result = if legacy_kind(&msg) == ToastKind::Error { Err(msg) } else { Ok(msg) };
+                    cosmic::action::app(Message::ApplyDone(applying, result))
                 });
             }
             Message::OsdReset => {
                 self.osd_config = osd_config::Config::default();
-                self.notice = Some(match self.osd_config.save() {
-                    Ok(_) => "Configuração do OSD restaurada para o padrão.".to_owned(),
-                    Err(err) => err,
-                });
+                match self.osd_config.save() {
+                    Ok(_) => self.toast(
+                        ToastKind::Success,
+                        "Configuração do OSD restaurada para o padrão.",
+                    ),
+                    Err(err) => self.toast(ToastKind::Error, err),
+                }
             }
             Message::OsdRunDemo => {
                 let exe = std::env::current_exe()
@@ -1250,7 +1652,7 @@ impl cosmic::Application for ControlPanel {
                         s.strip_suffix(" (deleted)").unwrap_or(&s).to_owned()
                     })
                     .unwrap_or_else(|_| "cosmic-taskbar".to_owned());
-                self.notice = Some(data::spawn_app(
+                self.toast_legacy(data::spawn_app(
                     &exe,
                     &["logi", "--demo"],
                     "Demonstração do OSD de Dispositivos",
@@ -1354,7 +1756,7 @@ impl cosmic::Application for ControlPanel {
                 }
             }
             Message::RunWallpapers => {
-                self.busy = true;
+                self.begin_busy("Reaplicando wallpapers nos monitores...");
                 return Task::future(async {
                     let msg = data::run_user_tool(
                         "wallpapers-monitores",
@@ -1366,7 +1768,7 @@ impl cosmic::Application for ControlPanel {
                 });
             }
             Message::RunBravePwaFix => {
-                self.busy = true;
+                self.begin_busy("Corrigindo ícones de PWAs do Brave...");
                 return Task::future(async {
                     let msg = data::run_user_tool(
                         "fix-brave-pwa-icons",
@@ -1380,7 +1782,7 @@ impl cosmic::Application for ControlPanel {
             Message::RunScreenshot => {
                 let home = std::env::var("HOME").unwrap_or_default();
                 let bin = std::path::PathBuf::from(&home).join(".local/bin/print-recorte");
-                self.notice = Some(data::spawn_app(
+                self.toast_legacy(data::spawn_app(
                     &bin.to_string_lossy(),
                     &[],
                     "Recorte de tela",
@@ -1389,7 +1791,7 @@ impl cosmic::Application for ControlPanel {
             Message::OpenScreenshotsDir => {
                 let dir = self.screenshot_config.resolved_dir();
                 _ = std::fs::create_dir_all(&dir);
-                self.notice = Some(data::spawn_app(
+                self.toast_legacy(data::spawn_app(
                     "xdg-open",
                     &[&dir.to_string_lossy()],
                     "Pasta de capturas",
@@ -1434,7 +1836,10 @@ impl cosmic::Application for ControlPanel {
             Message::ScreenshotReset => {
                 self.screenshot_config = ScreenshotConfig::default();
                 self.persist_screenshot_config();
-                self.notice = Some("Configurações de recorte (Win+Shift+S) restauradas para o padrão.".to_owned());
+                self.toast(
+                    ToastKind::Success,
+                    "Configurações de recorte (Win+Shift+S) restauradas para o padrão.",
+                );
             }
             Message::RefreshDisplays => {
                 self.displays = None;
@@ -1543,7 +1948,7 @@ impl cosmic::Application for ControlPanel {
             }
             Message::GreeterTestLock => {
                 self.persist_greeter_config();
-                self.notice = Some(data::spawn_app(
+                self.toast_legacy(data::spawn_app(
                     "loginctl",
                     &["lock-session"],
                     "Bloqueio de tela",
@@ -1551,16 +1956,15 @@ impl cosmic::Application for ControlPanel {
             }
             Message::GreeterSaveOnly => match data::save_greeter_config(&self.greeter) {
                 Ok(path) => {
-                    self.notice = Some(format!(
+                    self.toast_legacy(format!(
                         "Configuração salva em {}. Clique em \"Aplicar na tela de login\" para ativar.",
                         path.display()
                     ));
                 }
-                Err(err) => self.notice = Some(err),
+                Err(err) => self.toast(ToastKind::Error, err),
             },
             Message::GreeterApply => {
-                self.busy = true;
-                self.notice = Some("Aplicando preferências na tela de login...".to_owned());
+                self.begin_busy("Aplicando preferências na tela de login...");
                 let cfg = self.greeter.clone();
                 return Task::future(async move {
                     let msg = data::apply_greeter(cfg).await;
@@ -1569,21 +1973,23 @@ impl cosmic::Application for ControlPanel {
             }
             // Optional packages & Security/Power/Backup actions
             Message::OpenInTerminal(title, cmd) => {
-                self.notice = Some(data::open_in_terminal(title, &cmd));
+                self.toast_legacy(data::open_in_terminal(title, &cmd));
             }
             Message::RunAction(label, cmd, privileged) => {
-                self.busy = true;
-                self.notice = Some(format!("Executando: {label}..."));
+                if self.busy {
+                    return Task::none();
+                }
+                self.begin_busy(format!("Executando: {label}..."));
                 return Task::future(async move {
                     let msg = data::run_shell_action(label, &cmd, privileged).await;
                     cosmic::action::app(Message::ActionDone(msg))
                 });
             }
             Message::SpawnApp(program, args, label) => {
-                self.notice = Some(data::spawn_app(program, &args, label));
+                self.toast_legacy(data::spawn_app(program, &args, label));
             }
             Message::EnableUserUnit(unit) => {
-                self.busy = true;
+                self.begin_busy(format!("Habilitando {unit}..."));
                 return Task::future(async move {
                     let msg = data::enable_user_unit(unit).await;
                     cosmic::action::app(Message::ActionDone(msg))
@@ -1591,7 +1997,7 @@ impl cosmic::Application for ControlPanel {
             }
             // System & Updates
             Message::CheckUpdates => {
-                self.busy = true;
+                self.begin_busy("Verificando atualizações...");
                 return Task::future(async {
                     let msg = data::run_user_tool(
                         "cosmic-taskbar-update",
@@ -1603,9 +2009,7 @@ impl cosmic::Application for ControlPanel {
                 });
             }
             Message::RunUpdateNow => {
-                self.busy = true;
-                self.notice =
-                    Some("Verificando e instalando atualizações do GitHub...".to_owned());
+                self.begin_busy("Verificando e instalando atualizações do GitHub...");
                 return Task::future(async {
                     let msg = data::run_user_tool(
                         "cosmic-taskbar-update",
@@ -1617,14 +2021,14 @@ impl cosmic::Application for ControlPanel {
                 });
             }
             Message::ExportConfig => {
-                self.busy = true;
+                self.begin_busy("Exportando o perfil visual...");
                 return Task::future(async {
                     let msg = data::export_repo_config().await;
                     cosmic::action::app(Message::ActionDone(msg))
                 });
             }
             Message::RestartUserUnit(unit) => {
-                self.busy = true;
+                self.begin_busy(format!("Reiniciando {unit}..."));
                 return Task::future(async move {
                     let msg = data::restart_user_unit(unit).await;
                     cosmic::action::app(Message::ActionDone(msg))
@@ -1657,39 +2061,16 @@ impl cosmic::Application for ControlPanel {
                 return self.reload_all();
             }
             Message::ActionDone(msg) => {
-                self.busy = false;
-                self.notice = Some(msg);
-                self.cpu_topology = power_config::detect_cpu_topology();
-                return Task::future(async {
-                    cosmic::action::app(Message::SnapshotLoaded(data::load_snapshot().await))
-                });
+                return self.finish_action(msg);
             }
-            Message::DismissNotice => {
-                self.notice = None;
-            }
-            Message::SearchChanged(q) => {
-                self.search = q;
-            }
-            Message::SearchSubmit => {
-                let q = self.search.trim().to_lowercase();
-                if !q.is_empty()
-                    && let Some(&sec) = Section::ALL.iter().find(|s| {
-                        s.label().to_lowercase().contains(&q) || s.keywords().contains(&q)
-                    })
-                {
-                    self.section = sec;
-                }
-            }
-            Message::ToggleSecurityAdvanced => {
-                self.security_show_advanced = !self.security_show_advanced;
-            }
-            Message::TogglePowerAdvanced => {
-                self.power_show_advanced = !self.power_show_advanced;
+            Message::ApplyDone(what, result) => {
+                let (kind, text) = settle_apply(&mut self.applied, &what, result);
+                return self.finish_action_as(kind, text);
             }
             Message::SetWindowGaps(outer, inner) => {
                 self.window_gaps = (outer, inner);
                 services::set_window_gaps(outer, inner);
-                self.notice = Some(format!(
+                self.toast_legacy(format!(
                     "Espaçamento de janela dividida aplicado: margem externa {} px · entre janelas {} px.",
                     outer, inner
                 ));
@@ -1702,7 +2083,100 @@ impl cosmic::Application for ControlPanel {
                     "FocusIfActiveWorkspace" => "Focar apenas na área de trabalho atual",
                     _ => "Sempre focar (padrão COSMIC)",
                 };
-                self.notice = Some(format!("Prioridade de foco de janelas: {label}."));
+                self.toast_legacy(format!("Prioridade de foco de janelas: {label}."));
+            }
+            // Moldura: paleta Ctrl K
+            Message::OpenPalette => {
+                if self.palette.is_none() {
+                    self.palette = Some(PaletteState::default());
+                }
+                return cosmic::widget::text_input::focus(views::palette_input_id());
+            }
+            Message::ClosePalette => {
+                self.palette = None;
+            }
+            Message::PaletteQuery(query) => {
+                if let Some(p) = self.palette.as_mut() {
+                    p.query = query;
+                    p.cursor = 0;
+                }
+            }
+            Message::PaletteMove(delta) => {
+                if let Some(p) = self.palette.as_mut() {
+                    p.cursor = moved_cursor(p.cursor, delta, chrome::flat_results(&p.query).len());
+                }
+            }
+            Message::PaletteActivate { run } => {
+                return self.activate_palette(run);
+            }
+            Message::PaletteClick(idx) => {
+                let Some(p) = self.palette.as_mut() else {
+                    return Task::none();
+                };
+                p.cursor = idx;
+                // Clique = Enter: vai à seção. Executar a ação só com Ctrl+Enter.
+                return self.activate_palette(false);
+            }
+            Message::OpenNative(page) => {
+                // Destacado e sem esperar o fim; só avisa se nem abriu.
+                let msg = data::spawn_app("cosmic-settings", &[page], "COSMIC Settings");
+                if legacy_kind(&msg) == ToastKind::Error {
+                    self.toast_legacy(msg);
+                }
+            }
+            Message::JumpTo(group) => {
+                return self.jump_to(group);
+            }
+            Message::ToggleAdvanced => {
+                self.advanced_open = !self.advanced_open;
+            }
+            // Moldura: avisos e desfazer
+            Message::DismissToast(id) => {
+                self.toasts.dismiss(id);
+            }
+            Message::Tick => {
+                self.toasts.expire(Instant::now());
+            }
+            Message::Undo(idx) => {
+                let Some(undo) = self.recent.take_undo(idx) else {
+                    return Task::none();
+                };
+                self.undoing = true;
+                let task = self.update(undo);
+                self.undoing = false;
+                self.toast(ToastKind::Info, "Alteração desfeita.");
+                return task;
+            }
+            Message::UndoAsProfile(kind, inner) => {
+                let editing = self.editing_profile;
+                self.editing_profile = kind;
+                let task = self.update(*inner);
+                self.editing_profile = editing;
+                return task;
+            }
+            // Moldura: métricas da Visão geral
+            Message::MetricsTick => {
+                if self.section == Section::Home {
+                    return self.read_metrics();
+                }
+            }
+            Message::MetricsRead(now) => {
+                self.metrics_inflight = false;
+                if self.section == Section::Home {
+                    if let Some(prev) = &self.last_reading {
+                        self.metrics = Some(metrics::compute(
+                            prev,
+                            &now,
+                            now.gpu.as_ref(),
+                            self.monitor_settings.rest_watts as f32,
+                            self.monitor_settings.tariff.unwrap_or(0.0) as f32,
+                        ));
+                    }
+                    self.last_reading = Some(*now);
+                }
+            }
+            Message::WindowFocus(focused) => {
+                self.focused = focused;
             }
             Message::None => {}
         }
@@ -1731,6 +2205,21 @@ impl cosmic::Application for ControlPanel {
                 _ => None,
             }));
         }
+        subs.push(event::listen_with(shell_event));
+        if self.palette.is_some() {
+            subs.push(event::listen_with(palette_key));
+        }
+        if !self.toasts.visible().is_empty() {
+            subs.push(iced::time::every(TOAST_TICK).map(|_| Message::Tick));
+        }
+        if self.section == Section::Home {
+            let every = if self.focused {
+                metrics::POLL_FOCUSED
+            } else {
+                metrics::POLL_UNFOCUSED
+            };
+            subs.push(iced::time::every(every).map(|_| Message::MetricsTick));
+        }
         Subscription::batch(subs)
     }
 
@@ -1740,5 +2229,133 @@ impl cosmic::Application for ControlPanel {
 
     fn on_close_requested(&self, _id: window::Id) -> Option<Message> {
         None
+    }
+}
+
+/// Atalhos globais e foco da janela. `Captured` = um campo de texto já tratou a tecla.
+fn shell_event(ev: iced::Event, status: event::Status, _id: window::Id) -> Option<Message> {
+    use iced::keyboard::{Event as Key, Key as Pressed, key::Named};
+    match ev {
+        iced::Event::Window(window::Event::Focused) => Some(Message::WindowFocus(true)),
+        iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(false)),
+        iced::Event::Keyboard(Key::KeyPressed { key, modifiers, .. }) => match key.as_ref() {
+            Pressed::Character("k" | "K") if modifiers.control() => Some(Message::OpenPalette),
+            // "/" só quando nenhum campo de texto o consumiu como caractere digitado.
+            Pressed::Character("/") if status == event::Status::Ignored && !modifiers.control() => {
+                Some(Message::OpenPalette)
+            }
+            Pressed::Named(Named::Escape) if status == event::Status::Ignored => {
+                Some(Message::ClosePalette)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Teclas da paleta (só assinadas com a paleta aberta). Valem mesmo com o campo de busca
+/// focado, que captura Enter e as setas; por isso a paleta não deve ligar `on_submit`.
+fn palette_key(ev: iced::Event, _status: event::Status, _id: window::Id) -> Option<Message> {
+    use iced::keyboard::{Event as Key, Key as Pressed, key::Named};
+    let iced::Event::Keyboard(Key::KeyPressed { key, modifiers, .. }) = ev else {
+        return None;
+    };
+    match key.as_ref() {
+        Pressed::Named(Named::Escape) => Some(Message::ClosePalette),
+        Pressed::Named(Named::ArrowDown) => Some(Message::PaletteMove(1)),
+        Pressed::Named(Named::ArrowUp) => Some(Message::PaletteMove(-1)),
+        Pressed::Named(Named::Enter) => Some(Message::PaletteActivate { run: modifiers.control() }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_bar_label_says_what_the_button_does() {
+        assert_eq!(
+            apply_bar_label(&ApplyAction::ApplyHardware, PowerProfileKind::Balanced),
+            "Aplicar no hardware"
+        );
+        assert_eq!(
+            apply_bar_label(
+                &ApplyAction::ActivateAndApply(PowerProfileKind::Performance),
+                PowerProfileKind::Performance
+            ),
+            "Ativar e aplicar Desempenho"
+        );
+        assert_eq!(
+            apply_bar_label(
+                &ApplyAction::ActivateAndApply(PowerProfileKind::PowerSaver),
+                PowerProfileKind::PowerSaver
+            ),
+            "Ativar e aplicar Economia"
+        );
+    }
+
+    #[test]
+    fn save_status_counts_pending_items() {
+        assert_eq!(save_status(0), "Tudo salvo");
+        assert_eq!(save_status(1), "1 ajuste para aplicar");
+        assert_eq!(save_status(2), "2 ajustes para aplicar");
+    }
+
+    #[test]
+    fn palette_cursor_wraps_and_survives_empty_results() {
+        assert_eq!(moved_cursor(0, 1, 3), 1);
+        assert_eq!(moved_cursor(2, 1, 3), 0);
+        assert_eq!(moved_cursor(0, -1, 3), 2);
+        assert_eq!(moved_cursor(4, 1, 0), 0);
+        assert_eq!(moved_cursor(1, 0, 1), 0);
+    }
+
+    #[test]
+    fn failed_apply_keeps_pending_and_succeeded_apply_clears_it() {
+        let mut cfg = PowerProfilesConfig::defaults_for(false, false);
+        let kind = PowerProfileKind::Balanced;
+        let mut applied = Applied::default();
+        applied.mark_power(kind, cfg.get(kind));
+        cfg.get_mut(kind).boost = !cfg.get(kind).boost;
+        assert!(pending::power_dirty(&cfg, &applied, kind));
+        let what = Applying::Power(kind, Box::new(cfg.get(kind).clone()));
+
+        // pkexec cancelado: nada é marcado, a pendência continua e o aviso é de erro.
+        let (toast, text) = settle_apply(&mut applied, &what, Err("economia-energia falhou: cancelado".into()));
+        assert_eq!(toast, ToastKind::Error);
+        assert!(text.contains("cancelado"));
+        assert!(pending::power_dirty(&cfg, &applied, kind));
+
+        let (toast, _) = settle_apply(&mut applied, &what, Ok("Plano aplicado.".into()));
+        assert_eq!(toast, ToastKind::Success);
+        assert!(!pending::power_dirty(&cfg, &applied, kind));
+    }
+
+    #[test]
+    fn failed_osd_restart_keeps_osd_pending() {
+        let saved = osd_config::Config::default();
+        let mut applied = Applied::default();
+        applied.mark_osd(&saved);
+        let edited = osd_config::Config { battery_low: saved.battery_low - 1, ..saved.clone() };
+        assert!(pending::osd_pending(&edited, &applied));
+        let what = Applying::Osd(Box::new(edited.clone()));
+
+        let (toast, _) = settle_apply(&mut applied, &what, Err("Falha ao reiniciar logi-osd.service".into()));
+        assert_eq!(toast, ToastKind::Error);
+        assert!(pending::osd_pending(&edited, &applied));
+
+        let (toast, text) = settle_apply(&mut applied, &what, Ok("Serviço logi-osd.service reiniciado.".into()));
+        assert_eq!(toast, ToastKind::Success);
+        assert!(text.contains("reiniciado"));
+        assert!(!pending::osd_pending(&edited, &applied));
+    }
+
+    #[test]
+    fn legacy_prefixes_pick_the_toast_kind() {
+        assert_eq!(legacy_kind("✓ Plano aplicado."), ToastKind::Success);
+        assert_eq!(legacy_kind("Falha ao reiniciar x"), ToastKind::Error);
+        assert_eq!(legacy_kind("Não foi possível abrir Hot Edge: x"), ToastKind::Error);
+        assert_eq!(legacy_kind("Brave iniciado."), ToastKind::Info);
     }
 }

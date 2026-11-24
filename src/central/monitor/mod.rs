@@ -9,9 +9,9 @@ mod chart;
 mod dots;
 pub(crate) mod config;
 mod energy;
-mod gpu_share;
+pub(crate) mod gpu_share;
 mod panels;
-mod sample;
+pub(crate) mod sample;
 pub(crate) mod texts;
 pub(crate) mod weather;
 
@@ -522,12 +522,7 @@ impl Monitor {
                 .cpu
                 .map_or(dt, |t| new.at.duration_since(t).as_secs_f32().max(0.001));
             let busy = |a: &sample::CpuTimes, b: &sample::CpuTimes| {
-                let total = b.total.saturating_sub(a.total);
-                if total == 0 {
-                    0.0
-                } else {
-                    b.busy.saturating_sub(a.busy) as f32 / total as f32 * 100.0
-                }
+                crate::shared::rates::busy_pct((a.busy, a.total), (b.busy, b.total))
             };
             if !old.cpu.is_empty() {
                 let mut cpus = old.cpu.iter().zip(&new.cpu).map(|(a, b)| busy(a, b));
@@ -535,13 +530,9 @@ impl Monitor {
                 rates.cores = cpus.collect();
             }
             if let (Some(a), Some(b)) = (&old.rapl, &new.rapl) {
-                let used: u64 = a
-                    .iter()
-                    .zip(b)
-                    .map(|((a, range), (b, _))| if b >= a { b - a } else { range - a + b })
-                    .sum();
+                let used = crate::shared::rates::rapl_used_uj(a, b);
                 joules += used as f64 / 1e6;
-                rates.cpu_watts = Some(used as f32 / 1e6 / dt_cpu);
+                rates.cpu_watts = Some(crate::shared::rates::uj_to_watts(used, dt_cpu));
             }
             self.timers.cpu = Some(new.at);
         } else {
