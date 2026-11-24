@@ -2070,7 +2070,9 @@ fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
         .align_y(Alignment::Center),
     ));
 
-    // Reorderable system bar icons as a phone-style color-coded tile grid
+    // Reorderable system bar icons split into two clean phone-style grids:
+    // 1. Active/visible icons on the bar (in exact bar order, draggable)
+    // 2. Hidden (`Nunca`) icons tucked cleanly underneath (1 click to add back)
     let ordered = app.panel_icons.ordered(&app.reorderable_bar_items());
     let dragging = app.dragging_bar;
     let legend = widget::row::with_children(vec![
@@ -2085,42 +2087,67 @@ fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
     .spacing(6)
     .align_y(Alignment::Center);
 
-    let tiles: Vec<Element<'_, Message>> = ordered
+    let make_bar_tile = |item: crate::central::layout::BarItem| -> Element<'_, Message> {
+        let current = app.panel_icons.get(item);
+        let choices = item.choices();
+        let next = choices
+            .iter()
+            .position(|&c| c == current)
+            .map(|idx| choices[(idx + 1) % choices.len()])
+            .unwrap_or(choices[0]);
+        let (tone, status_label) = match current {
+            BarShow::Always => (TileTone::Teal, "Sempre"),
+            BarShow::Active => (TileTone::Amber, "Ativo"),
+            BarShow::Never => (TileTone::Muted, "Nunca"),
+        };
+        draggable_grid_tile(
+            item.icon(),
+            item.name(),
+            status_label,
+            tone,
+            dragging == Some(item),
+            dragging.is_some(),
+            Message::SetBarIcon(item, next),
+            Message::DragBarStart(item),
+            Message::DragBarOver(item),
+        )
+    };
+
+    let (visible_items, hidden_items): (Vec<_>, Vec<_>) = ordered
         .into_iter()
-        .map(|item| {
-            let current = app.panel_icons.get(item);
-            let choices = item.choices();
-            let next = choices
-                .iter()
-                .position(|&c| c == current)
-                .map(|idx| choices[(idx + 1) % choices.len()])
-                .unwrap_or(choices[0]);
-            let (tone, status_label) = match current {
-                BarShow::Always => (TileTone::Teal, "Sempre"),
-                BarShow::Active => (TileTone::Amber, "Ativo"),
-                BarShow::Never => (TileTone::Muted, "Nunca"),
-            };
-            draggable_grid_tile(
-                item.icon(),
-                item.name(),
-                status_label,
-                tone,
-                dragging == Some(item),
-                dragging.is_some(),
-                Message::SetBarIcon(item, next),
-                Message::DragBarStart(item),
-                Message::DragBarOver(item),
-            )
-        })
-        .collect();
+        .partition(|&item| app.panel_icons.get(item) != BarShow::Never);
+
+    let mut bar_card_children: Vec<Element<'_, Message>> = vec![
+        widget::text::heading("Ícones na barra (na ordem exibida)").into(),
+        legend.into(),
+    ];
+    if visible_items.is_empty() {
+        bar_card_children.push(
+            widget::text::caption("Nenhum ícone ativo — clique em um card abaixo para adicionar.")
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+        );
+    } else {
+        let visible_tiles: Vec<Element<'_, Message>> =
+            visible_items.into_iter().map(&make_bar_tile).collect();
+        bar_card_children.push(tile_grid(visible_tiles, 4));
+    }
+
+    if !hidden_items.is_empty() {
+        bar_card_children.push(widget::divider::horizontal::default().into());
+        bar_card_children.push(
+            widget::text::caption("Ocultos da barra (clique para ativar)")
+                .font(cosmic::font::semibold())
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+        );
+        let hidden_tiles: Vec<Element<'_, Message>> =
+            hidden_items.into_iter().map(&make_bar_tile).collect();
+        bar_card_children.push(tile_grid(hidden_tiles, 4));
+    }
 
     items.push(card_box(
-        widget::column::with_children(vec![
-            widget::text::heading("Ícones do sistema na barra").into(),
-            legend.into(),
-            tile_grid(tiles, 4),
-        ])
-        .spacing(spacing.space_s),
+        widget::column::with_children(bar_card_children).spacing(spacing.space_s),
     ));
 
     // Saved Tray SNI hidden apps
