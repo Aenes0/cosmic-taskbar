@@ -991,12 +991,14 @@ impl cosmic::Application for Monitor {
                 }
             }
             Message::Edit(on) => {
-                self.editing = on;
-                self.asking_end = None;
-                if !on {
-                    self.timers.procs = None;
-                    return self.read();
+                if on {
+                    crate::central::app::spawn_control_panel_section(Some("monitor"));
+                    return self.close_hosted();
                 }
+                self.editing = false;
+                self.asking_end = None;
+                self.timers.procs = None;
+                return self.read();
             }
             Message::CycleCardMode(panel) => {
                 let next = self.settings.cycle_card_mode(panel);

@@ -321,6 +321,8 @@ pub enum Message {
     SetBarSpacing(BarSpacing),
     /// A page of COSMIC Settings, or all of it.
     Settings(Option<&'static str>),
+    /// Opens our native Control Panel directly on a specific section.
+    OpenControlPanel(&'static str),
     Screenshot,
     Lock,
     PowerOff,
@@ -1631,10 +1633,13 @@ fn resolve_self_exe() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from("cosmic-taskbar"))
 }
 
-fn spawn_control_panel() {
+pub(crate) fn spawn_control_panel_section(section: Option<&str>) {
     let exe = resolve_self_exe();
     let mut command = std::process::Command::new(&exe);
     command.arg("control-panel");
+    if let Some(sec) = section {
+        command.args(["--section", sec]);
+    }
     command.env_remove("ICED_BACKEND");
     command.env_remove("TOKIO_WORKER_THREADS");
     for (key, _) in std::env::vars_os() {
@@ -2648,8 +2653,12 @@ impl cosmic::Application for App {
             Message::Settings(page) => {
                 match page {
                     Some(subpage) => spawn("cosmic-settings", &[subpage]),
-                    None => spawn_control_panel(),
+                    None => spawn_control_panel_section(None),
                 }
+                return self.close_popup();
+            }
+            Message::OpenControlPanel(section) => {
+                spawn_control_panel_section(Some(section));
                 return self.close_popup();
             }
             Message::Screenshot => {

@@ -14,8 +14,8 @@ use crate::central::{
     layout::{Section as CentralSection, Show as BarShow},
     monitor::config::{
         BarItem as MonitorBarItem, BarMode as MonitorBarMode, CardMode as MonitorCardMode,
-        POLL_SECS_OPTIONS, PROCS_COUNT_OPTIONS, Panel as MonitorPanel,
-        PollComponent as MonitorPollComponent, ProcSort as MonitorProcSort, WEATHER_MINS_OPTIONS,
+        PROCS_COUNT_OPTIONS, Panel as MonitorPanel, PollComponent as MonitorPollComponent,
+        ProcSort as MonitorProcSort, WEATHER_MINS_OPTIONS,
     },
     notifications::config::{
         self as notif_cfg, NotifFormat, NotifPosition, TIMEOUT_OPTIONS, parse_hex_color,
@@ -43,12 +43,12 @@ fn dimmed(theme: &cosmic::Theme) -> iced::widget::text::Style {
 
 fn card_box<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     widget::container(content)
-        .padding(16)
+        .padding(18)
         .width(Length::Fill)
         .class(theme::Container::custom(|theme| {
             let c = card(theme.cosmic());
             let mut border_col: Color = theme.cosmic().background(theme.transparent).divider.into();
-            border_col.a *= 0.65;
+            border_col.a *= 0.55;
             widget::container::Style {
                 background: Some(Background::Color(c.base.into())),
                 text_color: Some(c.on.into()),
@@ -58,10 +58,69 @@ fn card_box<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message
                     width: crate::shared::tokens::HAIRLINE_WIDTH,
                     color: border_col,
                 },
+                shadow: iced::Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.14),
+                    offset: iced::Vector::new(0.0, 2.0),
+                    blur_radius: 10.0,
+                },
                 ..Default::default()
             }
         }))
         .into()
+}
+
+fn section_subtitle(sec: Section) -> &'static str {
+    match sec {
+        Section::Power => "Perfis de energia, bateria e tempos de tela/suspensão.",
+        Section::Bar => "Ícones da barra direita, espaçamento e apps em segundo plano.",
+        Section::Monitor => "Cartões do painel de medições à esquerda e tempos de atualização.",
+        Section::Central => "Seções e atalhos exibidos ao abrir o Central pelo relógio.",
+        Section::Notifications => "Posição, estilo, duração e comportamento dos avisos flutuantes.",
+        Section::DevicesOsd => "Avisos visuais na tela para teclado e mouse Logitech.",
+        Section::Camera => "Câmeras conectadas, microfone e privacidade de vídeo/áudio.",
+        Section::Network => "Conexão ativa, Wi-Fi, IP e diagnóstico rápido de rede.",
+        Section::Security => "Firewall, DNS criptografado, privacidade agora e blindagem.",
+        Section::Backup => "Backup diário Restic, snapshots Btrfs e sincronização.",
+        Section::Displays => "Brilho, escala, folga de janela dividida e foco de janelas.",
+        Section::Login => "Aparência da tela de bloqueio e login no boot.",
+        Section::Optional => "Componentes opcionais e integrações extras do ambiente.",
+        Section::System => "Serviços em segundo plano, atualizações e saúde do sistema.",
+    }
+}
+
+fn page_banner<'a>(sec: Section) -> Element<'a, Message> {
+    let badge = widget::container(widget::icon::icon(icon(sec.icon())).size(20))
+        .padding(10)
+        .class(theme::Container::custom(|theme| {
+            let mut acc: Color = theme.cosmic().accent_color().into();
+            let fg = acc;
+            acc.a = 0.16;
+            widget::container::Style {
+                background: Some(Background::Color(acc)),
+                icon_color: Some(fg),
+                border: iced::Border {
+                    radius: 10.0.into(),
+                    width: 1.0,
+                    color: Color { a: 0.35, ..fg },
+                },
+                ..Default::default()
+            }
+        }));
+    widget::row::with_children(vec![
+        badge.into(),
+        widget::column::with_children(vec![
+            widget::text::title4(sec.label()).into(),
+            widget::text::caption(section_subtitle(sec))
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+        ])
+        .spacing(2)
+        .width(Length::Fill)
+        .into(),
+    ])
+    .spacing(12)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 fn kv_row<'a>(label: &'a str, value: String) -> Element<'a, Message> {
@@ -292,6 +351,7 @@ pub fn view(app: &ControlPanel) -> Element<'_, Message> {
         );
     }
 
+    main_col.push(page_banner(app.section));
     let page_content = match app.section {
         Section::Power => power_view(app),
         Section::Bar => bar_view(app),
@@ -1923,6 +1983,7 @@ fn draggable_grid_tile<'a>(
     on_cycle: Message,
     on_drag_start: Message,
     on_drag_over: Message,
+    footer: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let (bg, border_col, _) = tone.colors();
     let grip = widget::mouse_area(
@@ -1960,8 +2021,12 @@ fn draggable_grid_tile<'a>(
     .class(theme::Button::Text)
     .on_press(on_cycle);
 
-    let tile_content = widget::column::with_children(vec![top_bar.into(), body_btn.into()])
-        .spacing(4)
+    let mut tile_rows: Vec<Element<'a, Message>> = vec![top_bar.into(), body_btn.into()];
+    if let Some(foot) = footer {
+        tile_rows.push(foot);
+    }
+    let tile_content = widget::column::with_children(tile_rows)
+        .spacing(6)
         .width(Length::Fill);
 
     let card_el = widget::container(tile_content)
@@ -2040,6 +2105,18 @@ fn monitor_panel_icon(panel: MonitorPanel) -> &'static str {
     }
 }
 
+fn monitor_poll_for(panel: MonitorPanel) -> Option<MonitorPollComponent> {
+    match panel {
+        MonitorPanel::Cpu => Some(MonitorPollComponent::Cpu),
+        MonitorPanel::Gpu => Some(MonitorPollComponent::Gpu),
+        MonitorPanel::Memory => Some(MonitorPollComponent::Ram),
+        MonitorPanel::Disks => Some(MonitorPollComponent::Disk),
+        MonitorPanel::Network => Some(MonitorPollComponent::Net),
+        MonitorPanel::Processes => Some(MonitorPollComponent::Procs),
+        MonitorPanel::Energy | MonitorPanel::Sensors | MonitorPanel::System => None,
+    }
+}
+
 fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
     let spacing = theme::spacing();
     let mut items: Vec<Element<'_, Message>> = vec![
@@ -2110,6 +2187,7 @@ fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
             Message::SetBarIcon(item, next),
             Message::DragBarStart(item),
             Message::DragBarOver(item),
+            None,
         )
     };
 
@@ -2317,6 +2395,25 @@ fn monitor_view(app: &ControlPanel) -> Element<'_, Message> {
                 MonitorCardMode::Minimal => (TileTone::Amber, "Reduzido"),
                 MonitorCardMode::Hidden => (TileTone::Muted, "Oculto"),
             };
+            let poll_footer = monitor_poll_for(panel).map(|comp| {
+                let secs = app.monitor_settings.component_poll(comp).clamp(1, 10);
+                widget::row::with_children(vec![
+                    widget::text::caption(format!("{secs}s"))
+                        .size(11)
+                        .class(theme::Text::Custom(dimmed))
+                        .width(Length::Fixed(26.0))
+                        .into(),
+                    widget::slider(1.0_f32..=10.0_f32, secs as f32, move |v| {
+                        Message::MonitorComponentPoll(comp, v.round() as u64)
+                    })
+                    .step(1.0_f32)
+                    .width(Length::Fill)
+                    .into(),
+                ])
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .into()
+            });
             draggable_grid_tile(
                 monitor_panel_icon(panel),
                 panel.name(),
@@ -2327,7 +2424,20 @@ fn monitor_view(app: &ControlPanel) -> Element<'_, Message> {
                 Message::MonitorCardMode(panel, next),
                 Message::MonitorDragStart(panel),
                 Message::MonitorDragOver(panel),
+                poll_footer,
             )
+        })
+        .collect();
+
+    let weather_poll = app.monitor_settings.component_poll(MonitorPollComponent::Weather);
+    let weather_chips: Vec<Element<'_, Message>> = WEATHER_MINS_OPTIONS
+        .into_iter()
+        .map(|mins| {
+            button::custom(widget::text::caption(format!("{mins} min")))
+                .padding([4, 9])
+                .class(chip_class(weather_poll == mins))
+                .on_press(Message::MonitorComponentPoll(MonitorPollComponent::Weather, mins))
+                .into()
         })
         .collect();
 
@@ -2336,55 +2446,20 @@ fn monitor_view(app: &ControlPanel) -> Element<'_, Message> {
             widget::text::heading("Cartões do painel da esquerda").into(),
             mon_legend.into(),
             tile_grid(mon_tiles, 3),
+            widget::divider::horizontal::default().into(),
+            widget::row::with_children(vec![
+                widget::text::caption("Atualização do Clima")
+                    .class(theme::Text::Custom(dimmed))
+                    .width(Length::Fill)
+                    .into(),
+                widget::row::with_children(weather_chips).spacing(4).into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
         ])
         .spacing(spacing.space_s),
     ));
-
-    // 3. Individual component refresh intervals
-    let mut comp_rows: Vec<Element<'_, Message>> = vec![
-        widget::text::heading("Tempos de atualização por componente").into(),
-        widget::text::caption(
-            "Controle individualmente o intervalo de coleta de cada sensor quando o painel está aberto.",
-        )
-        .class(theme::Text::Custom(dimmed))
-        .into(),
-    ];
-    for comp in MonitorPollComponent::ALL {
-        let current = app.monitor_settings.component_poll(comp);
-        let chips: Vec<Element<'_, Message>> = if comp == MonitorPollComponent::Weather {
-            WEATHER_MINS_OPTIONS
-                .into_iter()
-                .map(|mins| {
-                    button::custom(widget::text::caption(format!("{mins} min")))
-                        .padding([4, 9])
-                        .class(chip_class(current == mins))
-                        .on_press(Message::MonitorComponentPoll(comp, mins))
-                        .into()
-                })
-                .collect()
-        } else {
-            POLL_SECS_OPTIONS
-                .into_iter()
-                .map(|secs| {
-                    button::custom(widget::text::caption(format!("{secs} s")))
-                        .padding([4, 9])
-                        .class(chip_class(current == secs))
-                        .on_press(Message::MonitorComponentPoll(comp, secs))
-                        .into()
-                })
-                .collect()
-        };
-        comp_rows.push(
-            widget::row::with_children(vec![
-                widget::text::body(comp.name()).width(Length::Fill).into(),
-                widget::row::with_children(chips).spacing(4).into(),
-            ])
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .into(),
-        );
-    }
-    items.push(card_box(widget::column::with_children(comp_rows).spacing(spacing.space_xs)));
 
     // 4. Processes count & sort column
     let count_chips = widget::row::with_children(

@@ -2200,7 +2200,7 @@ impl App {
         };
         // A thin line, unless the battery's pill needs the room.
         let row = row
-            .push(small("document-edit-symbolic", t.edit, Message::ShowPage(Page::Edit)))
+            .push(small("document-edit-symbolic", t.edit, Message::OpenControlPanel("central")))
             .push(small("system-shutdown-symbolic", t.session, Message::ShowPage(Page::Session)))
             .push(small("emblem-system-symbolic", t.settings, Message::Settings(None)));
         if self.battery.is_some() {

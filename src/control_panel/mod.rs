@@ -138,6 +138,26 @@ impl Section {
         }
     }
 
+    pub fn from_arg(arg: &str) -> Option<Section> {
+        match arg.trim().to_ascii_lowercase().as_str() {
+            "power" | "energia" => Some(Section::Power),
+            "bar" | "barra" | "tray" => Some(Section::Bar),
+            "monitor" => Some(Section::Monitor),
+            "central" => Some(Section::Central),
+            "notifications" | "notificacoes" => Some(Section::Notifications),
+            "osd" | "devices" => Some(Section::DevicesOsd),
+            "camera" | "audio" => Some(Section::Camera),
+            "network" | "rede" => Some(Section::Network),
+            "security" | "seguranca" => Some(Section::Security),
+            "backup" => Some(Section::Backup),
+            "displays" | "monitores" => Some(Section::Displays),
+            "login" | "greeter" => Some(Section::Login),
+            "optional" | "opcionais" => Some(Section::Optional),
+            "system" | "sistema" => Some(Section::System),
+            _ => None,
+        }
+    }
+
     pub fn icon(self) -> &'static str {
         match self {
             Section::Power => "battery-good-symbolic",
@@ -395,10 +415,21 @@ pub struct ControlPanel {
 
 pub fn run() -> cosmic::iced::Result {
     crate::shared::logging::init("warn,cosmic_taskbar=info", &[]);
+    let mut initial_section: Option<Section> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--section"
+            && let Some(val) = args.next()
+        {
+            initial_section = Section::from_arg(&val);
+        } else if let Some(val) = arg.strip_prefix("--section=") {
+            initial_section = Section::from_arg(val);
+        }
+    }
     let settings = cosmic::app::Settings::default()
-        .size(iced::Size::new(1040.0, 720.0))
+        .size(iced::Size::new(1080.0, 740.0))
         .size_limits(iced::Limits::NONE.min_width(780.0).min_height(540.0));
-    cosmic::app::run::<ControlPanel>(settings, ())
+    cosmic::app::run::<ControlPanel>(settings, initial_section)
 }
 
 impl ControlPanel {
@@ -481,10 +512,10 @@ impl ControlPanel {
 impl cosmic::Application for ControlPanel {
     type Executor = cosmic::SingleThreadExecutor;
     type Message = Message;
-    type Flags = ();
+    type Flags = Option<Section>;
     const APP_ID: &'static str = APP_ID;
 
-    fn init(mut core: app::Core, _flags: ()) -> (Self, app::Task<Message>) {
+    fn init(mut core: app::Core, initial_section: Option<Section>) -> (Self, app::Task<Message>) {
         core.window.show_headerbar = true;
         let monitor_settings = MonitorSettings::load();
         let tariff_input = monitor_settings
@@ -501,7 +532,7 @@ impl cosmic::Application for ControlPanel {
         let cpu_topology = power_config::detect_cpu_topology();
         let app = Self {
             core,
-            section: Section::Power,
+            section: initial_section.unwrap_or(Section::Power),
             snapshot: data::SystemSnapshot {
                 hardware,
                 ..data::SystemSnapshot::default()
