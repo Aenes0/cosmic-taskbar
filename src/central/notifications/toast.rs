@@ -328,6 +328,143 @@ fn render_one<'a, M: Clone + 'static>(
         .into()
 }
 
+/// Transient centered OSD pill (e.g. `logi-osd` CapsLock, NumLock, FnLock,
+/// keyboard backlight dots, Easy-Switch host, charging).
+#[derive(Clone, Debug)]
+pub struct OsdPill {
+    pub icon: String,
+    pub summary: String,
+    pub body: String,
+    pub tone: String,
+    pub dots_on: i32,
+    pub dots_total: i32,
+    pub expires_at: Instant,
+}
+
+impl OsdPill {
+    pub fn is_expired(&self) -> bool {
+        Instant::now() >= self.expires_at
+    }
+}
+
+fn osd_icon_name(raw: &str) -> &str {
+    match raw {
+        "logi-caps-lock" | "logi-num-lock" | "logi-insert" | "logi-fn-lock" => {
+            "input-keyboard-symbolic"
+        }
+        "logi-backlight" => "display-brightness-symbolic",
+        "logi-battery" => "battery-low-symbolic",
+        "logi-battery-charging" => "battery-good-charging-symbolic",
+        "logi-switch" => "network-wireless-symbolic",
+        "" => "input-keyboard-symbolic",
+        other => other,
+    }
+}
+
+/// Renders the centered capsule OSD pill — visually distinct from regular
+/// corner notification cards.
+pub fn osd_view<'a, M: 'a>(pill: &'a OsdPill) -> Element<'a, M> {
+    let tone = pill.tone.clone();
+    let icon_sym = osd_icon_name(&pill.icon);
+    let tone_color = move |theme: &cosmic::Theme| -> Color {
+        match tone.as_str() {
+            "apagado" => Color::from_rgba(0.68, 0.70, 0.76, 0.90),
+            "atencao" => Color::from_rgb(0.98, 0.75, 0.24),
+            "critico" => Color::from_rgb(0.95, 0.32, 0.34),
+            _ => theme.cosmic().accent_color().into(),
+        }
+    };
+
+    let mut content: Vec<Element<'a, M>> = vec![
+        widget::icon::icon(icon(icon_sym)).size(24).into(),
+        widget::text::title4(pill.summary.as_str()).into(),
+    ];
+
+    if pill.dots_total > 0 {
+        let total = pill.dots_total.clamp(1, 10);
+        let on = pill.dots_on.clamp(0, total);
+        let dots: Vec<Element<'a, M>> = (0..total)
+            .map(|i| {
+                let lit = i < on;
+                widget::container(widget::space::horizontal().width(Length::Fixed(10.0)))
+                    .width(Length::Fixed(10.0))
+                    .height(Length::Fixed(10.0))
+                    .class(theme::Container::custom(move |theme| {
+                        let c: Color = if lit {
+                            theme.cosmic().accent_color().into()
+                        } else {
+                            Color::from_rgba(1.0, 1.0, 1.0, 0.22)
+                        };
+                        widget::container::Style {
+                            background: Some(Background::Color(c)),
+                            border: iced::Border {
+                                radius: 5.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }
+                    }))
+                    .into()
+            })
+            .collect();
+        content.push(widget::row::with_children(dots).spacing(6).align_y(Alignment::Center).into());
+    } else if !pill.body.is_empty() {
+        let tone_badge = pill.tone.clone();
+        content.push(
+            widget::container(widget::text::body(pill.body.as_str()))
+                .padding([3, 12])
+                .class(theme::Container::custom(move |theme| {
+                    let accent: Color = match tone_badge.as_str() {
+                        "apagado" => Color::from_rgb(0.60, 0.62, 0.68),
+                        "atencao" => Color::from_rgb(0.98, 0.75, 0.24),
+                        "critico" => Color::from_rgb(0.95, 0.32, 0.34),
+                        _ => theme.cosmic().accent_color().into(),
+                    };
+                    let mut bg = accent;
+                    bg.a = 0.22;
+                    widget::container::Style {
+                        background: Some(Background::Color(bg)),
+                        text_color: Some(accent),
+                        border: iced::Border {
+                            radius: 12.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                }))
+                .into(),
+        );
+    }
+
+    widget::container(
+        widget::row::with_children(content)
+            .spacing(12)
+            .align_y(Alignment::Center),
+    )
+    .padding([14, 22])
+    .class(theme::Container::custom(move |theme| {
+        let mut border = tone_color(theme);
+        border.a = 0.75;
+        widget::container::Style {
+            background: Some(Background::Color(Color::from_rgba(0.08, 0.09, 0.12, 0.90))),
+            text_color: Some(Color::from_rgb(0.95, 0.96, 0.98)),
+            icon_color: Some(tone_color(theme)),
+            border: iced::Border {
+                radius: 26.0.into(),
+                width: 1.5,
+                color: border,
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+                offset: iced::Vector::new(0.0, 8.0),
+                blur_radius: 24.0,
+            },
+            ..Default::default()
+        }
+    }))
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

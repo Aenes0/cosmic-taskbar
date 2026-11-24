@@ -256,6 +256,18 @@ trait History {
     fn seen(&self) -> zbus::Result<()>;
     #[zbus(signal)]
     fn changed(&self) -> zbus::Result<()>;
+    #[allow(clippy::too_many_arguments)]
+    #[zbus(signal)]
+    fn osd(
+        &self,
+        icon: String,
+        summary: String,
+        body: String,
+        tone: String,
+        dots_on: i32,
+        dots_total: i32,
+        timeout_ms: i32,
+    ) -> zbus::Result<()>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -321,6 +333,47 @@ pub fn subscription() -> cosmic::iced::Subscription<()> {
                         }
                     }
                     Err(err) => tracing::warn!("cannot follow the notifications service: {err}"),
+                }
+                tokio::time::sleep(RECONNECT).await;
+            }
+        })
+    })
+}
+
+/// Stream of centered transient OSD pills (`x-estilo = "osd"`, e.g. `logi-osd`).
+pub fn osd_subscription() -> cosmic::iced::Subscription<toast::OsdPill> {
+    use cosmic::iced::{Subscription, stream};
+    use futures::{SinkExt, StreamExt, channel::mpsc};
+
+    Subscription::run_with("notification-osd", |_| {
+        stream::channel(8, |mut output: mpsc::Sender<toast::OsdPill>| async move {
+            loop {
+                let listening = async {
+                    let conn = zbus::Connection::session().await?;
+                    HistoryProxy::new(&conn).await?.receive_osd().await
+                };
+                match listening.await {
+                    Ok(mut pills) => {
+                        while let Some(sig) = pills.next().await {
+                            if let Ok(args) = sig.args() {
+                                let timeout_ms = (*args.timeout_ms()).clamp(400, 10_000) as u64;
+                                let pill = toast::OsdPill {
+                                    icon: args.icon().clone(),
+                                    summary: args.summary().clone(),
+                                    body: args.body().clone(),
+                                    tone: args.tone().clone(),
+                                    dots_on: *args.dots_on(),
+                                    dots_total: *args.dots_total(),
+                                    expires_at: std::time::Instant::now()
+                                        + Duration::from_millis(timeout_ms),
+                                };
+                                if output.send(pill).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => tracing::warn!("cannot follow OSD signals: {err}"),
                 }
                 tokio::time::sleep(RECONNECT).await;
             }

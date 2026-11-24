@@ -998,41 +998,308 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
     let spacing = theme::spacing();
     let snap = &app.snapshot;
     let opt = &snap.optional;
+    let sec = &snap.security;
+    let repo_dir = snap
+        .repo
+        .path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "$HOME/Projetos/cosmic-taskbar".to_owned());
+    let harden_script = format!("\"{repo_dir}/extras/security/apply-hardening.sh\"");
 
     let mut items: Vec<Element<'_, Message>> = vec![
         widget::row::with_children(vec![
             widget::text::title3("Segurança & Privacidade")
                 .width(Length::Fill)
                 .into(),
-            action_btn("Atualizar status", Message::RefreshAll, false),
+            status_badge(
+                sec.score >= 80,
+                if sec.score >= 90 {
+                    "Postura Excelente"
+                } else {
+                    "Postura Boa"
+                },
+                "Pode endurecer",
+            ),
+            action_btn("Reauditar agora", Message::RefreshAll, false),
         ])
         .spacing(8)
         .align_y(Alignment::Center)
         .into(),
     ];
 
-    // 1. MAC Rotativo card
-    let mac_toggle_label = if snap.mac_rotativo_active {
-        "Desativar timer (sudo)"
+    // Summary score banner
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading(format!(
+                    "Índice de Privacidade & Segurança: {}/100",
+                    sec.score
+                ))
+                .width(Length::Fill)
+                .into(),
+                widget::text::caption(format!(
+                    "LSMs ativos: {}",
+                    if sec.lsm_list.is_empty() {
+                        "—"
+                    } else {
+                        sec.lsm_list.as_str()
+                    }
+                ))
+                .class(theme::Text::Custom(dimmed))
+                .into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "Auditoria em tempo real do firewall, DNS cifrado (DoT), MAC/NetworkManager, hardening do kernel Linux (sysctl), superfície de portas e privacidade de hardware.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 1. Kill Switch, VPN & Firewall (UFW) card
+    let exposed_label = if sec.exposed_ports_count == 0 {
+        "0 expostas".to_owned()
     } else {
-        "Ativar timer (sudo)"
+        format!("{} exposta(s)", sec.exposed_ports_count)
+    };
+    let killswitch_label = if sec.networking_enabled {
+        "Modo Pânico: Cortar Rede"
+    } else {
+        "Reativar Rede"
+    };
+    let killswitch_cmd = if sec.networking_enabled {
+        "nmcli networking off && echo 'Rede cortada (Kill Switch ativo).' ".to_owned()
+    } else {
+        "nmcli networking on && echo 'Rede reativada.' ".to_owned()
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Firewall (UFW), VPN & Kill Switch de Rede")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    sec.ufw_active,
+                    "UFW Ativo",
+                    if sec.ufw_installed {
+                        "UFW Inativo"
+                    } else {
+                        "UFW Não instalado"
+                    },
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Estado da rede (Kill Switch / Modo Pânico)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(sec.networking_enabled, "Conectada", "CORTADA"),
+                action_btn(
+                    killswitch_label,
+                    Message::OpenInTerminal("Kill Switch de Rede", killswitch_cmd),
+                    !sec.networking_enabled,
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Túnel VPN ativo (WireGuard / OpenVPN / Tailscale)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    !sec.vpn_iface.is_empty(),
+                    "VPN Ativa",
+                    "Sem VPN",
+                ),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Portas TCP ouvindo na rede externa (0.0.0.0 / [::])")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    sec.exposed_ports_count == 0,
+                    "Nenhuma exposta",
+                    "Há portas expostas",
+                ),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            kv_row(
+                "Resumo de portas TCP LISTEN",
+                format!("{exposed_label} · {} apenas locais (127.0.0.1)", sec.local_ports_count),
+            ),
+            widget::row::with_children(vec![
+                action_btn(
+                    "Ativar UFW restrito",
+                    Message::OpenInTerminal(
+                        "Firewall UFW Restrito",
+                        format!("sudo {harden_script} --firewall-strict"),
+                    ),
+                    !sec.ufw_active,
+                ),
+                action_btn(
+                    "Regras UFW",
+                    Message::OpenInTerminal("Regras UFW", "sudo ufw status verbose".to_owned()),
+                    false,
+                ),
+                action_btn(
+                    "Conexões externas ao vivo",
+                    Message::OpenInTerminal(
+                        "Conexões Ativas",
+                        "sudo ss -tunp state established".to_owned(),
+                    ),
+                    false,
+                ),
+                action_btn(
+                    "Portas abertas",
+                    Message::OpenInTerminal("Portas Abertas", "sudo ss -tulnp".to_owned()),
+                    false,
+                ),
+            ])
+            .spacing(8)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 2. Private DNS (DoT) & Anti-Tracker Hosts card
+    let hosts_btn_lbl = if sec.hosts_adblock_active {
+        "Remover bloqueio (/etc/hosts)"
+    } else {
+        "Ativar bloqueio trackers/malware"
+    };
+    let hosts_btn_cmd = if sec.hosts_adblock_active {
+        format!("sudo {harden_script} --hosts-undo")
+    } else {
+        format!("sudo {harden_script} --hosts-adblock")
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("DNS Privado (DoT) & Bloqueio de Trackers no Sistema")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    sec.dns_over_tls,
+                    "DoT Ativo",
+                    if sec.resolved_active {
+                        "Sem DoT"
+                    } else {
+                        "resolved inativo"
+                    },
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            kv_row(
+                "Servidor DNS atual",
+                if sec.dns_server.is_empty() {
+                    "Desconhecido".to_owned()
+                } else {
+                    sec.dns_server.clone()
+                },
+            ),
+            widget::row::with_children(vec![
+                widget::text::body("Proteção contra vazamento local (LLMNR & mDNS)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    sec.llmnr_disabled && sec.mdns_disabled,
+                    "Bloqueados (-LLMNR -mDNS)",
+                    "Parcial / Ativo",
+                ),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Bloqueio de trackers/malware em todos os apps (/etc/hosts StevenBlack)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(sec.hosts_adblock_active, "Ativo", "Desativado"),
+                action_btn(
+                    hosts_btn_lbl,
+                    Message::OpenInTerminal("Hosts Anti-Tracker", hosts_btn_cmd),
+                    false,
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                action_btn(
+                    "Quad9 DoT (malware-block)",
+                    Message::OpenInTerminal(
+                        "DNS Quad9 DoT",
+                        format!("sudo {harden_script} --dns quad9"),
+                    ),
+                    false,
+                ),
+                action_btn(
+                    "Cloudflare DoT (1.1.1.1)",
+                    Message::OpenInTerminal(
+                        "DNS Cloudflare DoT",
+                        format!("sudo {harden_script} --dns cloudflare"),
+                    ),
+                    false,
+                ),
+                action_btn(
+                    "Mullvad DoT (zero-log)",
+                    Message::OpenInTerminal(
+                        "DNS Mullvad DoT",
+                        format!("sudo {harden_script} --dns mullvad"),
+                    ),
+                    false,
+                ),
+            ])
+            .spacing(8)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 3. MAC Rotativo & NetworkManager Privacy card
+    let mac_toggle_label = if snap.mac_rotativo_active {
+        "Desativar timer MAC"
+    } else {
+        "Ativar timer MAC"
     };
     let mac_toggle_cmd = if snap.mac_rotativo_active {
         "sudo systemctl disable --now mac-rotativo.timer".to_owned()
     } else {
         "sudo systemctl enable --now mac-rotativo.timer".to_owned()
     };
+    let nm_btn_label = if sec.nm_privacy_conf {
+        "Remover privacidade NM"
+    } else {
+        "Ativar privacidade NM (sem telemetria + MAC/IPv6)"
+    };
+    let nm_btn_cmd = if sec.nm_privacy_conf {
+        format!("sudo {harden_script} --nm-privacy-undo")
+    } else {
+        format!("sudo {harden_script} --nm-privacy")
+    };
     items.push(card_box(
         widget::column::with_children(vec![
             widget::row::with_children(vec![
-                widget::text::heading("MAC Rotativo (Rede Cabeada)")
+                widget::text::heading("MAC Rotativo & Privacidade do NetworkManager")
                     .width(Length::Fill)
                     .into(),
                 status_badge(
                     snap.mac_rotativo_active,
-                    "Timer ativo",
+                    "MAC Timer ativo",
                     if opt.mac_rotativo_installed {
-                        "Instalado (inativo)"
+                        "MAC Timer inativo"
                     } else {
                         "Não instalado"
                     },
@@ -1041,10 +1308,14 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
             .spacing(8)
             .align_y(Alignment::Center)
             .into(),
-            widget::text::caption(
-                "Reativa a conexão cabeada via NetworkManager (mac-rotativo.service / .timer) para rotacionar o endereço MAC periodicamente.",
-            )
-            .class(theme::Text::Custom(dimmed))
+            widget::row::with_children(vec![
+                widget::text::body("Perfil anti-telemetria NM (desativa ping de conectividade, MAC aleatório em scan Wi-Fi e IPv6 temporário)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(sec.nm_privacy_conf, "Aplicado", "Não aplicado"),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
             .into(),
             widget::row::with_children(vec![
                 action_btn(
@@ -1061,10 +1332,80 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
                     false,
                 ),
                 action_btn(
-                    "Ver status / próximo ciclo",
+                    nm_btn_label,
+                    Message::OpenInTerminal("Privacidade NetworkManager", nm_btn_cmd),
+                    !sec.nm_privacy_conf,
+                ),
+            ])
+            .spacing(8)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 4. Linux Kernel Hardening (sysctl) card
+    let krow = |label: &'static str, ok: bool, ok_lbl: &'static str, off_lbl: &'static str| {
+        widget::row::with_children(vec![
+            widget::text::body(label).width(Length::Fill).into(),
+            status_badge(ok, ok_lbl, off_lbl),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Hardening do Kernel Linux (sysctl)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    sec.kernel_hardening_conf,
+                    "Perfil aplicado",
+                    "Padrão do sistema",
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            krow(
+                "Ocultar ponteiros & logs do kernel (kptr_restrict=2, dmesg_restrict=1)",
+                sec.kptr_restrict >= 2 && sec.dmesg_restrict >= 1,
+                "Protegido",
+                "Parcial",
+            ),
+            krow(
+                "Bloqueio de ptrace e eBPF sem privilégios (yama + unprivileged_bpf)",
+                sec.ptrace_scope >= 1 && sec.unpriv_bpf_disabled >= 1,
+                if sec.ptrace_scope >= 2 { "Estrito" } else { "Restrito" },
+                "Aberto",
+            ),
+            krow(
+                "Extensões de privacidade IPv6 temporário (use_tempaddr=2)",
+                sec.ipv6_privacy >= 2,
+                "Ativo (privado)",
+                "Desativado",
+            ),
+            krow(
+                "Modo Stealth ICMP (ignorar ping na rede) + TCP SYN Cookies",
+                sec.icmp_stealth && sec.tcp_syncookies,
+                "Stealth ativo",
+                if sec.tcp_syncookies { "Responde ping" } else { "Inativo" },
+            ),
+            widget::row::with_children(vec![
+                action_btn(
+                    "Aplicar Hardening Completo (sudo)",
                     Message::OpenInTerminal(
-                        "Status mac-rotativo",
-                        "systemctl status mac-rotativo.timer mac-rotativo.service --no-pager".to_owned(),
+                        "Hardening Kernel",
+                        format!("sudo {harden_script} --kernel"),
+                    ),
+                    !sec.kernel_hardening_conf,
+                ),
+                action_btn(
+                    "Reverter sysctl",
+                    Message::OpenInTerminal(
+                        "Reverter Hardening",
+                        format!("sudo {harden_script} --kernel-undo"),
                     ),
                     false,
                 ),
@@ -1075,32 +1416,183 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
         .spacing(spacing.space_xs),
     ));
 
-    // 2. Lockscreen & Greeter isolation card
+    // 4b. Deep Kernel Armor & Core Isolation card (with individual opt-in toggles!)
+    let lockdown_ok = sec.lockdown_mode == "integrity" || sec.lockdown_mode == "confidentiality";
+    let iommu_label = if sec.iommu_groups > 0 {
+        format!("Ativo ({} grupos DMA)", sec.iommu_groups)
+    } else {
+        "Inativo".to_owned()
+    };
+    let opt_toggle_row = |label: &'static str,
+                          active: bool,
+                          title: &'static str,
+                          flag: &'static str| {
+        let next_mode = if active { "off" } else { "on" };
+        let btn_lbl = if active { "Desativar" } else { "Ativar" };
+        widget::row::with_children(vec![
+            widget::text::body(label).width(Length::Fill).into(),
+            status_badge(active, "Ativo", "Desativado"),
+            action_btn(
+                btn_lbl,
+                Message::OpenInTerminal(title, format!("sudo {harden_script} {flag} {next_mode}")),
+                false,
+            ),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    };
+    let usbguard_lbl = if sec.usbguard_active {
+        "Desativar USBGuard"
+    } else {
+        "Ativar USBGuard (permite USBs atuais)"
+    };
+    let usbguard_cmd = if sec.usbguard_active {
+        format!("sudo {harden_script} --usbguard-disable")
+    } else {
+        format!("sudo {harden_script} --usbguard-setup")
+    };
     items.push(card_box(
         widget::column::with_children(vec![
             widget::row::with_children(vec![
-                widget::text::heading("Bloqueio de Tela & Isolamento (aenes-greeter)")
+                widget::text::heading("Blindagem de Kernel & Isolamento de Núcleo (toggles individuais)")
                     .width(Length::Fill)
                     .into(),
                 status_badge(
-                    opt.greeter_service_enabled,
-                    "Boot isolado ativo",
-                    "User-space ativo",
+                    sec.kernel_armor_conf && sec.nocoredump_conf && sec.blacklist_modules_conf,
+                    "Núcleo Blindado",
+                    "Personalizado / Padrão",
                 ),
             ])
             .spacing(8)
             .align_y(Alignment::Center)
             .into(),
-            widget::text::caption(
-                "Protegido contra vazamento de frames antes do bloqueio/suspensão (inibidor systemd-logind mantido até o commit da superfície opaca) e sem acesso à sua $HOME pelo serviço de boot.",
-            )
-            .class(theme::Text::Custom(dimmed))
-            .into(),
+            kv_row(
+                "Kernel em execução",
+                if sec.kernel_release.is_empty() {
+                    "—".to_owned()
+                } else {
+                    sec.kernel_release.clone()
+                },
+            ),
             widget::row::with_children(vec![
-                action_btn("Bloquear agora", Message::GreeterTestLock, true),
+                widget::text::body("Kernel Lockdown (parâmetro de boot lockdown=integrity)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    lockdown_ok,
+                    if sec.lockdown_mode == "confidentiality" {
+                        "confidentiality"
+                    } else {
+                        "integrity"
+                    },
+                    "none (sem lockdown)",
+                ),
                 action_btn(
-                    "Configurar Tela de Login",
-                    Message::SelectSection(Section::Login),
+                    "Ver flags de boot",
+                    Message::OpenInTerminal(
+                        "Flags de Boot do Kernel",
+                        format!("sudo {harden_script} --boot-armor-info"),
+                    ),
+                    false,
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            opt_toggle_row(
+                "Stealth ICMP — ignorar ping na rede (pode ocultar PC em testes ping)",
+                sec.icmp_stealth,
+                "Stealth ICMP",
+                "--toggle-icmp-stealth",
+            ),
+            opt_toggle_row(
+                "IPv6 temporário privado (use_tempaddr=2)",
+                sec.ipv6_privacy >= 2,
+                "IPv6 Privado",
+                "--toggle-ipv6-privacy",
+            ),
+            opt_toggle_row(
+                "Restringir io_uring sem privilégio (bloqueia exploits modernos)",
+                sec.io_uring_disabled >= 1,
+                "Restringir io_uring",
+                "--toggle-io-uring",
+            ),
+            opt_toggle_row(
+                "Desativar Magic SysRq (kernel.sysrq=0)",
+                sec.sysrq_disabled,
+                "Magic SysRq",
+                "--toggle-sysrq",
+            ),
+            opt_toggle_row(
+                "Bloquear Coredumps em disco (evita vazar senhas da RAM)",
+                sec.suid_dumpable == 0 && sec.nocoredump_conf,
+                "Bloquear Coredumps",
+                "--toggle-nocoredump",
+            ),
+            opt_toggle_row(
+                "Blacklist de módulos legados (dccp/sctp/rds/tipc/firewire/hfs)",
+                sec.blacklist_modules_conf,
+                "Blacklist de Módulos",
+                "--toggle-blacklist",
+            ),
+            widget::row::with_children(vec![
+                widget::text::body("Proteção física contra BadUSB (USBGuard — opcional)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    sec.usbguard_active,
+                    "Ativo",
+                    if sec.usbguard_installed { "Inativo" } else { "Opcional" },
+                ),
+                action_btn(
+                    usbguard_lbl,
+                    Message::OpenInTerminal("USBGuard BadUSB", usbguard_cmd),
+                    false,
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            krow(
+                "Bloquear troca de kernel em RAM (kexec_load_disabled=1)",
+                sec.kexec_disabled,
+                "Bloqueado",
+                "Permitido",
+            ),
+            widget::row::with_children(vec![
+                widget::text::body("Isolamento de DMA por hardware (IOMMU)")
+                    .width(Length::Fill)
+                    .into(),
+                widget::text::caption(iommu_label)
+                    .class(theme::Text::Custom(dimmed))
+                    .into(),
+                status_badge(sec.iommu_groups > 0, "Ativo", "Desativado"),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            krow(
+                "Sandbox de aplicativos (Bubblewrap / Landlock / userns)",
+                sec.bwrap_installed,
+                "Disponível",
+                "Ausente",
+            ),
+            widget::row::with_children(vec![
+                action_btn(
+                    "Aplicar Blindagem Completa (sudo)",
+                    Message::OpenInTerminal(
+                        "Blindagem Completa",
+                        format!("sudo {harden_script} --kernel && sudo {harden_script} --kernel-armor && sudo {harden_script} --nm-privacy"),
+                    ),
+                    !(sec.kernel_armor_conf && sec.nocoredump_conf && sec.blacklist_modules_conf),
+                ),
+                action_btn(
+                    "Reverter Blindagem",
+                    Message::OpenInTerminal(
+                        "Reverter Blindagem",
+                        format!("sudo {harden_script} --kernel-armor-undo"),
+                    ),
                     false,
                 ),
             ])
@@ -1110,18 +1602,31 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
         .spacing(spacing.space_xs),
     ));
 
-    // 3. Hardware Privacy (Camera & Microphone) card
-    let mic_muted = app.microphone.unwrap_or(false);
-    let cam_active = !app.privacy.camera.is_empty();
+    // 5. System Integrity, Flatpak & Attack Surface card
+    let bt_label = if sec.bluetooth_active {
+        "Desativar Bluetooth"
+    } else {
+        "Ativar Bluetooth"
+    };
+    let bt_cmd = if sec.bluetooth_active {
+        "sudo systemctl stop bluetooth.service".to_owned()
+    } else {
+        "sudo systemctl start bluetooth.service".to_owned()
+    };
     items.push(card_box(
         widget::column::with_children(vec![
+            widget::text::heading("Integridade do Sistema, Flatpak & Superfície de Ataque").into(),
+            krow("Servidor SSH (sshd.service)", !sec.sshd_active, "Desativado", "Ativo"),
+            krow("Descoberta mDNS / Avahi (avahi-daemon)", !sec.avahi_active, "Desativado", "Ativo"),
+            krow("Servidor de Impressão (cups / cups-browsed)", !sec.cups_active, "Desativado", "Ativo"),
             widget::row::with_children(vec![
-                widget::text::heading("Privacidade de Hardware (Câmera & Microfone)")
+                widget::text::body("Rádio Bluetooth (bluetooth.service)")
                     .width(Length::Fill)
                     .into(),
+                status_badge(!sec.bluetooth_active, "Desligado", "Ativo"),
                 action_btn(
-                    "Gerenciar Câmeras & Áudio",
-                    Message::SelectSection(Section::Camera),
+                    bt_label,
+                    Message::OpenInTerminal("Bluetooth Service", bt_cmd),
                     false,
                 ),
             ])
@@ -1129,26 +1634,113 @@ fn security_view(app: &ControlPanel) -> Element<'_, Message> {
             .align_y(Alignment::Center)
             .into(),
             widget::row::with_children(vec![
-                widget::text::body("Câmeras detectadas").width(Length::Fill).into(),
-                status_badge(
-                    !cam_active,
-                    "Nenhuma em uso",
-                    "Em uso agora",
+                action_btn(
+                    "Auditar integridade (pacman -Qkk)",
+                    Message::OpenInTerminal(
+                        "Integridade do Sistema",
+                        "pacman -Qkk 2>&1 | grep -Ev '0 arquivos alterados|0 altered files' | head -n 60; echo '--- Fim da auditoria ---'".to_owned(),
+                    ),
+                    false,
+                ),
+                action_btn(
+                    "Auditar permissões Flatpak",
+                    Message::OpenInTerminal(
+                        "Permissões Flatpak",
+                        if sec.flatpak_installed {
+                            "for a in $(flatpak list --app --columns=application); do perms=$(flatpak info --show-permissions \"$a\" 2>/dev/null | grep -E 'filesystems=.*host|sockets=.*x11|devices=all'); [ -n \"$perms\" ] && printf '\\n[%s]\\n%s\\n' \"$a\" \"$perms\"; done".to_owned()
+                        } else {
+                            "echo 'Flatpak não instalado.'".to_owned()
+                        },
+                    ),
+                    false,
+                ),
+                action_btn(
+                    "Auditar chaves SSH/GPG",
+                    Message::OpenInTerminal(
+                        "Permissões SSH/GPG",
+                        "ls -ld ~/.ssh ~/.gnupg 2>/dev/null; ls -l ~/.ssh 2>/dev/null".to_owned(),
+                    ),
+                    false,
                 ),
             ])
-            .align_y(Alignment::Center)
+            .spacing(8)
             .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 6. Active Privacy, Hardware Consumers & Trace Cleanup card
+    let mic_muted = app.microphone.unwrap_or(false);
+    let cam_active = !app.privacy.camera.is_empty();
+    let cam_consumers = if app.privacy.camera.is_empty() {
+        "Nenhum app usando a câmera".to_owned()
+    } else {
+        app.privacy.camera.join(", ")
+    };
+    let mic_consumers = if app.privacy.microphone.is_empty() {
+        "Nenhum app gravando microfone".to_owned()
+    } else {
+        app.privacy.microphone.join(", ")
+    };
+    let clean_traces_cmd = concat!(
+        "rm -rf \"${XDG_DATA_HOME:-$HOME/.local/share}/cosmic-central/clipboard\"* ",
+        "\"${XDG_DATA_HOME:-$HOME/.local/share}/recently-used.xbel\" ",
+        "\"${XDG_CACHE_HOME:-$HOME/.cache}/thumbnails\"/* 2>/dev/null || true; ",
+        "systemctl --user restart central-clipboard.service 2>/dev/null || true; ",
+        "echo 'Rastros limpos (Clipboard, arquivos recentes e miniaturas).'"
+    )
+    .to_owned();
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Privacidade Ativa, Hardware & Limpeza de Rastros").into(),
+            krow("Câmeras (PipeWire / V4L2)", !cam_active, "Nenhuma em uso", "Em uso agora"),
+            kv_row("Apps acessando câmera agora", cam_consumers),
+            kv_row("Apps acessando microfone agora", mic_consumers),
             widget::row::with_children(vec![
                 widget::text::body("Microfone padrão").width(Length::Fill).into(),
                 status_badge(mic_muted, "Silenciado", "Ativo"),
+                widget::toggler(!mic_muted)
+                    .on_toggle(|_| Message::ToggleMicrophone)
+                    .into(),
             ])
+            .spacing(10)
             .align_y(Alignment::Center)
             .into(),
+            krow(
+                "Bloqueio zero-flash & isolamento (aenes-greeter)",
+                true,
+                if opt.greeter_service_enabled {
+                    "Boot + Sessão isolados"
+                } else {
+                    "Sessão isolada"
+                },
+                "Padrão",
+            ),
+            krow(
+                "Criptografia de disco (LUKS / dm-crypt)",
+                sec.luks_active,
+                "Ativa",
+                "Não detectada",
+            ),
             widget::row::with_children(vec![
-                widget::text::body("Regras udev Logitech hidraw").width(Length::Fill).into(),
-                status_badge(snap.logi_udev_configured, "Configurada", "Ausente"),
+                action_btn("Bloquear agora", Message::GreeterTestLock, true),
+                action_btn(
+                    "Limpar rastros (Clipboard + Recentes + Miniaturas)",
+                    Message::OpenInTerminal("Limpeza de Rastros", clean_traces_cmd),
+                    false,
+                ),
+                action_btn(
+                    "Tela de Login",
+                    Message::SelectSection(Section::Login),
+                    false,
+                ),
+                action_btn(
+                    "Câmeras & Áudio",
+                    Message::SelectSection(Section::Camera),
+                    false,
+                ),
             ])
-            .align_y(Alignment::Center)
+            .spacing(8)
             .into(),
         ])
         .spacing(spacing.space_xs),

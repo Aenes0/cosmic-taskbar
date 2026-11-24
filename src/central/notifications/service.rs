@@ -93,19 +93,48 @@ impl FdoNotifications {
         body: String,
         actions: Vec<String>,
         hints: HashMap<String, OwnedValue>,
-        _expire_timeout: i32,
+        expire_timeout: i32,
     ) -> u32 {
         let id = if replaces_id != 0 {
             replaces_id
         } else {
             self.next_id.fetch_add(1, Ordering::Relaxed)
         };
+        let hint_str = |key: &str| {
+            hints
+                .get(key)
+                .and_then(|v| String::try_from(v.clone()).ok())
+        };
+        let hint_i32 = |key: &str| {
+            hints
+                .get(key)
+                .and_then(|v| i32::try_from(v.clone()).ok())
+                .unwrap_or(0)
+        };
+        // Centered OSD pills (e.g. logi-osd CapsLock/NumLock/FnLock/backlight/host switch):
+        // emitted directly to `central --panels` via D-Bus signal and never stored in history.
+        if hint_str("x-estilo").as_deref() == Some("osd") {
+            if let Some(hist) = self.history_iface.get() {
+                let tone = hint_str("x-tom").unwrap_or_else(|| "normal".to_owned());
+                let dots_on = hint_i32("x-pontos");
+                let dots_total = hint_i32("x-pontos-total");
+                let timeout_ms = if expire_timeout > 0 { expire_timeout } else { 1400 };
+                _ = Service::osd(
+                    hist.signal_emitter(),
+                    &app_icon,
+                    &summary,
+                    &body,
+                    &tone,
+                    dots_on,
+                    dots_total,
+                    timeout_ms,
+                )
+                .await;
+            }
+            return id;
+        }
         if !watch::skip_in_history(&hints) {
-            let hint = |key: &str| {
-                hints
-                    .get(key)
-                    .and_then(|v| String::try_from(v.clone()).ok())
-            };
+            let hint = hint_str;
             let image_path = hint("image-path")
                 .map(|p| p.strip_prefix("file://").unwrap_or(&p).to_owned())
                 .filter(|p| p.starts_with('/') && std::path::Path::new(p).is_file());
@@ -262,6 +291,20 @@ impl Service {
     /// The history on disk changed.
     #[zbus(signal)]
     async fn changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    /// A transient centered OSD pill (e.g. `logi-osd` keyboard/device status).
+    #[allow(clippy::too_many_arguments)]
+    #[zbus(signal)]
+    async fn osd(
+        emitter: &SignalEmitter<'_>,
+        icon: &str,
+        summary: &str,
+        body: &str,
+        tone: &str,
+        dots_on: i32,
+        dots_total: i32,
+        timeout_ms: i32,
+    ) -> zbus::Result<()>;
 }
 
 /// Takes the name and serves the history. Fails with `NameTaken` when another

@@ -57,11 +57,61 @@ pub struct OptionalStatus {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct SecuritySnapshot {
+    pub ufw_installed: bool,
+    pub ufw_active: bool,
+    pub resolved_active: bool,
+    pub dns_over_tls: bool,
+    pub dns_server: String,
+    pub llmnr_disabled: bool,
+    pub mdns_disabled: bool,
+    pub nm_privacy_conf: bool,
+    pub kernel_hardening_conf: bool,
+    pub kptr_restrict: i32,
+    pub dmesg_restrict: i32,
+    pub ptrace_scope: i32,
+    pub unpriv_bpf_disabled: i32,
+    pub tcp_syncookies: bool,
+    pub icmp_stealth: bool,
+    pub ipv6_privacy: i32,
+    pub lsm_list: String,
+    // Deep kernel armor & core isolation
+    pub kernel_release: String,
+    pub lockdown_mode: String,
+    pub kernel_armor_conf: bool,
+    pub blacklist_modules_conf: bool,
+    pub nocoredump_conf: bool,
+    pub kexec_disabled: bool,
+    pub sysrq_disabled: bool,
+    pub aslr_full: bool,
+    pub perf_paranoid: i32,
+    pub io_uring_disabled: i32,
+    pub suid_dumpable: i32,
+    pub iommu_groups: usize,
+    pub bwrap_installed: bool,
+    pub usbguard_installed: bool,
+    pub usbguard_active: bool,
+    pub hosts_adblock_active: bool,
+    pub networking_enabled: bool,
+    pub vpn_iface: String,
+    pub flatpak_installed: bool,
+    pub sshd_active: bool,
+    pub bluetooth_active: bool,
+    pub avahi_active: bool,
+    pub cups_active: bool,
+    pub exposed_ports_count: usize,
+    pub local_ports_count: usize,
+    pub luks_active: bool,
+    pub score: u8,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct SystemSnapshot {
     pub hardware: HardwareInfo,
     pub units: Vec<UnitStatus>,
     pub repo: RepoStatus,
     pub optional: OptionalStatus,
+    pub security: SecuritySnapshot,
     pub mac_rotativo_active: bool,
     pub economia_energia_active: bool,
     pub wallpapers_watcher_active: bool,
@@ -696,6 +746,234 @@ async fn probe_optional(mac_rotativo_active: bool, switcher_active: bool) -> Opt
     }
 }
 
+fn read_sysctl_i32(proc_subpath: &str) -> i32 {
+    std::fs::read_to_string(format!("/proc/sys/{proc_subpath}"))
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .unwrap_or(-1)
+}
+
+async fn probe_security(mac_rotativo_active: bool, greeter_isolated: bool) -> SecuritySnapshot {
+    let ufw_installed = command_exists("ufw");
+    let ufw_active = is_unit_active("ufw.service", true).await;
+    let resolved_active = is_unit_active("systemd-resolved.service", true).await;
+    let sshd_active = is_unit_active("sshd.service", true).await;
+    let bluetooth_active = is_unit_active("bluetooth.service", true).await;
+    let avahi_active = is_unit_active("avahi-daemon.service", true).await;
+    let cups_active = is_unit_active("cups.service", true).await
+        || is_unit_active("cups-browsed.service", true).await;
+
+    let mut dns_over_tls = false;
+    let mut llmnr_disabled = false;
+    let mut mdns_disabled = false;
+    let mut dns_server = String::new();
+    if let Ok(out) = Command::new("resolvectl").arg("status").output().await {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines().take(18) {
+                let trimmed = line.trim();
+                if trimmed.starts_with("Protocols:") {
+                    if trimmed.contains("+DNSOverTLS") {
+                        dns_over_tls = true;
+                    }
+                    if trimmed.contains("-LLMNR") {
+                        llmnr_disabled = true;
+                    }
+                    if trimmed.contains("-mDNS") {
+                        mdns_disabled = true;
+                    }
+                } else if dns_server.is_empty() && trimmed.starts_with("Current DNS Server:") {
+                    dns_server = trimmed
+                        .trim_start_matches("Current DNS Server:")
+                        .trim()
+                        .to_owned();
+                } else if dns_server.is_empty() && trimmed.starts_with("DNS Servers:") {
+                    dns_server = trimmed
+                        .trim_start_matches("DNS Servers:")
+                        .trim()
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_owned();
+                }
+            }
+        }
+    }
+
+    let mut exposed_ports_count = 0usize;
+    let mut local_ports_count = 0usize;
+    if let Ok(out) = Command::new("ss").args(["-tulnH"]).output().await {
+        if out.status.success() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() < 5 {
+                    continue;
+                }
+                let state = cols[1];
+                if state != "LISTEN" {
+                    continue;
+                }
+                let local = cols[4];
+                if local.starts_with("127.") || local.starts_with("[::1]") {
+                    local_ports_count += 1;
+                } else {
+                    exposed_ports_count += 1;
+                }
+            }
+        }
+    }
+
+    let kptr_restrict = read_sysctl_i32("kernel/kptr_restrict");
+    let dmesg_restrict = read_sysctl_i32("kernel/dmesg_restrict");
+    let ptrace_scope = read_sysctl_i32("kernel/yama/ptrace_scope");
+    let unpriv_bpf_disabled = read_sysctl_i32("kernel/unprivileged_bpf_disabled");
+    let tcp_syncookies = read_sysctl_i32("net/ipv4/tcp_syncookies") == 1;
+    let icmp_stealth = read_sysctl_i32("net/ipv4/icmp_echo_ignore_all") == 1;
+    let ipv6_privacy = read_sysctl_i32("net/ipv6/conf/all/use_tempaddr");
+    let lsm_list = std::fs::read_to_string("/sys/kernel/security/lsm")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let kernel_release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let lockdown_raw = std::fs::read_to_string("/sys/kernel/security/lockdown").unwrap_or_default();
+    let lockdown_mode = lockdown_raw
+        .split_whitespace()
+        .find(|tok| tok.starts_with('[') && tok.ends_with(']'))
+        .map(|tok| tok.trim_matches(|c| c == '[' || c == ']').to_owned())
+        .unwrap_or_else(|| "indisponível".to_owned());
+    let kernel_armor_conf = Path::new("/etc/sysctl.d/99-aenes-kernel-armor.conf").exists();
+    let blacklist_modules_conf = Path::new("/etc/modprobe.d/99-aenes-blacklist.conf").exists();
+    let nocoredump_conf = Path::new("/etc/systemd/coredump.conf.d/99-aenes-nocoredump.conf").exists();
+    let kexec_disabled = read_sysctl_i32("kernel/kexec_load_disabled") == 1;
+    let sysrq_disabled = read_sysctl_i32("kernel/sysrq") == 0;
+    let aslr_full = read_sysctl_i32("kernel/randomize_va_space") >= 2;
+    let perf_paranoid = read_sysctl_i32("kernel/perf_event_paranoid");
+    let io_uring_disabled = read_sysctl_i32("kernel/io_uring_disabled");
+    let suid_dumpable = read_sysctl_i32("fs/suid_dumpable");
+    let iommu_groups = std::fs::read_dir("/sys/kernel/iommu_groups")
+        .ok()
+        .map(|d| d.count())
+        .unwrap_or(0);
+    let bwrap_installed = command_exists("bwrap");
+    let usbguard_installed = command_exists("usbguard");
+    let usbguard_active = is_unit_active("usbguard.service", true).await;
+    let hosts_adblock_active = std::fs::read_to_string("/etc/hosts")
+        .is_ok_and(|s| s.contains("# aenes-hosts-adblock START"));
+    let networking_enabled = Command::new("nmcli")
+        .args(["networking"])
+        .output()
+        .await
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().eq_ignore_ascii_case("enabled"))
+        .unwrap_or(true);
+    let vpn_iface = std::fs::read_dir("/sys/class/net")
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| {
+            n.starts_with("wg")
+                || n.starts_with("tun")
+                || n.starts_with("tailscale")
+                || n.starts_with("proton")
+                || n.starts_with("mullvad")
+        })
+        .unwrap_or_default();
+    let flatpak_installed = command_exists("flatpak");
+    let nm_privacy_conf = Path::new("/etc/NetworkManager/conf.d/99-aenes-privacy.conf").exists();
+    let kernel_hardening_conf = Path::new("/etc/sysctl.d/99-aenes-privacy.conf").exists();
+    let luks_active = std::fs::read_dir("/dev/mapper")
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            s != "control" && !s.is_empty()
+        });
+
+    let mut score: u8 = 0;
+    if ufw_active {
+        score += 20;
+    }
+    if dns_over_tls {
+        score += 15;
+    }
+    if llmnr_disabled && mdns_disabled {
+        score += 5;
+    }
+    if mac_rotativo_active || nm_privacy_conf {
+        score += 10;
+    }
+    if kptr_restrict >= 2 && dmesg_restrict >= 1 {
+        score += 10;
+    }
+    if ptrace_scope >= 1 && unpriv_bpf_disabled >= 1 {
+        score += 10;
+    }
+    if tcp_syncookies && (ipv6_privacy >= 2 || icmp_stealth) {
+        score += 10;
+    }
+    if !sshd_active && !avahi_active && !cups_active && exposed_ports_count == 0 {
+        score += 10;
+    }
+    if greeter_isolated {
+        score += 10;
+    }
+
+    SecuritySnapshot {
+        ufw_installed,
+        ufw_active,
+        resolved_active,
+        dns_over_tls,
+        dns_server,
+        llmnr_disabled,
+        mdns_disabled,
+        nm_privacy_conf,
+        kernel_hardening_conf,
+        kptr_restrict,
+        dmesg_restrict,
+        ptrace_scope,
+        unpriv_bpf_disabled,
+        tcp_syncookies,
+        icmp_stealth,
+        ipv6_privacy,
+        lsm_list,
+        kernel_release,
+        lockdown_mode,
+        kernel_armor_conf,
+        blacklist_modules_conf,
+        nocoredump_conf,
+        kexec_disabled,
+        sysrq_disabled,
+        aslr_full,
+        perf_paranoid,
+        io_uring_disabled,
+        suid_dumpable,
+        iommu_groups,
+        bwrap_installed,
+        usbguard_installed,
+        usbguard_active,
+        hosts_adblock_active,
+        networking_enabled,
+        vpn_iface,
+        flatpak_installed,
+        sshd_active,
+        bluetooth_active,
+        avahi_active,
+        cups_active,
+        exposed_ports_count,
+        local_ports_count,
+        luks_active,
+        score,
+    }
+}
+
 pub async fn load_snapshot() -> SystemSnapshot {
     let hardware = read_hardware();
     let repo = read_repo_status().await;
@@ -739,6 +1017,12 @@ pub async fn load_snapshot() -> SystemSnapshot {
         .is_some_and(|u| u.active);
     let optional = probe_optional(mac_rotativo_active, switcher_active).await;
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let greeter_user_installed = home.join(".local/bin/aenes-greeter").exists();
+    let security = probe_security(
+        mac_rotativo_active,
+        optional.greeter_service_enabled || greeter_user_installed,
+    )
+    .await;
 
     let audio_modprobe_configured = Path::new("/etc/modprobe.d/99-economia-energia.conf").exists();
     let rapl_udev_configured = Path::new("/etc/udev/rules.d/99-rapl.rules").exists()
@@ -764,6 +1048,7 @@ pub async fn load_snapshot() -> SystemSnapshot {
         units,
         repo,
         optional,
+        security,
         mac_rotativo_active,
         economia_energia_active,
         wallpapers_watcher_active,

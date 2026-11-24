@@ -100,6 +100,8 @@ pub enum Message {
     ToastDismiss(u32),
     /// Invoke a notification action button from a floating toast card.
     ToastInvoke(u32, String),
+    /// Centered transient OSD pill (e.g. `logi-osd` keyboard/device status).
+    Osd(toast::OsdPill),
 }
 
 /// The panel showing: which, on which screen, its surface and since when.
@@ -148,6 +150,9 @@ pub struct Panels {
     seen_toast_ids: HashSet<(u32, std::time::SystemTime)>,
     /// Live user configuration for floating notification toasts.
     notif_config: NotifConfig,
+    /// Active centered OSD pill (e.g. `logi-osd`) and its layer surface.
+    osd: Option<toast::OsdPill>,
+    osd_surface: Option<window::Id>,
 }
 
 /// Starts the host, showing `request` once up.
@@ -362,6 +367,35 @@ impl Panels {
         Task::batch(tasks)
     }
 
+    /// Creates or destroys the centered OSD pill layer surface to match `self.osd`.
+    fn sync_osd_surface(&mut self) -> app::Task<Message> {
+        if self.osd.is_none() {
+            return match self.osd_surface.take() {
+                Some(id) => destroy_layer_surface(id),
+                None => Task::none(),
+            };
+        }
+        if self.osd_surface.is_some() {
+            return Task::none();
+        }
+        let id = window::Id::unique();
+        let surface = get_layer_surface(SctkLayerSurfaceSettings {
+            id,
+            layer: Layer::Overlay,
+            keyboard_interactivity: KeyboardInteractivity::None,
+            anchor: Anchor::empty(),
+            output: IcedOutput::Active,
+            namespace: "central-osd-pill".into(),
+            margin: IcedMargin::default(),
+            size: None,
+            exclusive_zone: 0,
+            size_limits: Limits::NONE.min_width(1.0).min_height(1.0),
+            ..Default::default()
+        });
+        self.osd_surface = Some(id);
+        surface
+    }
+
     /// A panel that closed itself (it ran something, say) is no longer shown.
     fn follow_child(&mut self) {
         let Some(shown) = &self.shown else {
@@ -417,6 +451,8 @@ impl cosmic::Application for Panels {
             toast_surface: None,
             seen_toast_ids: initial_seen,
             notif_config: NotifConfig::load(),
+            osd: None,
+            osd_surface: None,
         };
         // Which monitors have DDC, for the brightness sliders: found once,
         // well after starting, if not known from before (see DetectDdc).
@@ -542,12 +578,24 @@ impl cosmic::Application for Panels {
                 }
             }
             Message::ToastTick => {
+                let mut tasks = Vec::new();
                 let timeout = self.notif_config.timeout_secs;
                 let before = self.toasts.len();
                 self.toasts.retain(|t| !t.is_expired(timeout));
                 if self.toasts.len() != before {
-                    return self.sync_toast_surface();
+                    tasks.push(self.sync_toast_surface());
                 }
+                if self.osd.as_ref().is_some_and(toast::OsdPill::is_expired) {
+                    self.osd = None;
+                    tasks.push(self.sync_osd_surface());
+                }
+                if !tasks.is_empty() {
+                    return Task::batch(tasks);
+                }
+            }
+            Message::Osd(pill) => {
+                self.osd = Some(pill);
+                return self.sync_osd_surface();
             }
             Message::ToastDismiss(id) => {
                 self.toasts.retain(|t| t.notification.id != id);
@@ -591,10 +639,16 @@ impl cosmic::Application for Panels {
         ];
         // The GPU, read once here for every bar's applet, as often as they read.
         subscriptions.push(iced::time::every(monitor::SHARE_GPU_EVERY).map(|_| Message::ShareGpu));
-        // Always listen for incoming notifications to render customizable floating toasts.
+        // Always listen for incoming notifications & centered OSD pills.
         subscriptions.push(notifications::subscription().map(|()| Message::NotificationsChanged));
-        if !self.toasts.is_empty() && self.notif_config.timeout_secs > 0 {
-            subscriptions.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::ToastTick));
+        subscriptions.push(notifications::osd_subscription().map(Message::Osd));
+        if (!self.toasts.is_empty() && self.notif_config.timeout_secs > 0) || self.osd.is_some() {
+            let interval = if self.osd.is_some() {
+                Duration::from_millis(200)
+            } else {
+                Duration::from_millis(500)
+            };
+            subscriptions.push(iced::time::every(interval).map(|_| Message::ToastTick));
         }
         // Under systemd's watchdog only: the beat, from this loop.
         if let Some(period) = watchdog::period() {
@@ -640,6 +694,16 @@ impl cosmic::Application for Panels {
     }
 
     fn view_window(&self, id: window::Id) -> Element<'_, Message> {
+        if self.osd_surface == Some(id) {
+            let Some(pill) = &self.osd else {
+                return widget::text("").into();
+            };
+            return cosmic::widget::autosize::autosize(
+                toast::osd_view(pill),
+                widget::Id::new("central-osd-autosize"),
+            )
+            .into();
+        }
         if self.toast_surface.is_some_and(|(tid, _)| tid == id) {
             if self.toasts.is_empty() {
                 return widget::text("").into();
