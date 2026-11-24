@@ -55,6 +55,8 @@ pub enum Section {
     DevicesOsd,
     Camera,
     Network,
+    Security,
+    Backup,
     Displays,
     Login,
     Optional,
@@ -62,7 +64,7 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 12] = [
+    pub const ALL: [Section; 14] = [
         Section::Power,
         Section::Bar,
         Section::Monitor,
@@ -71,6 +73,8 @@ impl Section {
         Section::DevicesOsd,
         Section::Camera,
         Section::Network,
+        Section::Security,
+        Section::Backup,
         Section::Displays,
         Section::Login,
         Section::Optional,
@@ -85,8 +89,10 @@ impl Section {
             Section::Central => "Central (Direita)",
             Section::Notifications => "Notificações",
             Section::DevicesOsd => "OSD de Dispositivos",
-            Section::Camera => "Câmeras & Privacidade",
-            Section::Network => "Rede & Segurança",
+            Section::Camera => "Câmeras & Áudio",
+            Section::Network => "Rede",
+            Section::Security => "Segurança & Privacidade",
+            Section::Backup => "Backup & Sincronização",
             Section::Displays => "Monitores & Visuais",
             Section::Login => "Tela de Login",
             Section::Optional => "Pacotes & Opcionais",
@@ -104,6 +110,8 @@ impl Section {
             Section::DevicesOsd => "input-keyboard-symbolic",
             Section::Camera => "camera-web-symbolic",
             Section::Network => "network-wired-symbolic",
+            Section::Security => "security-high-symbolic",
+            Section::Backup => "drive-harddisk-symbolic",
             Section::Displays => "video-display-symbolic",
             Section::Login => "system-lock-screen-symbolic",
             Section::Optional => "system-software-install-symbolic",

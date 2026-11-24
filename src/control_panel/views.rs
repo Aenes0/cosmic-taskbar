@@ -254,6 +254,8 @@ pub fn view(app: &ControlPanel) -> Element<'_, Message> {
         Section::DevicesOsd => devices_osd_view(app),
         Section::Camera => camera_view(app),
         Section::Network => network_view(app),
+        Section::Security => security_view(app),
+        Section::Backup => backup_view(app),
         Section::Displays => displays_view(app),
         Section::Login => login_view(app),
         Section::Optional => optional_view(app),
@@ -921,6 +923,419 @@ fn power_view(app: &ControlPanel) -> Element<'_, Message> {
         }
         items.push(card_box(widget::column::with_children(rows).spacing(spacing.space_xs)));
     }
+
+    // Kernel, modules & power/hardware rules card
+    let snap = &app.snapshot;
+    let repo_dir = snap
+        .repo
+        .path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "$HOME/Projetos/cosmic-taskbar".to_owned());
+    let install_power_cmd = format!("sudo \"{repo_dir}/extras/power/install-economia-energia.sh\"");
+    let rule_row = |label: &'static str, ok: bool, ok_lbl: &'static str, off_lbl: &'static str| {
+        widget::row::with_children(vec![
+            widget::text::body(label).width(Length::Fill).into(),
+            status_badge(ok, ok_lbl, off_lbl),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Kernel, Módulos & Regras de Energia")
+                    .width(Length::Fill)
+                    .into(),
+                action_btn(
+                    "Instalar / Atualizar (sudo)",
+                    Message::OpenInTerminal("Instalar economia-energia e regras", install_power_cmd),
+                    !snap.economia_energia_active,
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            rule_row(
+                "Daemon economia-energia.service",
+                snap.economia_energia_active,
+                "Ativo",
+                "Inativo",
+            ),
+            rule_row(
+                "Áudio power_save no boot (/etc/modprobe.d/99-economia-energia.conf)",
+                snap.audio_modprobe_configured,
+                "Configurado",
+                "Ausente",
+            ),
+            rule_row(
+                "Leitura RAPL de consumo em Watts (/etc/udev/rules.d/99-rapl.rules)",
+                snap.rapl_udev_configured,
+                "Ativo",
+                "Ausente",
+            ),
+            rule_row(
+                "Módulo i2c-dev (brilho DDC/CI nos monitores)",
+                snap.i2c_dev_module_configured,
+                "No boot",
+                "Ausente",
+            ),
+            rule_row(
+                "Módulo nct6775 (sensores e ventoinhas da placa-mãe)",
+                snap.nct6775_module_configured,
+                "No boot",
+                "Ausente",
+            ),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    widget::column::with_children(items).spacing(spacing.space_m).into()
+}
+
+fn security_view(app: &ControlPanel) -> Element<'_, Message> {
+    let spacing = theme::spacing();
+    let snap = &app.snapshot;
+    let opt = &snap.optional;
+
+    let mut items: Vec<Element<'_, Message>> = vec![
+        widget::row::with_children(vec![
+            widget::text::title3("Segurança & Privacidade")
+                .width(Length::Fill)
+                .into(),
+            action_btn("Atualizar status", Message::RefreshAll, false),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    ];
+
+    // 1. MAC Rotativo card
+    let mac_toggle_label = if snap.mac_rotativo_active {
+        "Desativar timer (sudo)"
+    } else {
+        "Ativar timer (sudo)"
+    };
+    let mac_toggle_cmd = if snap.mac_rotativo_active {
+        "sudo systemctl disable --now mac-rotativo.timer".to_owned()
+    } else {
+        "sudo systemctl enable --now mac-rotativo.timer".to_owned()
+    };
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("MAC Rotativo (Rede Cabeada)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    snap.mac_rotativo_active,
+                    "Timer ativo",
+                    if opt.mac_rotativo_installed {
+                        "Instalado (inativo)"
+                    } else {
+                        "Não instalado"
+                    },
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "Reativa a conexão cabeada via NetworkManager (mac-rotativo.service / .timer) para rotacionar o endereço MAC periodicamente.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(vec![
+                action_btn(
+                    "Rotacionar MAC agora",
+                    Message::OpenInTerminal(
+                        "Rotacionar MAC",
+                        "sudo systemctl start mac-rotativo.service && ip -brief link".to_owned(),
+                    ),
+                    true,
+                ),
+                action_btn(
+                    mac_toggle_label,
+                    Message::OpenInTerminal("MAC Rotativo timer", mac_toggle_cmd),
+                    false,
+                ),
+                action_btn(
+                    "Ver status / próximo ciclo",
+                    Message::OpenInTerminal(
+                        "Status mac-rotativo",
+                        "systemctl status mac-rotativo.timer mac-rotativo.service --no-pager".to_owned(),
+                    ),
+                    false,
+                ),
+            ])
+            .spacing(8)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 2. Lockscreen & Greeter isolation card
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Bloqueio de Tela & Isolamento (aenes-greeter)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    opt.greeter_service_enabled,
+                    "Boot isolado ativo",
+                    "User-space ativo",
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "Protegido contra vazamento de frames antes do bloqueio/suspensão (inibidor systemd-logind mantido até o commit da superfície opaca) e sem acesso à sua $HOME pelo serviço de boot.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(vec![
+                action_btn("Bloquear agora", Message::GreeterTestLock, true),
+                action_btn(
+                    "Configurar Tela de Login",
+                    Message::SelectSection(Section::Login),
+                    false,
+                ),
+            ])
+            .spacing(8)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 3. Hardware Privacy (Camera & Microphone) card
+    let mic_muted = app.microphone.unwrap_or(false);
+    let cam_active = !app.privacy.camera.is_empty();
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Privacidade de Hardware (Câmera & Microfone)")
+                    .width(Length::Fill)
+                    .into(),
+                action_btn(
+                    "Gerenciar Câmeras & Áudio",
+                    Message::SelectSection(Section::Camera),
+                    false,
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Câmeras detectadas").width(Length::Fill).into(),
+                status_badge(
+                    !cam_active,
+                    "Nenhuma em uso",
+                    "Em uso agora",
+                ),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Microfone padrão").width(Length::Fill).into(),
+                status_badge(mic_muted, "Silenciado", "Ativo"),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Regras udev Logitech hidraw").width(Length::Fill).into(),
+                status_badge(snap.logi_udev_configured, "Configurada", "Ausente"),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    widget::column::with_children(items).spacing(spacing.space_m).into()
+}
+
+fn backup_view(app: &ControlPanel) -> Element<'_, Message> {
+    let spacing = theme::spacing();
+    let snap = &app.snapshot;
+
+    let mut items: Vec<Element<'_, Message>> = vec![
+        widget::row::with_children(vec![
+            widget::text::title3("Backup & Sincronização")
+                .width(Length::Fill)
+                .into(),
+            action_btn("Atualizar status", Message::RefreshAll, false),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    ];
+
+    // 1. Restic daily backup card
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Backup Diário (Restic → /mnt/devdrive)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    snap.backup_restic_timer_active,
+                    "Timer ativo (12:00)",
+                    if snap.backup_restic_installed {
+                        "Instalado (inativo)"
+                    } else {
+                        "Não instalado"
+                    },
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("Disco de destino (/mnt/devdrive)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(snap.backup_drive_mounted, "Montado", "Desmontado"),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "Salva Repositorios, Documentos, Imagens, ~/Projetos, ~/.ssh, ~/.gnupg, ~/.config e ~/.local/share (retém 7 diários + 4 semanais).",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(vec![
+                action_btn(
+                    "Executar backup agora",
+                    Message::OpenInTerminal(
+                        "Backup Restic",
+                        "~/.local/bin/backup-restic".to_owned(),
+                    ),
+                    true,
+                ),
+                action_btn(
+                    "Listar snapshots",
+                    Message::OpenInTerminal(
+                        "Snapshots Restic",
+                        "RESTIC_REPOSITORY=/mnt/devdrive/backup-restic RESTIC_PASSWORD_FILE=$HOME/.config/restic/senha restic snapshots".to_owned(),
+                    ),
+                    false,
+                ),
+                action_btn(
+                    "Ativar / Reiniciar timer",
+                    Message::EnableUserUnit("backup-restic.timer"),
+                    false,
+                ),
+            ])
+            .spacing(8)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 2. Btrfs Snapper & SSD fstrim card
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Snapshots Btrfs (Snapper) & Manutenção SSD").into(),
+            widget::row::with_children(vec![
+                widget::text::body("Snapper timeline semanal (snapper-timeline.timer)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(snap.snapper_timer_active, "Ativo", "Inativo"),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                widget::text::body("SSD TRIM semanal (fstrim.timer — Dom 04:00)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(snap.fstrim_timer_active, "Ativo", "Inativo"),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            widget::row::with_children(vec![
+                action_btn(
+                    "Listar snapshots Snapper (sudo)",
+                    Message::OpenInTerminal("Snapshots Snapper", "sudo snapper list".to_owned()),
+                    false,
+                ),
+                action_btn(
+                    "Ver agendamentos",
+                    Message::OpenInTerminal(
+                        "Timers de Disco",
+                        "systemctl list-timers snapper-timeline.timer fstrim.timer --no-pager".to_owned(),
+                    ),
+                    false,
+                ),
+            ])
+            .spacing(8)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
+
+    // 3. Claude Sync & Cross-PC bundle card
+    let export_claude_cmd = concat!(
+        "OUT=\"$HOME/claude-sync-bundle-$(date +%Y%m%d-%H%M).tar.gz\"; ",
+        "tar -czf \"$OUT\" -C \"$HOME\" ",
+        "--exclude='.claude/.credentials.json' ",
+        "--exclude='.claude/cache' ",
+        "--exclude='.claude/downloads' ",
+        "--exclude='.claude/telemetry' ",
+        "--exclude='.claude/bash-commands.log' ",
+        "--exclude='.claude/cost-tracker.log' ",
+        "--exclude='.claude/backups*' ",
+        ".claude/CLAUDE.md .claude/settings.json .claude/agents .claude/hooks .claude/rules .claude/skills .claude/references .claude/projects 2>/dev/null || true; ",
+        "ls -lh \"$OUT\" && echo \"Para restaurar no outro PC: tar -xzf $(basename \"$OUT\") -C ~\""
+    )
+    .to_owned();
+
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                widget::text::heading("Sincronização do Claude (Contas & Outro PC)")
+                    .width(Length::Fill)
+                    .into(),
+                status_badge(
+                    snap.claude_sync_active,
+                    "Sync local ativo",
+                    if snap.claude_sync_installed {
+                        "Instalado (inativo)"
+                    } else {
+                        "Não instalado"
+                    },
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text::caption(
+                "O claude-sync-contas espelha sessões entre as 2 contas locais. Para levar toda a estrutura do Claude (CLAUDE.md, settings, skills, agents, hooks, rules e projetos — sem credenciais) para outro PC, use o exportador abaixo.",
+            )
+            .class(theme::Text::Custom(dimmed))
+            .into(),
+            widget::row::with_children(vec![
+                action_btn(
+                    "Sincronizar contas locais agora",
+                    Message::OpenInTerminal(
+                        "Claude Sync Contas",
+                        "python3 \"$HOME/claude-migracao/sincronizar_contas.py\"".to_owned(),
+                    ),
+                    false,
+                ),
+                action_btn(
+                    "Exportar pacote Claude para outro PC",
+                    Message::OpenInTerminal("Exportar Claude Bundle", export_claude_cmd),
+                    true,
+                ),
+            ])
+            .spacing(8)
+            .into(),
+        ])
+        .spacing(spacing.space_xs),
+    ));
 
     widget::column::with_children(items).spacing(spacing.space_m).into()
 }

@@ -67,6 +67,20 @@ pub struct SystemSnapshot {
     pub wallpapers_watcher_active: bool,
     pub pwa_watcher_active: bool,
     pub update_timer_active: bool,
+    // Kernel / hardware tuning rules
+    pub audio_modprobe_configured: bool,
+    pub rapl_udev_configured: bool,
+    pub i2c_dev_module_configured: bool,
+    pub nct6775_module_configured: bool,
+    pub logi_udev_configured: bool,
+    // Backup, Snapshots & Claude sync
+    pub backup_restic_installed: bool,
+    pub backup_restic_timer_active: bool,
+    pub backup_drive_mounted: bool,
+    pub snapper_timer_active: bool,
+    pub fstrim_timer_active: bool,
+    pub claude_sync_installed: bool,
+    pub claude_sync_active: bool,
 }
 
 /// User preferences for the isolated login & lock screen (`~/.config/cosmic-taskbar/greeter.toml`).
@@ -724,6 +738,26 @@ pub async fn load_snapshot() -> SystemSnapshot {
         .find(|u| u.unit == "cosmic-taskbar-update.timer")
         .is_some_and(|u| u.active);
     let optional = probe_optional(mac_rotativo_active, switcher_active).await;
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+
+    let audio_modprobe_configured = Path::new("/etc/modprobe.d/99-economia-energia.conf").exists();
+    let rapl_udev_configured = Path::new("/etc/udev/rules.d/99-rapl.rules").exists()
+        || Path::new("/etc/udev/rules.d/99-powercap.rules").exists();
+    let i2c_dev_module_configured = Path::new("/etc/modules-load.d/i2c-dev.conf").exists();
+    let nct6775_module_configured = Path::new("/etc/modules-load.d/nct6775.conf").exists();
+    let logi_udev_configured = Path::new("/etc/udev/rules.d/70-logi-osd.rules").exists()
+        || Path::new("/etc/udev/rules.d/70-cosmic-cosmetics-logi.rules").exists()
+        || Path::new("/usr/lib/udev/rules.d/42-logitech-unify-permissions.rules").exists();
+
+    let backup_restic_installed = home.join(".local/bin/backup-restic").exists();
+    let backup_restic_timer_active = is_unit_active("backup-restic.timer", false).await;
+    let backup_drive_mounted = Path::new("/mnt/devdrive/backup-restic").exists()
+        || Path::new("/mnt/devdrive").read_dir().is_ok_and(|mut d| d.next().is_some());
+    let snapper_timer_active = is_unit_active("snapper-timeline.timer", true).await;
+    let fstrim_timer_active = is_unit_active("fstrim.timer", true).await;
+    let claude_sync_installed = home.join("claude-migracao/sincronizar_contas.py").exists();
+    let claude_sync_active = is_unit_active("claude-sync-contas.timer", false).await
+        || is_unit_active("claude-sync-contas.path", false).await;
 
     SystemSnapshot {
         hardware,
@@ -735,6 +769,18 @@ pub async fn load_snapshot() -> SystemSnapshot {
         wallpapers_watcher_active,
         pwa_watcher_active,
         update_timer_active,
+        audio_modprobe_configured,
+        rapl_udev_configured,
+        i2c_dev_module_configured,
+        nct6775_module_configured,
+        logi_udev_configured,
+        backup_restic_installed,
+        backup_restic_timer_active,
+        backup_drive_mounted,
+        snapper_timer_active,
+        fstrim_timer_active,
+        claude_sync_installed,
+        claude_sync_active,
     }
 }
 
