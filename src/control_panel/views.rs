@@ -11,11 +11,11 @@ use cosmic::{
 
 use crate::central::{
     bar_spacing::BarSpacing,
-    layout::Section as CentralSection,
+    layout::{Section as CentralSection, Show as BarShow},
     monitor::config::{
         BarItem as MonitorBarItem, BarMode as MonitorBarMode, CardMode as MonitorCardMode,
-        POLL_SECS_OPTIONS, PROCS_COUNT_OPTIONS, PollComponent as MonitorPollComponent,
-        ProcSort as MonitorProcSort, WEATHER_MINS_OPTIONS,
+        POLL_SECS_OPTIONS, PROCS_COUNT_OPTIONS, Panel as MonitorPanel,
+        PollComponent as MonitorPollComponent, ProcSort as MonitorProcSort, WEATHER_MINS_OPTIONS,
     },
     notifications::config::{
         self as notif_cfg, NotifFormat, NotifPosition, TIMEOUT_OPTIONS, parse_hex_color,
@@ -1856,6 +1856,190 @@ fn backup_view(app: &ControlPanel) -> Element<'_, Message> {
     widget::column::with_children(items).spacing(spacing.space_m).into()
 }
 
+#[derive(Clone, Copy)]
+enum TileTone {
+    /// Always visible / Expanded (vibrant emerald/teal)
+    Teal,
+    /// Compact (cool sky blue)
+    Blue,
+    /// Active-only / Minimal (warm amber)
+    Amber,
+    /// Never / Hidden (dim neutral gray)
+    Muted,
+}
+
+impl TileTone {
+    fn colors(self) -> (Color, Color, Color) {
+        // (card_bg, border, pill_fg)
+        match self {
+            TileTone::Teal => (
+                Color::from_rgba(0.16, 0.72, 0.56, 0.16),
+                Color::from_rgba(0.24, 0.82, 0.65, 0.48),
+                Color::from_rgb(0.32, 0.90, 0.72),
+            ),
+            TileTone::Blue => (
+                Color::from_rgba(0.24, 0.58, 0.96, 0.16),
+                Color::from_rgba(0.34, 0.66, 0.98, 0.48),
+                Color::from_rgb(0.46, 0.76, 1.0),
+            ),
+            TileTone::Amber => (
+                Color::from_rgba(0.95, 0.70, 0.18, 0.15),
+                Color::from_rgba(0.96, 0.74, 0.26, 0.46),
+                Color::from_rgb(0.98, 0.80, 0.36),
+            ),
+            TileTone::Muted => (
+                Color::from_rgba(0.50, 0.50, 0.55, 0.08),
+                Color::from_rgba(0.50, 0.50, 0.55, 0.22),
+                Color::from_rgba(0.75, 0.75, 0.80, 0.72),
+            ),
+        }
+    }
+}
+
+fn tone_pill<'a>(label: &'a str, tone: TileTone) -> Element<'a, Message> {
+    let (bg, _, fg) = tone.colors();
+    let pill_bg = Color { a: (bg.a * 1.45).min(0.35), ..bg };
+    widget::container(widget::text::caption(label).size(11))
+        .padding([2, 8])
+        .class(theme::Container::custom(move |_| widget::container::Style {
+            background: Some(Background::Color(pill_bg)),
+            text_color: Some(fg),
+            border: iced::Border {
+                radius: 999.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }))
+        .into()
+}
+
+fn draggable_grid_tile<'a>(
+    icon_name: &'static str,
+    title: &'a str,
+    status_label: &'a str,
+    tone: TileTone,
+    is_dragging_this: bool,
+    any_dragging: bool,
+    on_cycle: Message,
+    on_drag_start: Message,
+    on_drag_over: Message,
+) -> Element<'a, Message> {
+    let (bg, border_col, _) = tone.colors();
+    let grip = widget::mouse_area(
+        widget::container(widget::icon::icon(icon("view-app-grid-symbolic")).size(12))
+            .padding([3, 4]),
+    )
+    .on_press(on_drag_start)
+    .interaction(if is_dragging_this {
+        iced::mouse::Interaction::Grabbing
+    } else {
+        iced::mouse::Interaction::Grab
+    });
+
+    let top_bar = widget::row::with_children(vec![
+        grip.into(),
+        widget::space::horizontal().width(Length::Fill).into(),
+        tone_pill(status_label, tone),
+    ])
+    .align_y(Alignment::Center);
+
+    let body_btn = button::custom(
+        widget::column::with_children(vec![
+            widget::icon::icon(icon(icon_name)).size(24).into(),
+            widget::text::caption(title)
+                .font(cosmic::font::semibold())
+                .align_x(Alignment::Center)
+                .into(),
+        ])
+        .spacing(6)
+        .align_x(Alignment::Center)
+        .width(Length::Fill),
+    )
+    .padding([6, 4])
+    .width(Length::Fill)
+    .class(theme::Button::Text)
+    .on_press(on_cycle);
+
+    let tile_content = widget::column::with_children(vec![top_bar.into(), body_btn.into()])
+        .spacing(4)
+        .width(Length::Fill);
+
+    let card_el = widget::container(tile_content)
+        .padding([8, 10])
+        .width(Length::Fill)
+        .class(theme::Container::custom(move |theme| {
+            let mut text_col: Color = theme.cosmic().background(theme.transparent).on.into();
+            if matches!(tone, TileTone::Muted) {
+                text_col.a *= 0.62;
+            }
+            let (b_width, b_color) = if is_dragging_this {
+                (2.0, theme.cosmic().accent_color().into())
+            } else {
+                (1.0, border_col)
+            };
+            widget::container::Style {
+                background: Some(Background::Color(bg)),
+                text_color: Some(text_col),
+                icon_color: Some(text_col),
+                border: iced::Border {
+                    radius: crate::shared::tokens::POPUP_RADIUS.into(),
+                    width: b_width,
+                    color: b_color,
+                },
+                ..Default::default()
+            }
+        }));
+
+    let mut area = widget::mouse_area(card_el).on_enter(on_drag_over);
+    if any_dragging {
+        area = area.interaction(iced::mouse::Interaction::Grabbing);
+    }
+    area.into()
+}
+
+fn tile_grid<'a>(tiles: Vec<Element<'a, Message>>, cols: usize) -> Element<'a, Message> {
+    let mut rows: Vec<Element<'a, Message>> = Vec::new();
+    let mut iter = tiles.into_iter();
+    loop {
+        let mut line: Vec<Element<'a, Message>> = Vec::with_capacity(cols);
+        for _ in 0..cols {
+            if let Some(el) = iter.next() {
+                line.push(el);
+            }
+        }
+        if line.is_empty() {
+            break;
+        }
+        while line.len() < cols {
+            line.push(widget::space::horizontal().width(Length::Fill).into());
+        }
+        rows.push(
+            widget::row::with_children(line)
+                .spacing(10)
+                .width(Length::Fill)
+                .into(),
+        );
+    }
+    widget::column::with_children(rows)
+        .spacing(10)
+        .width(Length::Fill)
+        .into()
+}
+
+fn monitor_panel_icon(panel: MonitorPanel) -> &'static str {
+    match panel {
+        MonitorPanel::Energy => "battery-good-symbolic",
+        MonitorPanel::Cpu => "computer-symbolic",
+        MonitorPanel::Gpu => "video-display-symbolic",
+        MonitorPanel::Memory => "media-memory-symbolic",
+        MonitorPanel::Disks => "drive-harddisk-symbolic",
+        MonitorPanel::Network => "network-wired-symbolic",
+        MonitorPanel::Sensors => "weather-clear-symbolic",
+        MonitorPanel::Processes => "utilities-system-monitor-symbolic",
+        MonitorPanel::System => "emblem-system-symbolic",
+    }
+}
+
 fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
     let spacing = theme::spacing();
     let mut items: Vec<Element<'_, Message>> = vec![
@@ -1886,74 +2070,58 @@ fn bar_view(app: &ControlPanel) -> Element<'_, Message> {
         .align_y(Alignment::Center),
     ));
 
-    // Reorderable system bar icons with 9-dot drag handle
+    // Reorderable system bar icons as a phone-style color-coded tile grid
     let ordered = app.panel_icons.ordered(&app.reorderable_bar_items());
     let dragging = app.dragging_bar;
-    let mut icon_rows: Vec<Element<'_, Message>> = vec![
-        widget::text::heading("Ícones do sistema na barra (arraste pelos 9 pontos para reordenar)")
+    let legend = widget::row::with_children(vec![
+        widget::text::caption("Clique no card para alternar · Arraste pelos pontos para reordenar")
+            .class(theme::Text::Custom(dimmed))
+            .width(Length::Fill)
             .into(),
-    ];
-    for item in ordered {
-        let current = app.panel_icons.get(item);
-        let active_drag = dragging == Some(item);
-        let grip = widget::mouse_area(
-            widget::container(widget::icon::icon(icon("view-app-grid-symbolic")).size(14))
-                .padding([4, 4]),
-        )
-        .on_press(Message::DragBarStart(item))
-        .interaction(if active_drag {
-            iced::mouse::Interaction::Grabbing
-        } else {
-            iced::mouse::Interaction::Grab
-        });
-        let choices = widget::row::with_children(
-            item.choices()
+        tone_pill("Sempre", TileTone::Teal),
+        tone_pill("Ativo", TileTone::Amber),
+        tone_pill("Nunca", TileTone::Muted),
+    ])
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    let tiles: Vec<Element<'_, Message>> = ordered
+        .into_iter()
+        .map(|item| {
+            let current = app.panel_icons.get(item);
+            let choices = item.choices();
+            let next = choices
                 .iter()
-                .map(|&show| {
-                    button::custom(widget::text::caption(show.name()))
-                        .padding([4, 8])
-                        .class(chip_class(show == current))
-                        .on_press(Message::SetBarIcon(item, show))
-                        .into()
-                })
-                .collect::<Vec<_>>(),
-        )
-        .spacing(4);
-        let row = widget::row::with_children(vec![
-            grip.into(),
-            widget::icon::icon(icon(item.icon())).size(16).into(),
-            widget::text::body(item.name()).width(Length::Fill).into(),
-            choices.into(),
+                .position(|&c| c == current)
+                .map(|idx| choices[(idx + 1) % choices.len()])
+                .unwrap_or(choices[0]);
+            let (tone, status_label) = match current {
+                BarShow::Always => (TileTone::Teal, "Sempre"),
+                BarShow::Active => (TileTone::Amber, "Ativo"),
+                BarShow::Never => (TileTone::Muted, "Nunca"),
+            };
+            draggable_grid_tile(
+                item.icon(),
+                item.name(),
+                status_label,
+                tone,
+                dragging == Some(item),
+                dragging.is_some(),
+                Message::SetBarIcon(item, next),
+                Message::DragBarStart(item),
+                Message::DragBarOver(item),
+            )
+        })
+        .collect();
+
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Ícones do sistema na barra").into(),
+            legend.into(),
+            tile_grid(tiles, 4),
         ])
-        .spacing(10)
-        .align_y(Alignment::Center);
-        let styled: Element<'_, Message> = if active_drag {
-            widget::container(row)
-                .padding([4, 6])
-                .width(Length::Fill)
-                .class(theme::Container::custom(|theme| {
-                    let c = card(theme.cosmic());
-                    widget::container::Style {
-                        background: Some(Background::Color(c.hover.into())),
-                        border: iced::Border {
-                            radius: theme.cosmic().corner_radii.radius_s.into(),
-                            width: 1.0,
-                            color: theme.cosmic().accent_color().into(),
-                        },
-                        ..Default::default()
-                    }
-                }))
-                .into()
-        } else {
-            widget::container(row).padding([4, 6]).width(Length::Fill).into()
-        };
-        let mut area = widget::mouse_area(styled).on_enter(Message::DragBarOver(item));
-        if dragging.is_some() {
-            area = area.interaction(iced::mouse::Interaction::Grabbing);
-        }
-        icon_rows.push(area.into());
-    }
-    items.push(card_box(widget::column::with_children(icon_rows).spacing(4)));
+        .spacing(spacing.space_s),
+    ));
 
     // Saved Tray SNI hidden apps
     let mut tray_rows: Vec<Element<'_, Message>> = vec![
@@ -2088,79 +2256,62 @@ fn monitor_view(app: &ControlPanel) -> Element<'_, Message> {
     );
     items.push(card_box(widget::column::with_children(bar_rows).spacing(spacing.space_xs)));
 
-    // 2. Cards order (drag-and-drop with 9-dot handle) & 4 display modes
+    // 2. Cards order & 4 display modes as a 3×3 phone-style color-coded tile grid
     let dragging = app.dragging_monitor_card;
-    let mut panel_rows: Vec<Element<'_, Message>> = vec![
-        widget::text::heading(
-            "Cartões do painel da esquerda (arraste pelos 9 pontos para reordenar)",
-        )
-        .into(),
-        widget::text::caption(
-            "Escolha o modo de visualização de cada cartão: Expandido (completo), Compacto (resumo com barra), Reduzido (linha inline) ou Oculto.",
-        )
-        .class(theme::Text::Custom(dimmed))
-        .into(),
-    ];
-    for panel in app.monitor_settings.order.iter().copied() {
-        let current = app.monitor_settings.card_mode(panel);
-        let active_drag = dragging == Some(panel);
-        let grip = widget::mouse_area(
-            widget::container(widget::icon::icon(icon("view-app-grid-symbolic")).size(14))
-                .padding([4, 4]),
-        )
-        .on_press(Message::MonitorDragStart(panel))
-        .interaction(if active_drag {
-            iced::mouse::Interaction::Grabbing
-        } else {
-            iced::mouse::Interaction::Grab
-        });
-        let mode_chips = widget::row::with_children(
-            MonitorCardMode::ALL
-                .into_iter()
-                .map(|mode| {
-                    small_chip(
-                        mode.name(),
-                        current == mode,
-                        Message::MonitorCardMode(panel, mode),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )
-        .spacing(4);
-        let row = widget::row::with_children(vec![
-            grip.into(),
-            widget::text::body(panel.name()).width(Length::Fill).into(),
-            mode_chips.into(),
+    let mon_legend = widget::row::with_children(vec![
+        widget::text::caption("Clique no card para alternar o modo · Arraste pelos pontos para reordenar")
+            .class(theme::Text::Custom(dimmed))
+            .width(Length::Fill)
+            .into(),
+        tone_pill("Expandido", TileTone::Teal),
+        tone_pill("Compacto", TileTone::Blue),
+        tone_pill("Reduzido", TileTone::Amber),
+        tone_pill("Oculto", TileTone::Muted),
+    ])
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    let mon_tiles: Vec<Element<'_, Message>> = app
+        .monitor_settings
+        .order
+        .iter()
+        .copied()
+        .map(|panel| {
+            let current = app.monitor_settings.card_mode(panel);
+            let next = match current {
+                MonitorCardMode::Full => MonitorCardMode::Compact,
+                MonitorCardMode::Compact => MonitorCardMode::Minimal,
+                MonitorCardMode::Minimal => MonitorCardMode::Hidden,
+                MonitorCardMode::Hidden => MonitorCardMode::Full,
+            };
+            let (tone, status_label) = match current {
+                MonitorCardMode::Full => (TileTone::Teal, "Expandido"),
+                MonitorCardMode::Compact => (TileTone::Blue, "Compacto"),
+                MonitorCardMode::Minimal => (TileTone::Amber, "Reduzido"),
+                MonitorCardMode::Hidden => (TileTone::Muted, "Oculto"),
+            };
+            draggable_grid_tile(
+                monitor_panel_icon(panel),
+                panel.name(),
+                status_label,
+                tone,
+                dragging == Some(panel),
+                dragging.is_some(),
+                Message::MonitorCardMode(panel, next),
+                Message::MonitorDragStart(panel),
+                Message::MonitorDragOver(panel),
+            )
+        })
+        .collect();
+
+    items.push(card_box(
+        widget::column::with_children(vec![
+            widget::text::heading("Cartões do painel da esquerda").into(),
+            mon_legend.into(),
+            tile_grid(mon_tiles, 3),
         ])
-        .spacing(10)
-        .align_y(Alignment::Center);
-        let styled: Element<'_, Message> = if active_drag {
-            widget::container(row)
-                .padding([4, 6])
-                .width(Length::Fill)
-                .class(theme::Container::custom(|theme| {
-                    let c = card(theme.cosmic());
-                    widget::container::Style {
-                        background: Some(Background::Color(c.hover.into())),
-                        border: iced::Border {
-                            radius: theme.cosmic().corner_radii.radius_s.into(),
-                            width: 1.0,
-                            color: theme.cosmic().accent_color().into(),
-                        },
-                        ..Default::default()
-                    }
-                }))
-                .into()
-        } else {
-            widget::container(row).padding([4, 6]).width(Length::Fill).into()
-        };
-        let mut area = widget::mouse_area(styled).on_enter(Message::MonitorDragOver(panel));
-        if dragging.is_some() {
-            area = area.interaction(iced::mouse::Interaction::Grabbing);
-        }
-        panel_rows.push(area.into());
-    }
-    items.push(card_box(widget::column::with_children(panel_rows).spacing(4)));
+        .spacing(spacing.space_s),
+    ));
 
     // 3. Individual component refresh intervals
     let mut comp_rows: Vec<Element<'_, Message>> = vec![
