@@ -6,9 +6,19 @@
 #    (and Super+A, Super+/) opens it, Super+X its tools (Win+X), and its
 #    button takes the place of the launcher's and the library's in the panel;
 #  - the workspaces' button with the taskbar's zoom, where COSMIC's is.
-#   ./setup.sh          -> use them
-#   ./setup.sh --undo   -> back to COSMIC's own
+#   ./setup.sh                      -> use them (offers boot greeter if interactive)
+#   ./setup.sh --with-boot-greeter  -> also enable custom boot login screen (sudo)
+#   ./setup.sh --undo               -> back to COSMIC's own
 set -e
+script_dir="$(dirname "$0")"
+with_boot_greeter=0
+undo_mode=0
+for arg in "$@"; do
+    case "$arg" in
+        --undo) undo_mode=1 ;;
+        --with-boot-greeter) with_boot_greeter=1 ;;
+    esac
+done
 bin="${BIN:-$HOME/.local/bin/cosmic-taskbar}"
 cfg="${XDG_CONFIG_HOME:-$HOME/.config}/cosmic"
 panel="$cfg/com.system76.CosmicPanel.Panel/v1"
@@ -21,9 +31,9 @@ theirs=com.system76.CosmicAppList
 workspaces=io.github.Aenes0.CosmicWorkspacesButton
 their_workspaces=com.system76.CosmicPanelWorkspacesButton
 menu_service="(cosmic-taskbar|cosmic-ext-applet-start) --menu$"
-. "$(dirname "$0")/scripts/corner_wings.sh"
+. "$script_dir/scripts/corner_wings.sh"
 
-if [ "$1" = "--undo" ]; then
+if [ "$undo_mode" -eq 1 ]; then
     corner_undo "$panel/plugins_wings"
     rm -f "$actions"
     [ -f "$actions.bak" ] && mv "$actions.bak" "$actions"
@@ -126,4 +136,18 @@ if grep -qs "\"$ours\"" "$panel/plugins_center" "$panel/plugins_wings"; then
     echo "Taskbar and Start menu set: press Super."
 else
     echo "No app tray in the panel: add \"Taskbar\" in Settings > Desktop > Panel > Applets."
+fi
+
+if [ -x "$script_dir/extras/greeter/apply-greeter.sh" ]; then
+    if [ "$with_boot_greeter" -eq 1 ]; then
+        sudo "$script_dir/extras/greeter/apply-greeter.sh" --user "${USER:-$(id -un)}"
+    elif [ -t 0 ] && ! systemctl is-enabled --quiet aenes-greeter.service 2>/dev/null; then
+        printf 'Ativar também a tela de login customizada no boot (greetd, requer sudo)? [s/N] '
+        read -r ans
+        case "$ans" in
+            s|S|y|Y|sim|SIM)
+                sudo "$script_dir/extras/greeter/apply-greeter.sh" --user "${USER:-$(id -un)}"
+                ;;
+        esac
+    fi
 fi

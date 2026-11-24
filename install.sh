@@ -1,7 +1,8 @@
 #!/bin/sh
 # Build and install for the current user (default) or under another prefix:
-#   ./install.sh            -> ~/.local
-#   sudo ./install.sh /usr  -> system wide
+#   ./install.sh                      -> ~/.local (includes in-session aenes-greeter)
+#   ./install.sh --with-boot-greeter  -> also installs/enables boot login screen (sudo)
+#   sudo ./install.sh /usr            -> system wide
 #
 # One program, cosmic-taskbar, for every part; each part still runs in a
 # process of its own, from the panel or from its systemd unit, so one that
@@ -9,7 +10,26 @@
 # and the panels' watchdog).
 set -e
 cd "$(dirname "$0")"
-prefix="${1:-$HOME/.local}"
+prefix=""
+with_boot_greeter=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-boot-greeter) with_boot_greeter=1 ;;
+        -h|--help)
+            echo "Uso: ./install.sh [PREFIX] [--with-boot-greeter]"
+            exit 0
+            ;;
+        *)
+            if [ -z "$prefix" ]; then
+                prefix="$arg"
+            else
+                echo "Argumento desconhecido: $arg" >&2
+                exit 1
+            fi
+            ;;
+    esac
+done
+prefix="${prefix:-$HOME/.local}"
 bin=cosmic-taskbar
 bindir="$prefix/bin"
 
@@ -118,4 +138,16 @@ if [ "$prefix" = "$HOME/.local" ]; then
     mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/cosmic-taskbar"
     printf '%s\n' "$PWD" > "${XDG_CONFIG_HOME:-$HOME/.config}/cosmic-taskbar/repo_path"
 fi
+if [ "$with_boot_greeter" -eq 1 ] && [ -x "extras/greeter/apply-greeter.sh" ]; then
+    echo "Applying isolated boot login screen (aenes-greeter)..."
+    if [ "$(id -u)" -eq 0 ]; then
+        ./extras/greeter/apply-greeter.sh
+    else
+        sudo ./extras/greeter/apply-greeter.sh --user "${USER:-$(id -un)}"
+    fi
+fi
+
 echo "Installed. Run ./setup.sh to use the taskbar and the Start menu in the panel."
+if [ "$with_boot_greeter" -eq 0 ] && [ "$prefix" = "$HOME/.local" ] && ! systemctl is-enabled --quiet aenes-greeter.service 2>/dev/null; then
+    echo "Tip: run ./install.sh --with-boot-greeter (or use Control Panel > Tela de Login) to also enable the custom login screen at boot."
+fi
